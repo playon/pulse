@@ -1719,25 +1719,7 @@ function renderDashboard() {
   const disk = _systemDiskPct(perf);
   const temp = perf.temperature?.celsius;
 
-  const warnCount = findings.filter((f) => f.severity === "warning").length;
-  const critCount = findings.filter((f) => f.severity === "critical").length;
   const totalFindings = findings.length;
-  const sevColor = critCount > 0 ? "critical" : warnCount > 0 ? "warn" : "ok";
-
-  // Show BOTH counts (e.g. "2 Critical · 5 Warnings"), not just the highest.
-  const _critTxt = critCount > 0 ? `${critCount} Critical` : "";
-  const _warnTxt = warnCount > 0 ? `${warnCount} Warning${warnCount === 1 ? "" : "s"}` : "";
-  const sevLabel = (critCount || warnCount)
-    ? [_critTxt, _warnTxt].filter(Boolean).join(" · ")
-    : "All Clear";
-  // Two-tone version for the big Command Center heading — critical in red,
-  // warnings in amber, so the split reads at a glance.
-  const sevHtml = (critCount || warnCount)
-    ? [
-        critCount > 0 ? `<span class="cc-sev-crit">${critCount} Critical</span>` : "",
-        warnCount > 0 ? `<span class="cc-sev-warn">${warnCount} Warning${warnCount === 1 ? "" : "s"}</span>` : "",
-      ].filter(Boolean).join(`<span class="cc-sev-sep">·</span>`)
-    : `<span class="cc-sev-ok">All Clear</span>`;
 
   // Findings are shown in a single consolidated list, grouped by severity
   // (critical first, then warning, then info) — the natural triage order.
