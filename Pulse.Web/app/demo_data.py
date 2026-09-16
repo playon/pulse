@@ -1243,6 +1243,52 @@ DEMO = {
         "registryValueName": "dependencies",
         "registryKeyPresent": True,
     },
+    "Get-CoordinatorHealth.ps1": lambda **kw: {
+        # Healthy shape, but WITH the previous failure still inside the lookback
+        # window - that is what a unit looks like shortly after the watchdog
+        # task was run to fix it, and it exercises the card's history line
+        # without firing a critical the live checks would contradict.
+        # Shape mirrors a real 5.37.1 VPU (measured 2026-09-16).
+        "verdict": "ok",
+        "watchdogTask": {
+            "present": True,
+            "state": "Running",
+            "runAs": "Pixellot",
+            "runLevel": "Highest",
+            "elevated": True,
+            "repeatIntervalMinutes": 1,
+            "action": "C:\\Pixellot\\bin\\KeepAgentUp.exe",
+            "source": "Get-ScheduledTask",
+        },
+        "processes": [
+            {"name": "KeepAgentUp", "pidFirst": 9940, "pidSecond": 9940,
+             "running": True, "cycling": False, "owner": "VPU\\Pixellot"},
+            {"name": "Agent", "pidFirst": 11324, "pidSecond": 11324,
+             "running": True, "cycling": False, "owner": "VPU\\Pixellot"},
+            {"name": "Coordinator", "pidFirst": 10596, "pidSecond": 10596,
+             "running": True, "cycling": False, "owner": "VPU\\Pixellot"},
+        ],
+        "websocket": {
+            "port": 9001,
+            "prefix": "http://+:9001/",
+            "listening": True,
+            "bindOk": 1,
+            "bindFailed": 9,
+            "fatalNoComms": 9,
+            "lastError": "Error | 2026-09-16 15:49:55.211 |Coordinator Main |WebSocketServer.cs(218) |Start |exception encountered while starting websocket server : Access is denied   at System.Net.HttpListener.AddAllPrefixes()",
+            "lastErrorTime": "2026-09-16 15:49:55",
+            "firstErrorTime": "2026-09-16 15:49:13",
+            "lastBindOkTime": "2026-09-16 15:50:42",
+            "logFile": "Coordinator_vpu_20260916_000004.log",
+            "urlAclPresent": False,
+            "urlAclDetail": None,
+        },
+        "uacEnabled": True,
+        "sampleSeconds": 6,
+        "hoursBack": 6,
+        "findings": [],
+        "notes": "Port 9001 is always owned by PID 4 (HTTP.SYS); listener ownership is not a health signal.",
+    },
     "Test-PixellotInstallState.ps1": lambda **kw: {
         "dirExists": True,
         "dir": "C:\\pixellot\\downloadedversion",

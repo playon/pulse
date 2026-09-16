@@ -5646,10 +5646,98 @@ function renderServices() {
       <div id="svc-keepagent-result" class="svc-quick-action-result hidden"></div>
     </div>
 
+    <!-- Coordinator websocket-bind health (HTTP.SYS prefix + KeepAgentUp task). -->
+    <!-- Filled in async by the /api/services/coordinator-health call below. -->
+    <div id="svc-coord-health" class="card hidden"></div>
+
     <div id="svc-sections">
       ${svcSectionsHtml(svcs)}
     </div>
   `;
+
+  // Coordinator websocket-bind health. Separate call because the collector
+  // sleeps ~6s between its two process samples - a single point-in-time check
+  // reports a restarting Coordinator as "Running", which is how this fault
+  // hid in the field. Never blocks the rest of the tab.
+  (async () => {
+    const r = await api("/api/services/coordinator-health");
+    if (currentPage !== "services") return;
+    const box = document.getElementById("svc-coord-health");
+    if (!box || !r || r.error) return;
+    if (r.verdict === "not-installed") return;
+    box.classList.remove("hidden");
+
+    const ws = r.websocket || {};
+    const task = r.watchdogTask || {};
+    const findings = r.findings || [];
+    const bad = findings.length > 0;
+
+    const verdictLabels = {
+      "ok": "Coordinator is serving its websocket",
+      "websocket-denied": "Coordinator cannot bind its websocket",
+      "cycling": "Coordinator is restarting in a loop",
+      "coordinator-down": "Coordinator is not running",
+      "watchdog-task-missing": "Watchdog task is missing",
+      "watchdog-task-disabled": "Watchdog task is disabled",
+      "watchdog-task-not-elevated": "Watchdog task is not elevated",
+      "error": "Check could not complete",
+    };
+    const headline = verdictLabels[r.verdict] || esc(String(r.verdict || "unknown"));
+
+    // Task line. RunLevel is the actionable field: Highest is the elevated
+    // token Coordinator inherits, and anything else breaks the bind.
+    let taskLine;
+    if (!task.present) {
+      taskLine = `<span class="font-mono">KeepAgentUp task not found</span>`;
+    } else {
+      const lvl = task.runLevel || "unknown";
+      const lvlNote = task.elevated === true ? "elevated"
+        : task.elevated === false ? "NOT elevated"
+        : "elevation unknown";
+      taskLine = `<span class="font-mono">${esc(String(task.state || "?"))}</span> &middot; runs as
+        <span class="font-mono">${esc(String(task.runAs || "?"))}</span> &middot; RunLevel
+        <span class="font-mono">${esc(String(lvl))}</span> (${esc(lvlNote)})`;
+    }
+
+    const procLine = (r.processes || []).map(pr => {
+      const state = pr.cycling ? "restarting"
+        : pr.running ? `PID ${esc(String(pr.pidSecond))}`
+        : "not running";
+      return `${esc(pr.name)}: <span class="font-mono">${state}</span>`;
+    }).join(" &middot; ");
+
+    const windowNote = `last ${esc(String(r.hoursBack))}h`;
+    const bindLine = `port ${esc(String(ws.port || 9001))}
+      <span class="font-mono">${ws.listening ? "held" : "NOT held"}</span>
+      &middot; ${esc(String(ws.bindFailed || 0))} failed / ${esc(String(ws.bindOk || 0))} successful binds (${windowNote})`;
+
+    const history = (!bad && ws.bindFailed > 0 && ws.lastBindOkTime)
+      ? `<div class="text-xs mt-2 text-pulse-muted">Recovered: ${esc(String(ws.bindFailed))} failed
+           bind(s) ending ${esc(String(ws.lastErrorTime || "?"))}, then bound successfully at
+           ${esc(String(ws.lastBindOkTime))}.</div>`
+      : "";
+
+    const findingsHtml = findings.map(f => `
+      <div class="svc-quick-action-result svc-result-err mt-2">
+        <div class="font-semibold">${svgIcon("alert", 14)} ${esc(f.title)}</div>
+        <div class="text-sm mt-1">${esc(f.detail)}</div>
+        <div class="text-sm mt-1"><span class="font-semibold">Fix:</span> <span class="font-mono">${esc(f.remedy)}</span></div>
+      </div>`).join("");
+
+    box.innerHTML = `
+      <div class="svc-quick-action-row">
+        <div>
+          <div class="svc-quick-action-title">${svgIcon(bad ? "alert" : "check", 14)} ${headline}</div>
+          <div class="svc-quick-action-body">${bindLine}</div>
+          <div class="text-xs mt-1 text-pulse-muted">Watchdog task: ${taskLine}</div>
+          <div class="text-xs mt-1 text-pulse-muted">${procLine}</div>
+          ${history}
+        </div>
+      </div>
+      ${findingsHtml}
+      ${ws.lastError ? `<pre class="svc-result-output mt-2">${esc(String(ws.lastError))}</pre>` : ""}
+    `;
+  })();
 
   // Installed Pixellot Dependencies (Canopy/Leaf/getVpuDepsFromRegistry.ps1
   // adaptation). Fills the always-visible status line at the top of the tab.

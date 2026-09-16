@@ -24,6 +24,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 
 ### Added
 - The ScoreConnect page now says whether this VPU is protected against the known ScoreConnect III crash. Green means Windows restarts the service on its own; amber means it doesn't, and the scoreboard will stay dark until someone restarts it by hand. It also shows how many crashes Windows has already caught for you.
+- The Service Status page now explains why a VPU shows offline in the cloud while the Agent looks fine. If Coordinator can't claim its websocket port, Pulse says so, names the cause (the watchdog is running without administrator rights) and gives you the one command that fixes it. It also flags the underlying problem — a KeepAgentUp scheduled task that is missing, disabled, or not set to run as administrator — which is what puts a unit into this state in the first place. Pulse checks twice a few seconds apart, so a Coordinator that is restarting in a loop no longer reports as healthy.
 - Pulse now reads LogMeIn's own log for proof the venue is blocking remote support. Repeated killed handshakes on LogMeIn's gateway connections raise a warning with the timeline you can hand venue IT, and after IT lifts the block, the Network tab shows exactly when the unit came back — even though the live test now passes.
 
 ### Changed
