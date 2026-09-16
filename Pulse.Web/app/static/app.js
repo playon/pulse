@@ -5636,7 +5636,7 @@ function renderServices() {
         <div>
           <div class="svc-quick-action-title">Restart Agent + Coordinator</div>
           <div class="svc-quick-action-body">
-            The documented first fix when the Pixellot Agent or Coordinator stops responding. Try it before escalating for a hardware return (RMA). <span class="font-mono">Runs c:\\pixellot\\bin\\keepagentup.exe.</span>
+            The documented first fix when the Pixellot Agent or Coordinator stops responding. Try it before escalating for a hardware return (RMA). <span class="font-mono">Runs the KeepAgentUp scheduled task,</span> which starts the watchdog with the administrator rights the Coordinator needs.
           </div>
         </div>
         <button class="btn-outline btn-ol-blue" id="svc-keepagent-btn" title="Documented first-line remedy when Agent/Coordinator is unresponsive">
@@ -5809,20 +5809,43 @@ function renderServices() {
     btn.innerHTML = `${svgIcon("zap", 14)} Restart Agent + Coordinator`;
 
     const ok2 = r && r.success;
-    // keepagentup exits 0 without doing anything when its resident watchdog
-    // instance is already running — that's "nothing happened", not success.
-    const resident = r && r.watchdogResident;
-    resultEl.className = "svc-quick-action-result " +
-      (ok2 ? "svc-result-ok" : resident ? "svc-result-warn" : "svc-result-err");
-    const heading = ok2 ? svgIcon("check", 14) + " Success"
-      : resident ? svgIcon("alert", 14) + " Not restarted, the watchdog is already running"
-      : svgIcon("alert", 14) + " Failed";
+    // A resident watchdog exits 0 without restarting anything. That is only
+    // good news when agent AND coordinator are actually up, so the verdict -
+    // not the exit code and not the resident flag - drives what we say.
+    // "watchdog-resident-but-down" is the dangerous case the old wording
+    // reported as a harmless no-op.
+    const verdict = (r && r.verdict) || (ok2 ? "restarted" : "failed");
+    const headings = {
+      "restarted": [svgIcon("check", 14) + " Agent and Coordinator restarted", "svc-result-ok"],
+      "already-healthy": [svgIcon("check", 14) + " Nothing needed restarting", "svc-result-ok"],
+      "watchdog-resident-but-down": [svgIcon("alert", 14) + " The watchdog is running but not keeping the stack up", "svc-result-err"],
+      "cycling": [svgIcon("alert", 14) + " Restarting in a loop, not staying up", "svc-result-err"],
+      "still-down": [svgIcon("alert", 14) + " Did not come back up", "svc-result-err"],
+      "refused-not-elevated": [svgIcon("alert", 14) + " Not run - Pulse needs administrator rights", "svc-result-warn"],
+      "not-installed": [svgIcon("alert", 14) + " Pixellot not found", "svc-result-warn"],
+      "error": [svgIcon("alert", 14) + " Check could not complete", "svc-result-err"],
+    };
+    const [heading, cls] = headings[verdict] || [svgIcon("alert", 14) + " Failed", "svc-result-err"];
+    resultEl.className = "svc-quick-action-result " + cls;
+
+    const task = (r && r.watchdogTask) || {};
+    const taskNote = task.present === false
+      ? `<div class="text-xs mt-1 text-pulse-muted">Watchdog task: <span class="font-mono">missing</span></div>`
+      : task.state
+        ? `<div class="text-xs mt-1 text-pulse-muted">Watchdog task: <span class="font-mono">${esc(String(task.state))}</span>${task.runLevel ? ` &middot; RunLevel <span class="font-mono">${esc(String(task.runLevel))}</span>` : ""}${r?.method === "task" ? " (started through the task)" : ""}</div>`
+        : "";
+
     resultEl.innerHTML = `
       <div class="font-semibold">${heading}</div>
       <div class="text-sm mt-1">${esc(r?.message || "(no message)")}</div>
+      ${r?.remedy ? `<div class="text-sm mt-1"><span class="font-semibold">Fix:</span> <span class="font-mono">${esc(r.remedy)}</span></div>` : ""}
       ${r?.agentStatus ? `<div class="text-xs mt-2 text-pulse-muted">Agent: <span class="font-mono">${esc(r.agentStatus)}</span> &middot; Coordinator: <span class="font-mono">${esc(r.coordinatorStatus || "?")}</span></div>` : ""}
+      ${taskNote}
       ${r?.stdout ? `<pre class="svc-result-output">${esc(r.stdout)}</pre>` : ""}
-      ${r?.stderr ? `<pre class="svc-result-output svc-result-stderr">${esc(r.stderr)}</pre>` : ""}
+      ${r?.stderr ? (r.stderrBenign
+        ? `<div class="text-xs mt-2 text-pulse-muted">Pixellot's logger always throws this as it exits. It is harmless and does not mean the restart failed.</div>
+           <pre class="svc-result-output">${esc(r.stderr)}</pre>`
+        : `<pre class="svc-result-output svc-result-stderr">${esc(r.stderr)}</pre>`) : ""}
     `;
 
     if (ok2) {

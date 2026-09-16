@@ -1309,17 +1309,38 @@ DEMO = {
     # already running, so a manual run exits 0 without restarting anything.
     # ("KeekAgentUp" is Pixellot's typo, verbatim from the real exe.)
     "Restart-PixellotAgent.ps1": lambda **kw: {
-        "success": False,
+        # Demo shows the benign no-op: the watchdog was already running AND
+        # both processes are up, so nothing needed restarting. The dangerous
+        # variant of the same stdout - watchdog resident while agent or
+        # coordinator is DOWN - is verdict "watchdog-resident-but-down", which
+        # is a failure with a remedy rather than a reassuring note.
+        "success": True,
+        "verdict": "already-healthy",
+        "method": "task",
+        "watchdogTask": {
+            "present": True,
+            "state": "Running",
+            "runLevel": "Highest",
+            "elevated": True,
+        },
+        "pulseElevated": True,
         "watchdogResident": True,
         "exitCode": 0,
         "path": "C:\\pixellot\\bin\\keepagentup.exe",
         "stdout": 'KeekAgentUp Exit as another "KeekAgentUp" process is running',
         "stderr": "",
+        "stderrBenign": False,
         "agentStatus": "Running (process, PID 7772)",
         "coordinatorStatus": "Running (process, PID 6140)",
+        "agentStatusBefore": "Running (process, PID 7772)",
+        "coordinatorStatusBefore": "Running (process, PID 6140)",
         "agentPidBefore": 7772,
         "agentPidAfter": 7772,
-        "message": "The keepagentup watchdog is already resident on this VPU, so this run exited without restarting anything. The agent was NOT restarted.",
+        "agentCycling": False,
+        "coordinatorCycling": False,
+        "sampleSeconds": 5,
+        "message": "The watchdog was already running, so nothing needed restarting. The Agent and Coordinator are both up.",
+        "remedy": None,
     },
     "Get-AudioDevices.ps1": lambda **kw: {
         "devices": [
