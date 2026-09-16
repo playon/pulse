@@ -4191,6 +4191,24 @@ async def api_dependencies():
     return await run_ps("Get-PixellotDependencies.ps1", timeout=10)
 
 
+@app.get("/api/services/coordinator-health")
+async def api_coordinator_health():
+    """Diagnoses the Coordinator websocket-bind failure and the KeepAgentUp
+    scheduled task behind it.
+
+    Coordinator serves http://+:9001/, an HTTP.SYS strong-wildcard prefix that
+    needs an elevated token (fleet VPUs carry no URL ACL for it). That token
+    comes from the KeepAgentUp task's RunLevel=Highest, so a watchdog started
+    by hand leaves Coordinator unable to bind and the VPU offline, with Agent
+    still up so the box looks half-alive. Reproduced on a real 5.37.1 VPU
+    2026-09-16; Pixellot ticket "Fatal Coordinator Errors - PXLS2_6179 Apex".
+
+    Takes ~8s: the collector samples process IDs twice, because a single
+    point-in-time check reports a restarting Coordinator as healthy.
+    """
+    return await run_ps("Get-CoordinatorHealth.ps1", timeout=45)
+
+
 @app.get("/api/disk-health")
 async def api_disk_health():
     return await run_ps("Get-DiskHealth.ps1")

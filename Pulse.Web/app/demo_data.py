@@ -1243,6 +1243,52 @@ DEMO = {
         "registryValueName": "dependencies",
         "registryKeyPresent": True,
     },
+    "Get-CoordinatorHealth.ps1": lambda **kw: {
+        # Healthy shape, but WITH the previous failure still inside the lookback
+        # window - that is what a unit looks like shortly after the watchdog
+        # task was run to fix it, and it exercises the card's history line
+        # without firing a critical the live checks would contradict.
+        # Shape mirrors a real 5.37.1 VPU (measured 2026-09-16).
+        "verdict": "ok",
+        "watchdogTask": {
+            "present": True,
+            "state": "Running",
+            "runAs": "Pixellot",
+            "runLevel": "Highest",
+            "elevated": True,
+            "repeatIntervalMinutes": 1,
+            "action": "C:\\Pixellot\\bin\\KeepAgentUp.exe",
+            "source": "Get-ScheduledTask",
+        },
+        "processes": [
+            {"name": "KeepAgentUp", "pidFirst": 9940, "pidSecond": 9940,
+             "running": True, "cycling": False, "owner": "VPU\\Pixellot"},
+            {"name": "Agent", "pidFirst": 11324, "pidSecond": 11324,
+             "running": True, "cycling": False, "owner": "VPU\\Pixellot"},
+            {"name": "Coordinator", "pidFirst": 10596, "pidSecond": 10596,
+             "running": True, "cycling": False, "owner": "VPU\\Pixellot"},
+        ],
+        "websocket": {
+            "port": 9001,
+            "prefix": "http://+:9001/",
+            "listening": True,
+            "bindOk": 1,
+            "bindFailed": 9,
+            "fatalNoComms": 9,
+            "lastError": "Error | 2026-09-16 15:49:55.211 |Coordinator Main |WebSocketServer.cs(218) |Start |exception encountered while starting websocket server : Access is denied   at System.Net.HttpListener.AddAllPrefixes()",
+            "lastErrorTime": "2026-09-16 15:49:55",
+            "firstErrorTime": "2026-09-16 15:49:13",
+            "lastBindOkTime": "2026-09-16 15:50:42",
+            "logFile": "Coordinator_vpu_20260916_000004.log",
+            "urlAclPresent": False,
+            "urlAclDetail": None,
+        },
+        "uacEnabled": True,
+        "sampleSeconds": 6,
+        "hoursBack": 6,
+        "findings": [],
+        "notes": "Port 9001 is always owned by PID 4 (HTTP.SYS); listener ownership is not a health signal.",
+    },
     "Test-PixellotInstallState.ps1": lambda **kw: {
         "dirExists": True,
         "dir": "C:\\pixellot\\downloadedversion",
@@ -1263,17 +1309,38 @@ DEMO = {
     # already running, so a manual run exits 0 without restarting anything.
     # ("KeekAgentUp" is Pixellot's typo, verbatim from the real exe.)
     "Restart-PixellotAgent.ps1": lambda **kw: {
-        "success": False,
+        # Demo shows the benign no-op: the watchdog was already running AND
+        # both processes are up, so nothing needed restarting. The dangerous
+        # variant of the same stdout - watchdog resident while agent or
+        # coordinator is DOWN - is verdict "watchdog-resident-but-down", which
+        # is a failure with a remedy rather than a reassuring note.
+        "success": True,
+        "verdict": "already-healthy",
+        "method": "task",
+        "watchdogTask": {
+            "present": True,
+            "state": "Running",
+            "runLevel": "Highest",
+            "elevated": True,
+        },
+        "pulseElevated": True,
         "watchdogResident": True,
         "exitCode": 0,
         "path": "C:\\pixellot\\bin\\keepagentup.exe",
         "stdout": 'KeekAgentUp Exit as another "KeekAgentUp" process is running',
         "stderr": "",
+        "stderrBenign": False,
         "agentStatus": "Running (process, PID 7772)",
         "coordinatorStatus": "Running (process, PID 6140)",
+        "agentStatusBefore": "Running (process, PID 7772)",
+        "coordinatorStatusBefore": "Running (process, PID 6140)",
         "agentPidBefore": 7772,
         "agentPidAfter": 7772,
-        "message": "The keepagentup watchdog is already resident on this VPU, so this run exited without restarting anything. The agent was NOT restarted.",
+        "agentCycling": False,
+        "coordinatorCycling": False,
+        "sampleSeconds": 5,
+        "message": "The watchdog was already running, so nothing needed restarting. The Agent and Coordinator are both up.",
+        "remedy": None,
     },
     "Get-AudioDevices.ps1": lambda **kw: {
         "devices": [
