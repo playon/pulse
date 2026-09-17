@@ -22,6 +22,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 
 ## [1.2.3] - 2026-09-17
 
+### Fixed
+- Pulse now keeps its own launcher up to date. `C:\Pulse\Pulse.bat` — what the Start Menu shortcut runs — was a frozen copy from whenever the unit was first set up, so fixes to the update steps (Chrome install, download, extract, install) never reached a VPU that already had Pulse. Each production launch now replaces it with the launcher that shipped in the installed release.
+
 ### Removed
 - The **Inspection Report** tab is gone. Everything it showed still lives on the Dashboard, Hardware, Network and Camera Connectivity tabs.
 
