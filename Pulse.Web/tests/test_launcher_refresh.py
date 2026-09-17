@@ -5,7 +5,10 @@ box that already has Pulse keeps its original outer launcher forever. The
 refresh replaces it from the release zip's bundled copy. What these cover is
 mostly what it must NOT do: never touch a dev/beta install (the bundled copy
 is the PRODUCTION launcher, so writing it would move the box's channel),
-never install a truncated launcher, and never leave a .new temp file behind.
+never install a truncated launcher, never leave a .new temp file behind, and
+above all never write while the launcher may still be running — cmd reads a
+.bat by byte offset, so that garbles the launch in progress (it did, on the
+bench, before run.bat started recording pulse-launch-done).
 
 Standard library only, like the other suites here:
 
@@ -16,6 +19,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 _APP_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app")
@@ -40,20 +44,33 @@ class TestLauncherRefresh(unittest.TestCase):
         self.bundled = os.path.join(self.root, "launcher", "run_pulse.bat")
 
         self._saved = (main.DEMO_MODE, main._web_root, main._BUNDLED_PROD_LAUNCHER,
-                       main._LAUNCHER_REFRESH_DELAY_SECS)
+                       main._LAUNCH_DONE_MARKER, main._LAUNCHER_REFRESH_POLL_SECS,
+                       main._LAUNCHER_REFRESH_MAX_WAIT_SECS,
+                       main._LAUNCHER_REFRESH_SETTLE_SECS)
         main.DEMO_MODE = False
         main._web_root = self.root
         main._BUNDLED_PROD_LAUNCHER = self.bundled
-        main._LAUNCHER_REFRESH_DELAY_SECS = 0  # don't make the suite wait
+        self.marker = os.path.join(self.root, "pulse-launch-done")
+        main._LAUNCH_DONE_MARKER = self.marker
+        # Don't make the suite wait on real launcher timing.
+        main._LAUNCHER_REFRESH_POLL_SECS = 0.01
+        main._LAUNCHER_REFRESH_MAX_WAIT_SECS = 0.05
+        main._LAUNCHER_REFRESH_SETTLE_SECS = 0
 
         self.write(self.pulse_bat, OLD_LAUNCHER)
         self.write(self.bundled, NEW_LAUNCHER)
         self.write(os.path.join(self.root, "VERSION"), b"web-v1.2.3\n")
         self.write(os.path.join(self.root, "CHANNEL"), b"production\n")
+        # The default fixture is a launch that finished: run.bat wrote the
+        # marker, so the launcher is gone and Pulse.bat is safe to replace.
+        self.started_at = time.time() - 5
+        self.write(self.marker, b"17/09/2026 23:30:00.00\n")
 
     def tearDown(self):
         (main.DEMO_MODE, main._web_root, main._BUNDLED_PROD_LAUNCHER,
-         main._LAUNCHER_REFRESH_DELAY_SECS) = self._saved
+         main._LAUNCH_DONE_MARKER, main._LAUNCHER_REFRESH_POLL_SECS,
+         main._LAUNCHER_REFRESH_MAX_WAIT_SECS,
+         main._LAUNCHER_REFRESH_SETTLE_SECS) = self._saved
         self._tmp.cleanup()
 
     @staticmethod
@@ -67,7 +84,7 @@ class TestLauncherRefresh(unittest.TestCase):
             return f.read()
 
     def run_refresh(self):
-        asyncio.run(main._refresh_installed_launcher())
+        asyncio.run(main._refresh_installed_launcher(self.started_at))
 
     # ── the happy path ───────────────────────────────────────
     def test_replaces_a_stale_launcher(self):
@@ -124,6 +141,37 @@ class TestLauncherRefresh(unittest.TestCase):
         main.DEMO_MODE = True
         self.run_refresh()
         self.assertEqual(self.read(self.pulse_bat), OLD_LAUNCHER)
+
+    # ── the launch-in-progress gate ──────────────────────────
+    def test_no_marker_means_no_write(self):
+        """No pulse-launch-done at all: the launcher may still be running, and
+        rewriting a .bat cmd is reading resumes it at a garbage byte offset."""
+        os.remove(self.marker)
+        self.run_refresh()
+        self.assertEqual(self.read(self.pulse_bat), OLD_LAUNCHER)
+
+    def test_marker_from_a_previous_launch_is_ignored(self):
+        """A marker older than this server's start says nothing about the cmd
+        running right now."""
+        self.started_at = time.time() + 60  # every existing marker is now stale
+        self.run_refresh()
+        self.assertEqual(self.read(self.pulse_bat), OLD_LAUNCHER)
+
+    def test_marker_written_late_still_counts(self):
+        """The common case: run.bat finishes after the server is already up."""
+        os.remove(self.marker)
+        self.started_at = time.time()
+
+        async def drive():
+            task = asyncio.ensure_future(
+                main._refresh_installed_launcher(self.started_at))
+            await asyncio.sleep(0)
+            self.write(self.marker, b"later\n")
+            await task
+
+        main._LAUNCHER_REFRESH_MAX_WAIT_SECS = 5
+        asyncio.run(drive())
+        self.assertEqual(self.read(self.pulse_bat), NEW_LAUNCHER)
 
     # ── failure containment ──────────────────────────────────
     def test_a_locked_target_fails_open(self):
