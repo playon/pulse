@@ -3978,27 +3978,25 @@ async def api_cameras_video_test(request: Request):
     global _LAST_FRAME_CAPTURE
 
     # Parse the body up front. {"ips": [...]} restricts the capture (per-camera
-    # Refresh); {"force": true} is an explicit override that relaxes BOTH guards
-    # below (cooldown + the vpu.exe interlock). Nothing in the UI posts it since
-    # the Inspection Report tab was removed — it stays for API callers doing a
-    # fleet audit, and the Camera tab posts neither flag, so it respects both.
+    # Refresh). There is no override: a {"force": true} flag used to relax both
+    # guards below for the Inspection Report's fleet audit, and it went out with
+    # that tab — nothing may compete with vpu.exe for the cameras' RTSP sessions
+    # during a live event, whatever the caller claims to be doing.
     try:
         body = await request.json()
     except Exception:
         body = None
-    force = bool(body.get("force")) if isinstance(body, dict) else False
 
-    # Rate limit first — cheap, no PowerShell needed. (force bypasses it.)
+    # Rate limit first — cheap, no PowerShell needed.
     remaining = _frame_cooldown_remaining(time.monotonic())
-    if remaining > 0 and not force:
+    if remaining > 0:
         return {"available": True, "results": [], "blocked": "cooldown",
                 "cooldown": remaining,
                 "reason": f"Wait {remaining}s before capturing frames again."}
 
-    # Don't capture while the Pixellot capture engine owns the streams — unless
-    # the caller forces it (the fleet audit explicitly accepts the risk).
+    # Don't capture while the Pixellot capture engine owns the streams.
     expectations = await run_ps("Get-CameraExpectations.ps1", timeout=10, use_cache=False)
-    if not force and expectations and not expectations.get("error") and expectations.get("vpuRunning"):
+    if expectations and not expectations.get("error") and expectations.get("vpuRunning"):
         return {"available": False, "results": [], "blocked": "vpu",
                 "reason": "The Pixellot capture engine (vpu.exe) is running, so "
                           "frame capture is disabled to avoid interfering with the "
