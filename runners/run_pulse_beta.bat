@@ -69,16 +69,26 @@ echo   Install : %INSTALL_DIR%
 echo.
 
 :: -- Chrome (install if missing) ------------------------------------------
+:: The download and the silent install are the two longest unattended steps
+:: in the launcher (minutes on a slow venue link) and both used to sit on one
+:: static "installing" line, so a tech had no way to tell them from a hang.
+:: Both now animate -- see :spin at the end of this file.
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe" >nul 2>&1
-if %errorlevel% NEQ 0 (
-    echo   Chrome ......................... installing
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://dl.google.com/chrome/install/latest/chrome_installer.exe' -OutFile '%TEMP%\chrome_installer.exe'"
-    start /wait "" "%TEMP%\chrome_installer.exe" /silent /install
-    del "%TEMP%\chrome_installer.exe" 2>nul
-    echo   Chrome ......................... installed
-) else (
+if %errorlevel% EQU 0 (
     echo   Chrome ......................... ok
+    goto :chrome_done
 )
+call :dl_spin "  Chrome ......................... downloading" "https://dl.google.com/chrome/install/latest/chrome_installer.exe" "%TEMP%\chrome_installer.exe" "-"
+if errorlevel 1 (
+    echo   Chrome ......................... download failed - continuing
+    goto :chrome_done
+)
+set "SPIN_LABEL=  Chrome ......................... installing"
+set "SPIN_DONE=  Chrome ......................... installed"
+set "SPIN_PSCMD=$null=Start-Process -FilePath ($env:TEMP+'\chrome_installer.exe') -ArgumentList '/silent','/install' -Wait"
+call :spin
+del "%TEMP%\chrome_installer.exe" 2>nul
+:chrome_done
 
 :: -- Offline fast-path ----------------------------------------------------
 :: Already installed and GitHub is unreachable? Launch the installed copy
@@ -100,7 +110,11 @@ echo   Network ........................ online
 ::   3) fallback: beta-branch commit zip, tagged beta-<sha7>
 ::   On total failure the real error is reported as ERR|<why> instead of
 ::   being swallowed -- "no beta build found" alone is undebuggable in the field.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop';[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;$pat='web-beta-v*';$out='';$err='';foreach($repo in @('%PUBLIC_REPO%','%REPO%')){try{$r=Invoke-RestMethod -Uri ('https://api.github.com/repos/'+$repo+'/releases') -TimeoutSec 10}catch{$err=$_.Exception.Message;continue};$rel=$r|Where-Object{$_.tag_name -like $pat -and $_.prerelease}|Select-Object -First 1;if($rel){$asset=$rel.assets|Where-Object{$_.name -like '*.zip'}|Select-Object -First 1;if($asset){$out=$rel.tag_name+'|'+$asset.browser_download_url;break}}};if(-not $out){try{$sha=(Invoke-RestMethod -Uri 'https://api.github.com/repos/%REPO%/commits/beta' -TimeoutSec 10).sha;if($sha){$out='beta-'+$sha.Substring(0,7)+'|https://github.com/%REPO%/archive/'+$sha+'.zip'}}catch{if(-not $err){$err=$_.Exception.Message}}};if(-not $out -and $err){$out='ERR|'+($err -replace '[|]',' ' -replace '\s+',' ')};Write-Output $out" > "%RESOLVE_OUT%" 2>nul
+set "SPIN_LABEL=  Update ......................... checking for a newer beta build"
+set "SPIN_DONE=-"
+set "SPIN_OUT=%RESOLVE_OUT%"
+set "SPIN_PSCMD=$ErrorActionPreference='Stop';[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;$pat='web-beta-v*';$out='';$err='';foreach($repo in @('%PUBLIC_REPO%','%REPO%')){try{$r=Invoke-RestMethod -Uri ('https://api.github.com/repos/'+$repo+'/releases') -TimeoutSec 10}catch{$err=$_.Exception.Message;continue};$rel=$r|Where-Object{$_.tag_name -like $pat -and $_.prerelease}|Select-Object -First 1;if($rel){$asset=$rel.assets|Where-Object{$_.name -like '*.zip'}|Select-Object -First 1;if($asset){$out=$rel.tag_name+'|'+$asset.browser_download_url;break}}};if(-not $out){try{$sha=(Invoke-RestMethod -Uri 'https://api.github.com/repos/%REPO%/commits/beta' -TimeoutSec 10).sha;if($sha){$out='beta-'+$sha.Substring(0,7)+'|https://github.com/%REPO%/archive/'+$sha+'.zip'}}catch{if(-not $err){$err=$_.Exception.Message}}};if(-not $out -and $err){$out='ERR|'+($err -replace '[|]',' ' -replace '\s+',' ')};Write-Output $out"
+call :spin
 
 set "RESOLVED="
 if exist "%RESOLVE_OUT%" set /p RESOLVED=<"%RESOLVE_OUT%"
@@ -148,9 +162,8 @@ where curl.exe >nul 2>&1 && curl.exe -L --progress-bar -o "%ZIPFILE%" "!ASSET_UR
 set "DL_OK="
 if exist "%ZIPFILE%" for %%A in ("%ZIPFILE%") do if %%~zA GEQ 1000 set "DL_OK=1"
 if not defined DL_OK (
-    echo   Update ......................... retrying via PowerShell
     if exist "%ZIPFILE%" del "%ZIPFILE%" 2>nul
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue';[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; try{ Invoke-WebRequest -UseBasicParsing -Uri '!ASSET_URL!' -OutFile '%ZIPFILE%' }catch{ Write-Host ('   Download failed: '+$_.Exception.Message); exit 1 }"
+    call :dl_spin "  Update ......................... retrying via PowerShell" "!ASSET_URL!" "%ZIPFILE%" "  Update ......................... downloaded"
 )
 
 if not exist "%ZIPFILE%" goto :dl_failed
@@ -169,9 +182,13 @@ call :netdiag
 goto :fatal
 
 :dl_ok
-echo   Update ......................... extracting
 if exist "%EXTRACT%" rd /s /q "%EXTRACT%"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -Path '%ZIPFILE%' -DestinationPath '%EXTRACT%' -Force"
+:: Import-Module explicitly: Expand-Archive lives in a module, and the spinner
+:: runs it in a fresh runspace rather than relying on command auto-discovery.
+set "SPIN_LABEL=  Update ......................... extracting"
+set "SPIN_DONE=  Update ......................... extracted"
+set "SPIN_PSCMD=Import-Module Microsoft.PowerShell.Archive -ErrorAction SilentlyContinue;Expand-Archive -Path '%ZIPFILE%' -DestinationPath '%EXTRACT%' -Force"
+call :spin
 del "%ZIPFILE%"
 
 :: Find the Pulse.Web folder inside the extracted archive.
@@ -186,7 +203,6 @@ if not defined SRC (
     goto :fatal
 )
 
-echo   Update ......................... installing to %INSTALL_DIR%
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%" 2>nul
 if not exist "%INSTALL_DIR%" (
     echo   [ERROR] Could not create %INSTALL_DIR%.
@@ -194,7 +210,15 @@ if not exist "%INSTALL_DIR%" (
     if exist "%EXTRACT%" rd /s /q "%EXTRACT%"
     goto :fatal
 )
-xcopy "%SRC%\*" "%INSTALL_DIR%\" /s /e /y /q >nul
+:: Copying the unpacked build (including the ~50 MB embedded Python runtime)
+:: over a cold disk takes long enough to look stalled, so it animates too.
+:: SRC goes through the environment: it can contain spaces, and quoting it
+:: through the spinner's single-quoted command string cannot.
+set "SPIN_SRC=%SRC%"
+set "SPIN_LABEL=  Update ......................... installing to %INSTALL_DIR%"
+set "SPIN_DONE=  Update ......................... installed to %INSTALL_DIR%"
+set "SPIN_PSCMD=$log=$env:TEMP+'\pulse-copy.log';& ($env:SystemRoot+'\System32\xcopy.exe') ($env:SPIN_SRC+'\*') '%INSTALL_DIR%\' /s /e /y /q *> $log;if($LASTEXITCODE -ge 4){throw 'file copy failed with code '+$LASTEXITCODE+' - see '+$log}"
+call :spin
 if exist "%EXTRACT%" rd /s /q "%EXTRACT%"
 
 echo !REL_TAG!> "%INSTALL_DIR%\VERSION"
@@ -274,7 +298,7 @@ for /f "tokens=5" %%a in ('netstat -aon 2^>nul ^| findstr ":8765 " ^| findstr "L
 :: while the foreground server boots in this window.
 set "WAITER=%INSTALL_DIR%\scripts\Wait-AndLaunch.ps1"
 if exist "%WAITER%" (
-    start "" /b powershell -NoProfile -ExecutionPolicy Bypass -File "%WAITER%" -Port 8765 -Url "http://localhost:8765" -TimeoutSec 60
+    start "" /b powershell -NoProfile -ExecutionPolicy Bypass -File "%WAITER%" -Port 8765 -Url "http://localhost:8765" -TimeoutSec 60 -NoProgress
 )
 
 echo.
@@ -365,3 +389,42 @@ goto :eof
 :probe
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$h='%~1';$line='';try{$null=[Net.Dns]::GetHostAddresses($h)}catch{$line=('  [FAIL] {0,-38} DNS lookup failed - {1}' -f $h,$_.Exception.Message.Trim())};if(-not $line){$c=New-Object Net.Sockets.TcpClient;$c.ReceiveTimeout=10000;$c.SendTimeout=10000;$iar=$c.BeginConnect($h,443,$null,$null);if(-not ($iar.AsyncWaitHandle.WaitOne(5000) -and $c.Connected)){$line=('  [FAIL] {0,-38} DNS ok but no connection on port 443' -f $h)}else{try{$script:pe='None';$cb=[Net.Security.RemoteCertificateValidationCallback]{param($s,$cert,$chain,$e) $script:pe=$e; $true};$ss=New-Object Net.Security.SslStream($c.GetStream(),$false,$cb);$ss.AuthenticateAsClient($h,$null,[Security.Authentication.SslProtocols]'Tls,Tls11,Tls12',$false);$cert2=New-Object Security.Cryptography.X509Certificates.X509Certificate2 $ss.RemoteCertificate;$iss=(($cert2.Issuer -split ',')[0]) -replace 'CN=','';$warn='';if($script:pe.ToString() -ne 'None'){$warn=' ** CERT WARNING: '+$script:pe};$line=('  [ OK ] {0,-38} cert issuer: {1}{2}' -f $h,$iss,$warn)}catch{$line=('  [FAIL] {0,-38} TLS handshake failed - {1}' -f $h,$_.Exception.Message.Trim())};$c.Close()}};Write-Output $line;Add-Content -LiteralPath '%DIAG_LOG%' -Value $line"
 goto :eof
+
+:: -- Live progress for long steps -----------------------------------------
+:: Long steps (Chrome install, pip, extract, copy) used to print one static
+:: line and then sit silent for minutes. A tech can't tell a slow install
+:: from a hung one, and the usual reaction is to kill the window mid-install.
+:: :spin runs the work in a background PowerShell runspace and animates the
+:: SAME line (frame + mm:ss clock) until it finishes, so the window always
+:: shows the step is still moving.
+::
+::   set "SPIN_LABEL=  Thing ......................... doing"  (exact text)
+::   set "SPIN_DONE=  Thing ......................... done"    ('-' erases it)
+::   set "SPIN_PSCMD=<PowerShell; throw to fail>"
+::   set "SPIN_OUT=<file>"  (optional - captures the script's output)
+::   call :spin
+::   if errorlevel 1 ( ... )
+::
+:: SPIN_PSCMD runs in %CD% and may use single quotes only -- cmd eats embedded
+:: double quotes, and '!' is eaten by delayed expansion. Send native-command
+:: output to a log (*> $log) or it fights the spinner for the line. Animation
+:: is skipped (one line in, one line out) when stdout is redirected.
+:spin
+set "SPIN_CWD=%CD%"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$CR=[string][char]13;$lbl=$env:SPIN_LABEL;$ps=[powershell]::Create();$null=$ps.AddScript('Set-Location -LiteralPath $env:SPIN_CWD; '+$env:SPIN_PSCMD);$h=$ps.BeginInvoke();$fr='|/-\';$i=0;$t0=Get-Date;$tty=$true;try{if([Console]::IsOutputRedirected){$tty=$false}}catch{$tty=$false};if(-not $tty){Write-Host $lbl};while(-not $h.IsCompleted){if($tty){Write-Host -NoNewline ($CR+$lbl+' '+$fr[$i]+' '+((Get-Date)-$t0).ToString('mm\:ss')+'  ');$i=($i+1) -band 3};Start-Sleep -Milliseconds 200};$rc=0;$msg='';$out=$null;try{$out=$ps.EndInvoke($h)}catch{$rc=1;$e=$_.Exception;if($e.InnerException){$e=$e.InnerException};$msg=$e.Message};if($ps.Streams.Error.Count -gt 0){$rc=1;if(-not $msg){$msg=[string]$ps.Streams.Error[0]}};$ps.Dispose();$ts=(Get-Date)-$t0;$fin=$env:SPIN_DONE;if(-not $fin){$fin=$lbl};if($rc -ne 0){$fin=$lbl+'  FAILED'};if($fin -eq '-'){if($tty){Write-Host -NoNewline ($CR+(' '*($lbl.Length+16))+$CR)}}else{if($ts.TotalSeconds -ge 5){$fin=$fin+'  ('+$ts.ToString('mm\:ss')+')'};if($tty){Write-Host ($CR+$fin+'                ')}else{Write-Host $fin}};if($env:SPIN_OUT){$out|Out-File -FilePath $env:SPIN_OUT -Encoding ascii};if($rc -ne 0 -and $msg){Write-Host ('       '+$msg)};exit $rc"
+set "SPIN_RC=%errorlevel%"
+set "SPIN_PSCMD="
+set "SPIN_DONE="
+set "SPIN_OUT="
+exit /b %SPIN_RC%
+
+:: -- Download one URL with the spinner ------------------------------------
+:: Used only on the PowerShell fallback path; curl prints its own progress
+:: bar and doesn't need this.
+::   %1 = label   %2 = url   %3 = output file   %4 = done label
+:dl_spin
+set "SPIN_LABEL=%~1"
+set "SPIN_DONE=%~4"
+set "SPIN_PSCMD=$ProgressPreference='SilentlyContinue';[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;Invoke-WebRequest -UseBasicParsing -Uri '%~2' -OutFile '%~3'"
+call :spin
+exit /b %errorlevel%

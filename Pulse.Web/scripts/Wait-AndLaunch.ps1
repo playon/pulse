@@ -10,8 +10,40 @@
 param(
     [int]$Port = 8765,
     [string]$Url = "http://localhost:8765",
-    [int]$TimeoutSec = 30
+    [int]$TimeoutSec = 30,
+
+    # Suppress the animated wait line. Used by the beta launcher's debug mode,
+    # where the server runs in the foreground and is already writing to this
+    # same console -- two writers on one line just garble each other.
+    [switch]$NoProgress
 )
+
+# ---- Console progress ------------------------------------------------------
+# run.bat prints "[5/5] Starting Pulse ........... launching" and then hands
+# off to this script, which can spend up to $TimeoutSec waiting for uvicorn to
+# bind and another ~12s per attempt waiting for a Chrome window to appear. That
+# was dead air on a static line -- indistinguishable from a hang, which is what
+# makes a tester close the window part-way through a first-run bootstrap. So
+# animate the wait in place: a frame plus an mm:ss clock, rewritten over itself.
+# Silent when stdout is redirected (nothing to animate into) or -NoProgress.
+$script:ShowProgress = -not $NoProgress
+try { if ([Console]::IsOutputRedirected) { $script:ShowProgress = $false } } catch { $script:ShowProgress = $false }
+$script:SpinFrames = '|/-\'
+$script:SpinIndex  = 0
+$script:SpinStart  = Get-Date
+
+function Write-WaitLine([string]$text) {
+    if (-not $script:ShowProgress) { return }
+    $frame = $script:SpinFrames[$script:SpinIndex]
+    $script:SpinIndex = ($script:SpinIndex + 1) % 4
+    $clock = ((Get-Date) - $script:SpinStart).ToString('mm\:ss')
+    Write-Host -NoNewline ([string][char]13 + '       - ' + $text + ' ' + $frame + ' ' + $clock + '   ')
+}
+
+function Write-WaitDone([string]$text) {
+    if (-not $script:ShowProgress) { return }
+    Write-Host ([string][char]13 + '       - ' + $text + '                          ')
+}
 
 # Append-only breadcrumb log, separate from pulse-server.log (which the hidden
 # server holds open for writing). The browser launch used to be completely
@@ -100,16 +132,19 @@ function Open-Browser {
         # poll and we're done: --new-window into a warm instance is reliable.
         $waited = 0
         while ($waited -lt 12) {
+            Write-WaitLine 'waiting for the Chrome window'
             Start-Sleep -Seconds 1
             $waited += 1
             if (Test-ChromeWindow) {
                 Write-LaunchLog "Chrome window visible after ~${waited}s (attempt $attempt)"
+                Write-WaitDone 'Chrome window open'
                 return
             }
         }
         Write-LaunchLog "No visible Chrome window after ${waited}s (attempt $attempt)"
     }
     Write-LaunchLog "Giving up: no Chrome window after 3 attempts - open $Url manually"
+    Write-WaitDone "no Chrome window appeared - open $Url manually"
 }
 
 $elapsed = 0
@@ -121,6 +156,7 @@ while ($elapsed -lt $TimeoutSec) {
         if ($ok -and $client.Connected) {
             $client.Close()
             Write-LaunchLog "Port $Port up after ~$elapsed s - opening browser"
+            Write-WaitDone 'server up - opening Chrome'
             Open-Browser
             exit 0   # server is up
         }
@@ -128,6 +164,7 @@ while ($elapsed -lt $TimeoutSec) {
     } catch {
         # Port not open yet -- sleep and retry
     }
+    Write-WaitLine 'waiting for the server to start'
     Start-Sleep -Milliseconds 500
     $elapsed += 1
 }
@@ -136,4 +173,5 @@ while ($elapsed -lt $TimeoutSec) {
 # just show a connection error); exit non-zero so run.bat surfaces the
 # failure and points the user at pulse-server.log.
 Write-LaunchLog "Timed out after ${TimeoutSec}s waiting for port $Port"
+Write-WaitDone 'the server did not come up'
 exit 1

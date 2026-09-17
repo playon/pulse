@@ -980,13 +980,6 @@ html.dark .channel-moved-banner {
 }
 @media (max-width: 900px) { .dash-2col { grid-template-columns: 1fr; } }
 
-/* Inspection Report rows use the app-standard 1.25rem card rhythm (not the
-   denser 1rem dashboard grid), and the Camera Frames wrapper gets the same gap
-   above it — its inner card isn't a direct #page > .card child, so the normal
-   card-stacking rule doesn't reach it. */
-.dash-2col.ir-block { gap: 1.25rem; margin-top: 1.25rem; }
-#ir-frames-wrap:not(:empty) { margin-top: 1.25rem; }
-
 /* Narrow screens: let wide data tables scroll horizontally instead of
    forcing the whole page wider (System Overview, Disk Health, etc.). */
 @media (max-width: 768px) {
