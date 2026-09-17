@@ -24,6 +24,7 @@ Pulse.Web/app/python/
 
 # Server log written at runtime
 Pulse.Web/pulse-server.log
+Pulse.Web/pulse-launch-done
 
 # Stray local artifacts that must never be committed:
 #  - runners/app/ : an embedded-Python tree a launcher drops when run from the repo

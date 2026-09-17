@@ -169,6 +169,13 @@ echo  ========================================================
 :: Brief pause so the success message is readable, then exit cleanly.
 :: The server keeps running hidden; the caller closes this window.
 ping -n 3 127.0.0.1 >nul
+
+:: Launch-complete marker. The app watches this to learn the launcher has
+:: finished, so it can replace the frozen Pulse.bat self-copy without
+:: rewriting a .bat that cmd is still reading (see _refresh_installed_launcher
+:: in app/main.py -- that mistake garbles the launch). Written last: all that
+:: is left after this is the caller's own exit.
+>"%~dp0pulse-launch-done" echo %DATE% %TIME%
 endlocal
 exit /b 0
 
