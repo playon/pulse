@@ -313,6 +313,14 @@ async def _on_startup():
     # release tag.
     _migrate_retired_beta()
 
+    # Refresh the frozen Pulse.bat self-copy from this release's bundled
+    # launcher (see _refresh_installed_launcher). Scheduled, not awaited: it
+    # deliberately waits for the launcher that started us to exit first.
+    try:
+        asyncio.create_task(_refresh_installed_launcher())
+    except Exception:
+        pass
+
     # Fire-and-forget run-tracking check-in (no-op until the check-in secret is
     # filled in, and never in demo/dev). Scheduled so it can't delay startup.
     try:
@@ -4556,6 +4564,91 @@ def _migrate_retired_beta():
     except Exception as e:
         try:
             _server_log.warning("Beta retirement failed (will retry next launch): %s", e)
+        except Exception:
+            pass
+
+
+# ── Keep the installed launcher current ──────────────────────────────────
+# C:\Pulse\Pulse.bat is a FROZEN self-copy. The launcher only copies itself in
+# when it runs from somewhere else (%~f0 != the install path), and the Start
+# Menu shortcut runs the install copy — so a box that already has Pulse keeps
+# whatever launcher it was first set up with, forever. It picks up every new
+# run.bat from the release zip, but never a fix to the OUTER launcher: Chrome
+# install, release lookup, download, extract, copy into C:\Pulse. Caught on the
+# vpu-home bench at 1.2.3, which ran the new run.bat under a 1.2.2 Pulse.bat.
+#
+# Every release zip carries that release's production launcher at
+# launcher\run_pulse.bat, so refresh Pulse.bat from it whenever the two differ.
+#
+# Three constraints shape this:
+#   - Production channel only. The bundled copy IS the production launcher;
+#     writing it over a dev or beta install's Pulse.bat would silently move
+#     that box to a different channel.
+#   - Never mid-launch. Pulse.bat is still executing while this server starts
+#     (it exits a few seconds after the port opens), and cmd reads a .bat
+#     incrementally by byte offset — rewriting it under a running cmd resumes
+#     execution at a garbage offset. Hence the delay, and hence os.replace():
+#     Windows refuses to replace a file cmd still holds open, so an attempt
+#     that is somehow still too early fails cleanly instead of corrupting the
+#     launch in progress.
+#   - Never leave a half-written Pulse.bat. A truncated launcher orphans the
+#     Start Menu shortcut, which is the failure the launcher goes out of its
+#     way to avoid. Write a sibling temp file and rename it into place.
+#
+# Fail-open in every branch: a skipped refresh just retries on the next launch.
+# The delay sits well inside IDLE_SHUTDOWN_SECS so an unattended launch still
+# gets it done before the server goes away.
+_LAUNCHER_REFRESH_DELAY_SECS = 30
+
+
+async def _refresh_installed_launcher() -> None:
+    if DEMO_MODE:
+        return
+    try:
+        if not _is_managed_install() or _update_channel() != "production":
+            return
+        if not _os.path.exists(_BUNDLED_PROD_LAUNCHER):
+            return
+        with open(_BUNDLED_PROD_LAUNCHER, "rb") as src:
+            bundled = src.read()
+        # A truncated or empty bundled copy is never worth installing.
+        if len(bundled) < 1000:
+            _server_log.warning(
+                "Launcher refresh skipped: bundled launcher is only %d bytes",
+                len(bundled),
+            )
+            return
+        target = _pulse_bat_path()
+        try:
+            with open(target, "rb") as dst:
+                current = dst.read()
+        except Exception:
+            current = None
+        if current == bundled:
+            return  # already current — the steady state after the first refresh
+
+        await asyncio.sleep(_LAUNCHER_REFRESH_DELAY_SECS)
+
+        tmp = target + ".new"
+        try:
+            with open(tmp, "wb") as f:
+                f.write(bundled)
+            _os.replace(tmp, target)
+        except Exception:
+            try:
+                _os.remove(tmp)
+            except Exception:
+                pass
+            raise
+        msg = ("Installed launcher refreshed from this release's bundled copy "
+               f"({len(current or b'')} -> {len(bundled)} bytes). The Start Menu "
+               "shortcut now runs the current launcher.")
+        ps_log("server", 0, "ok", msg)
+        _server_log.info(msg)
+    except Exception as e:
+        # Fail-open: a stale launcher still works, and we retry next launch.
+        try:
+            _server_log.info("Launcher refresh skipped (retries next launch): %s", e)
         except Exception:
             pass
 

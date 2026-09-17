@@ -26,6 +26,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - The ScoreConnect page now says whether this VPU is protected against the known ScoreConnect III crash. Green means Windows restarts the service on its own; amber means it doesn't, and the scoreboard will stay dark until someone restarts it by hand. It also shows how many crashes Windows has already caught for you.
 - Pulse now reads LogMeIn's own log for proof the venue is blocking remote support. Repeated killed handshakes on LogMeIn's gateway connections raise a warning with the timeline you can hand venue IT, and after IT lifts the block, the Network tab shows exactly when the unit came back — even though the live test now passes.
 
+### Fixed
+- Pulse now keeps its own launcher up to date. `C:\Pulse\Pulse.bat` — what the Start Menu shortcut runs — was a frozen copy from whenever the unit was first set up, so fixes to the update steps (Chrome install, download, extract, install) never reached a VPU that already had Pulse. Each production launch now replaces it with the launcher that shipped in the installed release.
+
 ### Removed
 - The **Inspection Report** tab is gone. Everything it showed still lives on the Dashboard, Hardware, Network and Camera Connectivity tabs.
 
