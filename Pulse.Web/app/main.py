@@ -3978,10 +3978,10 @@ async def api_cameras_video_test(request: Request):
     global _LAST_FRAME_CAPTURE
 
     # Parse the body up front. {"ips": [...]} restricts the capture (per-camera
-    # Refresh); {"force": true} is an explicit override — the Inspection Report's
-    # fleet audit posts it to grab a frame from every camera even on a live VPU.
-    # force relaxes BOTH guards below (cooldown + the vpu.exe interlock); the
-    # Camera tab posts neither flag, so it still respects both.
+    # Refresh); {"force": true} is an explicit override that relaxes BOTH guards
+    # below (cooldown + the vpu.exe interlock). Nothing in the UI posts it since
+    # the Inspection Report tab was removed — it stays for API callers doing a
+    # fleet audit, and the Camera tab posts neither flag, so it respects both.
     try:
         body = await request.json()
     except Exception:
