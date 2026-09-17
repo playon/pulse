@@ -317,7 +317,7 @@ async def _on_startup():
     # launcher (see _refresh_installed_launcher). Scheduled, not awaited: it
     # deliberately waits for the launcher that started us to exit first.
     try:
-        asyncio.create_task(_refresh_installed_launcher())
+        asyncio.create_task(_refresh_installed_launcher(time.time()))
     except Exception:
         pass
 
@@ -4584,26 +4584,64 @@ def _migrate_retired_beta():
 #   - Production channel only. The bundled copy IS the production launcher;
 #     writing it over a dev or beta install's Pulse.bat would silently move
 #     that box to a different channel.
-#   - Never mid-launch. Pulse.bat is still executing while this server starts
-#     (it exits a few seconds after the port opens), and cmd reads a .bat
-#     incrementally by byte offset — rewriting it under a running cmd resumes
-#     execution at a garbage offset. Hence the delay, and hence os.replace():
-#     Windows refuses to replace a file cmd still holds open, so an attempt
-#     that is somehow still too early fails cleanly instead of corrupting the
-#     launch in progress.
+#   - Never mid-launch. Pulse.bat is still executing while this server starts,
+#     and cmd reads a .bat incrementally BY BYTE OFFSET: replace it underneath
+#     a running cmd and execution resumes at that offset in the new file, on
+#     whatever line fragment happens to live there. This is not theoretical.
+#     A first cut of this used a fixed 30s delay and trusted os.replace() to
+#     refuse while cmd held the file; on the bench it did neither. Windows let
+#     the replace through (cmd opens the .bat with FILE_SHARE_DELETE), cmd
+#     resumed mid-line with "'t' is not recognized as an internal or external
+#     command", and then re-ran the whole launcher body from that offset.
+#     30s was also simply too short: Wait-AndLaunch can hold run.bat for ~36s
+#     after the port opens, waiting out three 12s attempts at a Chrome window.
+#     So the trigger is a signal, not a guess — run.bat writes
+#     pulse-launch-done as its last act, and we wait for THIS session's marker
+#     plus a settle margin before touching anything.
 #   - Never leave a half-written Pulse.bat. A truncated launcher orphans the
 #     Start Menu shortcut, which is the failure the launcher goes out of its
 #     way to avoid. Write a sibling temp file and rename it into place.
 #
 # Fail-open in every branch: a skipped refresh just retries on the next launch.
-# The delay sits well inside IDLE_SHUTDOWN_SECS so an unattended launch still
-# gets it done before the server goes away.
-_LAUNCHER_REFRESH_DELAY_SECS = 30
+_LAUNCH_DONE_MARKER = _os.path.join(_web_root, "pulse-launch-done")
+_LAUNCHER_REFRESH_POLL_SECS = 5
+_LAUNCHER_REFRESH_MAX_WAIT_SECS = 300
+# Between run.bat writing the marker and the launcher that called it closing,
+# there is only that caller's own exit. Ten seconds is an eternity for it.
+_LAUNCHER_REFRESH_SETTLE_SECS = 10
 
 
-async def _refresh_installed_launcher() -> None:
+async def _wait_for_launch_complete(started_at: float) -> bool:
+    """True once run.bat has recorded that THIS session's launch finished.
+
+    A marker older than this server's start belongs to a previous launch and
+    proves nothing about the cmd running right now, so it is ignored. Returns
+    False if no fresh marker shows up — the caller then leaves the launcher
+    alone and tries again next launch, which is the safe direction to fail:
+    a stale launcher works, a half-rewritten one does not.
+    """
+    # Deadline off the monotonic clock rather than a count of sleeps: the
+    # loop must terminate on elapsed time whatever the poll interval is.
+    deadline = time.monotonic() + _LAUNCHER_REFRESH_MAX_WAIT_SECS
+    while True:
+        try:
+            # -2s of slack for clock/filesystem-timestamp granularity; a real
+            # previous-launch marker is minutes or days old, not seconds.
+            if _os.path.getmtime(_LAUNCH_DONE_MARKER) >= started_at - 2:
+                await asyncio.sleep(_LAUNCHER_REFRESH_SETTLE_SECS)
+                return True
+        except OSError:
+            pass  # no marker yet (or ever, on a launch that didn't use run.bat)
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(_LAUNCHER_REFRESH_POLL_SECS)
+
+
+async def _refresh_installed_launcher(started_at: float = None) -> None:
     if DEMO_MODE:
         return
+    if started_at is None:
+        started_at = time.time()
     try:
         if not _is_managed_install() or _update_channel() != "production":
             return
@@ -4627,7 +4665,12 @@ async def _refresh_installed_launcher() -> None:
         if current == bundled:
             return  # already current — the steady state after the first refresh
 
-        await asyncio.sleep(_LAUNCHER_REFRESH_DELAY_SECS)
+        if not await _wait_for_launch_complete(started_at):
+            _server_log.info(
+                "Launcher refresh deferred: this launch never recorded "
+                "pulse-launch-done, so the launcher may still be running"
+            )
+            return
 
         tmp = target + ".new"
         try:
