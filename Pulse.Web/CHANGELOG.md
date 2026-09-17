@@ -20,6 +20,14 @@ flow shows testers when a new build is available.
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 `Pulse.Web/VERSION`.
 
+## [1.2.3] - 2026-09-17
+
+### Removed
+- The **Inspection Report** tab is gone. Everything it showed still lives on the Dashboard, Hardware, Network and Camera Connectivity tabs.
+
+### Changed
+- The Pulse launcher window now shows live progress on every slow step — Chrome install, Python setup, dependency install, download, extract, copy, and the wait for Pulse to come up. Each one animates with a running clock instead of freezing on a single line, so you can tell a slow install from a stuck one.
+
 ## [1.2.2] - 2026-09-01
 
 ### Added
