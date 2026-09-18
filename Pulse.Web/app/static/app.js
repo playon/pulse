@@ -53,6 +53,8 @@ function svgIcon(name, size) {
     "id-card": '<path d="M16 10h2"/><path d="M16 14h2"/><path d="M6.17 15a3 3 0 0 1 5.66 0"/><circle cx="9" cy="11" r="2"/><rect x="2" y="5" width="20" height="14" rx="2"/>',
     package: '<path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="M3.3 7 12 12l8.7-5"/><path d="M12 22V12"/>',
     power: '<path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/>',
+    square: '<rect x="4" y="4" width="16" height="16" rx="2"/>',
+    "arrow-left": '<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>',
   };
   return `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${p[name] || ""}</svg>`;
 }
@@ -4309,7 +4311,7 @@ function renderNetwork() {
       <!-- Traceroute -->
       <div class="card">
         <div class="net-ping-toolbar">
-          ${sectionTitle("share", "Traceroute")}
+          ${sectionTitle("share-2", "Traceroute")}
           <div class="net-ping-btns">
             <input id="net-trace-target" type="text" class="net-trace-input" placeholder="pixellot.tv" value="pixellot.tv" onkeydown="if(event.key==='Enter'){event.preventDefault();_runTraceroute(this.value.trim()||'pixellot.tv');}">
             <button id="net-trace-btn" class="btn-outline btn-ol-blue" onclick="_runTraceroute(document.getElementById('net-trace-target').value.trim()||'pixellot.tv')">
@@ -4512,7 +4514,7 @@ function _camDownGuidanceHtml(p, ctx) {
 function _camFindingsHtml(findings) {
   if (!findings.length) return "";
   return `<div class="card" id="cam-findings">
-    ${sectionTitle("alert-circle", findings.length + " finding" + (findings.length !== 1 ? "s need" : " needs") + " attention")}
+    ${sectionTitle("alert", findings.length + " finding" + (findings.length !== 1 ? "s need" : " needs") + " attention")}
     ${findings.map(f => `
       <div class="cam-finding-row cam-finding-row-${esc(f.severity)}">
         <div class="cam-finding-header">
