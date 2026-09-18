@@ -16,8 +16,7 @@
 //   node tools/ui-sweep/sweep.mjs --port 8797 --widths 1366 --themes light
 //   node tools/ui-sweep/sweep.mjs --port 8797 --tab network --verbose
 
-import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { launch, openPulse, gotoTab, sleep } from "./cdp.mjs";
 
 const argv = process.argv.slice(2);
 const arg = (name, dflt) => {
@@ -33,73 +32,6 @@ const ONLY_TAB = arg("tab", null);
 const VERBOSE = flag("verbose");
 const CDP_PORT = Number(arg("cdp-port", 9223));
 const HEIGHT = Number(arg("height", 900));
-
-const CHROME_CANDIDATES = [
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-  "/usr/bin/google-chrome",
-  "/usr/bin/google-chrome-stable",
-  "/usr/bin/chromium-browser",
-  "/usr/bin/chromium",
-  process.env.CHROME_PATH,
-].filter(Boolean);
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// ---------------------------------------------------------------- CDP client
-class CDP {
-  constructor(ws) {
-    this.ws = ws;
-    this.id = 0;
-    this.pending = new Map();
-    this.events = [];
-    ws.addEventListener("message", (ev) => {
-      const msg = JSON.parse(ev.data);
-      if (msg.id !== undefined) {
-        const p = this.pending.get(msg.id);
-        if (p) {
-          this.pending.delete(msg.id);
-          msg.error ? p.reject(new Error(JSON.stringify(msg.error))) : p.resolve(msg.result);
-        }
-      } else {
-        this.events.push(msg);
-      }
-    });
-  }
-  send(method, params = {}) {
-    const id = ++this.id;
-    this.ws.send(JSON.stringify({ id, method, params }));
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      setTimeout(() => {
-        if (this.pending.delete(id)) reject(new Error(method + " timed out"));
-      }, 30000);
-    });
-  }
-  async eval(expression) {
-    const r = await this.send("Runtime.evaluate", {
-      expression,
-      returnByValue: true,
-      awaitPromise: true,
-    });
-    if (r.exceptionDetails) {
-      throw new Error("eval failed: " + (r.exceptionDetails.exception?.description || ""));
-    }
-    return r.result.value;
-  }
-  drainConsole() {
-    const out = [];
-    for (const e of this.events) {
-      if (e.method === "Runtime.exceptionThrown") {
-        out.push("uncaught: " + (e.params.exceptionDetails?.exception?.description
-          || e.params.exceptionDetails?.text || "?").split("\n")[0]);
-      } else if (e.method === "Runtime.consoleAPICalled" && e.params.type === "error") {
-        out.push("console.error: " + e.params.args.map((a) => a.value ?? a.description ?? "?").join(" ").split("\n")[0]);
-      }
-    }
-    this.events.length = 0;
-    return out;
-  }
-}
 
 // ------------------------------------------------------------ in-page checks
 // Each returns a list of human-readable problems. They run in the page, so
@@ -197,12 +129,6 @@ const ADVISORY = [
 
 // ------------------------------------------------------------------ the run
 async function main() {
-  const chrome = CHROME_CANDIDATES.find((p) => existsSync(p));
-  if (!chrome) {
-    console.error("FAIL: no Chrome found. Set CHROME_PATH.");
-    process.exit(1);
-  }
-
   const base = `http://127.0.0.1:${PORT}`;
   try {
     const probe = await fetch(base + "/", { signal: AbortSignal.timeout(4000) });
@@ -213,37 +139,17 @@ async function main() {
     process.exit(1);
   }
 
-  const proc = spawn(chrome, [
-    "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
-    "--no-default-browser-check", "--disable-extensions",
-    "--user-data-dir=/tmp/pulse-sweep-profile",
-    `--remote-debugging-port=${CDP_PORT}`,
-    `--window-size=${WIDTHS[0]},${HEIGHT}`,
-    "about:blank",
-  ], { stdio: "ignore" });
-
-  let target = null;
-  for (let i = 0; i < 50 && !target; i++) {
-    await sleep(200);
-    try {
-      const list = await (await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`)).json();
-      target = list.find((t) => t.type === "page");
-    } catch { /* chrome still booting */ }
-  }
-  if (!target) {
-    proc.kill();
-    console.error("FAIL: Chrome did not expose a CDP page target");
+  let browser;
+  try {
+    browser = await launch({
+      width: WIDTHS[0], height: HEIGHT, cdpPort: CDP_PORT,
+      profile: "/tmp/pulse-sweep-profile",
+    });
+  } catch (e) {
+    console.error("FAIL: " + e.message);
     process.exit(1);
   }
-
-  const ws = new WebSocket(target.webSocketDebuggerUrl);
-  await new Promise((res, rej) => {
-    ws.addEventListener("open", res, { once: true });
-    ws.addEventListener("error", rej, { once: true });
-  });
-  const cdp = new CDP(ws);
-  await cdp.send("Page.enable");
-  await cdp.send("Runtime.enable");
+  const { cdp } = browser;
 
   const problems = [];   // blocking
   const notes = [];      // advisory
@@ -293,7 +199,7 @@ async function main() {
     const list = ONLY_TAB ? tabs.filter((t) => t === ONLY_TAB) : tabs;
     if (ONLY_TAB && !list.length) {
       console.error(`FAIL: no such tab "${ONLY_TAB}". Known: ${tabs.join(", ")}`);
-      proc.kill();
+      browser.close();
       process.exit(1);
     }
 
@@ -346,8 +252,7 @@ async function main() {
     }
   }
 
-  ws.close();
-  proc.kill();
+  browser.close();
 
   // ------------------------------------------------------------- reporting
   console.log("");
