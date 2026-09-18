@@ -1,0 +1,91 @@
+# Actually render the Pulse SPA and check it, on every PR that touches it.
+#
+# ui-contract.yml reads the source. This one opens the page. The two catch
+# different things: a class that does not exist is static, a handler a tech
+# can click that throws is not.
+#
+# Why this exists at all: no CI check had ever opened Pulse. python-tests
+# filters Pulse.Web/app/**.py, ps-ascii-check filters scripts/**.ps1,
+# launcher-sync filters the .bat copies -- none matched
+# Pulse.Web/app/static/**. web-auto-tag.yml, meanwhile, fires on
+# Pulse.Web/**, which DOES match app.js, so a frontend-only change ran zero
+# checks and then published a dev pre-release that run_pulse_dev.bat installs.
+#
+# The widths are not arbitrary: 1366 is the VPU console, 1100 and 900 are
+# realistic LogMeIn window sizes. Pulse is used over a remote desktop far
+# more often than at the box.
+#
+# Determinism: demo_data.py randomises the venue at import, and venue names
+# differ by 15 characters across the pool -- enough to change what overflows.
+# serve_demo.py seeds random and pins the longest name, so a layout result
+# means something. Layout findings are still ADVISORY (reported, never
+# failing): font rendering differs between this runner and a VPU, and a
+# one-pixel difference must not block a merge. The blocking checks are the
+# three that cannot flake -- a JS error, a dead inline handler, a window that
+# scrolls sideways.
+
+name: UI render sweep
+
+on:
+  push:
+    branches: [dev, beta, main]
+    paths:
+      - "Pulse.Web/app/static/**"
+      - "Pulse.Web/app/main.py"
+      - "Pulse.Web/app/demo_data.py"
+      - "tools/ui-sweep/**"
+      - ".github/workflows/ui-render-sweep.yml"
+  pull_request:
+    paths:
+      - "Pulse.Web/app/static/**"
+      - "Pulse.Web/app/main.py"
+      - "Pulse.Web/app/demo_data.py"
+      - "tools/ui-sweep/**"
+      - ".github/workflows/ui-render-sweep.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    name: Every tab renders clean at RDP widths
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # node 22+ for the global WebSocket the CDP driver uses. The driver has
+      # no npm dependencies on purpose -- it has to still run in three years
+      # without anyone tending a lockfile.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Pulse.Web dependencies
+        run: python3 -m pip install --quiet -r Pulse.Web/app/requirements.txt
+
+      - name: Confirm Chrome is present
+        run: google-chrome --version
+
+      - name: Start Pulse in deterministic demo mode
+        run: |
+          nohup python3 tools/ui-sweep/serve_demo.py --port 8797 > /tmp/pulse.log 2>&1 &
+          for i in $(seq 1 40); do
+            if curl -sf -o /dev/null http://127.0.0.1:8797/; then echo "up after ${i}s"; exit 0; fi
+            sleep 1
+          done
+          echo "Pulse did not start:"; cat /tmp/pulse.log; exit 1
+
+      - name: Sweep every tab
+        env:
+          CHROME_PATH: /usr/bin/google-chrome
+        run: node tools/ui-sweep/sweep.mjs --port 8797
+
+      - name: Pulse server log
+        if: always()
+        run: tail -40 /tmp/pulse.log || true
