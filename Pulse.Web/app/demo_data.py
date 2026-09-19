@@ -922,6 +922,7 @@ DEMO = {
     "Get-EventLogs.ps1": lambda **kw: {
         "entries": [
             {"timeCreated": (datetime.now() - timedelta(hours=2)).isoformat(), "level": "Error", "source": "PixellotAgent", "eventId": 1001, "message": "Connection timeout to cloud service api.pixellot.tv - retrying in 30s"},
+            {"timeCreated": (datetime.now() - timedelta(hours=1)).isoformat(), "level": "Critical", "source": "Kernel-Power", "eventId": 41, "message": "The system has rebooted without cleanly shutting down first."},
             {"timeCreated": (datetime.now() - timedelta(hours=3)).isoformat(), "level": "Warning", "source": "PixellotEncoder", "eventId": 2010, "message": "Encoder buffer underrun on Camera1 stream - 2 frames dropped"},
             {"timeCreated": (datetime.now() - timedelta(hours=5)).isoformat(), "level": "Error", "source": "Service Control Manager", "eventId": 7034, "message": "The PixellotWatchdog service terminated unexpectedly."},
             {"timeCreated": (datetime.now() - timedelta(hours=8)).isoformat(), "level": "Info", "source": "PixellotAgent", "eventId": 1000, "message": "Agent connected to cloud service successfully"},

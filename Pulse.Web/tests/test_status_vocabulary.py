@@ -69,6 +69,15 @@ CANONICAL = {
     "unknown": "muted",
 }
 
+# Words added after the first pass, found by inventorying what the collectors
+# actually emit rather than what the UI happened to handle:
+#   unhealthy  Get-DiskHealth.ps1:54 passes MSFT_PhysicalDisk.HealthStatus
+#              through (Healthy|Warning|Unhealthy|Unknown). It rendered grey
+#              while main.py:1830 raised the same drive as CRITICAL.
+#   paused     Get-Services.ps1:111 emits $svc.Status.ToString() verbatim.
+CANONICAL["unhealthy"] = "fail"
+CANONICAL["paused"] = "warn"
+
 # Severity words shared by statusBadge and severityChip. Both must agree:
 # a word cannot be red in one helper and grey in the other.
 SHARED = {
@@ -307,6 +316,64 @@ class TestCollectorsEmitKnownWords(unittest.TestCase):
             "there (or an old one removed) -- otherwise its collector can "
             "emit an unmapped word and nothing will notice."
             % (calls, EXPECTED_BADGE_CALL_SITES),
+        )
+
+
+class TestWindowsEventLevelChip(unittest.TestCase):
+    """The Windows Events level chip must not relabel a severity.
+
+    This helper is nested inside loadEvents(), so it is not reachable by the
+    top-level function parser -- it was missed entirely by the first version
+    of this file, which is how the worst bug of the set survived: a Windows
+    CRITICAL event rendered as a BLUE chip reading "Information", the least
+    severe label in the vocabulary. Get-EventLogs.ps1:87 maps Level 1 to
+    "Critical".
+    """
+
+    def setUp(self):
+        js = _read(_APP_JS)
+        m = re.search(r"function levelChip\(level\)\s*\{(.*?)\n    \}", js, re.S)
+        self.assertIsNotNone(
+            m, "the Windows Events levelChip could not be located -- if it "
+               "moved, re-point this test rather than deleting it")
+        self.body = m.group(1)
+
+    def test_critical_is_handled_and_not_relabelled(self):
+        self.assertIn(
+            'l === "critical"', self.body,
+            "levelChip has no case for \"critical\", so a Windows Level 1 "
+            "event falls through to the info arm -- blue, and relabelled.",
+        )
+        m = re.search(r'l === "critical"\)\s*return[^;]*?>([^<]*)<', self.body)
+        self.assertEqual(
+            (m.group(1) if m else ""), "Critical",
+            "the critical arm must be labelled \"Critical\".",
+        )
+
+    def test_unrecognised_level_is_echoed_not_relabelled(self):
+        """Get-EventLogs emits "Level<N>" for verbose tiers."""
+        tail = self.body.strip().splitlines()[-1]
+        self.assertIn(
+            "esc(level)", tail,
+            "levelChip's fallback hard-codes a label instead of echoing the "
+            "real level. Showing the actual word is always more honest than "
+            "asserting a severity we did not recognise. Got: %s" % tail.strip(),
+        )
+
+
+class TestEventNavBadge(unittest.TestCase):
+    """The sidebar badge must not ignore Critical."""
+
+    def test_nav_badge_counts_critical_as_well_as_error(self):
+        js = _read(_APP_JS)
+        m = re.search(r"const evErrorCount = evEntries\.filter\((.*?)\)\.length;",
+                      js, re.S)
+        self.assertIsNotNone(m, "the Windows Events nav-badge filter moved")
+        self.assertIn(
+            '"critical"', m.group(1),
+            "the Windows Events sidebar badge counts only level === \"error\", "
+            "so a VPU whose recent entries are all Windows CRITICAL shows a "
+            "clean sidebar.",
         )
 
 

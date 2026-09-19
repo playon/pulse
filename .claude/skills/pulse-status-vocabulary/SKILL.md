@@ -30,6 +30,29 @@ amount of clicking would have found them.
 
 Both are fixed. `tests/test_status_vocabulary.py` stops them coming back.
 
+## Four helpers, not two
+
+An inventory of what the collectors actually emit (457 status strings) found
+two more renderers and three more bugs than the first pass:
+
+| Helper | Was |
+|---|---|
+| `statusBadge` | no `error` case -> disk Error grey; no `unhealthy` -> failing SMART drive grey while the Dashboard called it critical |
+| `severityChip` | fallback `sev-chip-ok` -> an unrecognised severity rendered GREEN |
+| `levelChip` (Windows Events) | **Critical fell through to the info arm: blue, and relabelled "Information"** |
+| `levelChip` (Pixellot Logs) | echoes the raw word -- the one that was already right |
+
+The Windows Events one is the worst in Pulse's history of this bug class: it
+did not merely mis-colour a row, it **replaced the word with its opposite**.
+`Get-EventLogs.ps1:87` maps Windows Level 1 to `Critical`, and a Kernel-Power
+41 ("rebooted without cleanly shutting down") displayed as routine
+Information. The sidebar badge compounded it by counting only `error`.
+
+That helper is nested inside `loadEvents()`, so the first version of the test
+-- which parsed top-level functions -- could not see it. **Two of the four
+renderers were unchecked, and the worst bug was in one of them.** When adding
+a check here, enumerate the renderers first.
+
 ## The rules
 
 1. **One condition, one display word.** A state may have synonyms in the
