@@ -29,12 +29,24 @@ on:
       - "Pulse.Web/app/**.py"
       - "Pulse.Web/tests/**.py"
       - "Pulse.Web/app/requirements.txt"
+      # test_status_vocabulary.py parses these two directly -- it checks that
+      # the status words the collectors EMIT match the cases app.js renders.
+      # Without them the test cannot fire on the changes that break it: a
+      # collector adding a level string, or app.js dropping a badge case.
+      - "Pulse.Web/app/static/app.js"
+      - "Pulse.Web/scripts/**.ps1"
       - ".github/workflows/python-tests.yml"
   pull_request:
     paths:
       - "Pulse.Web/app/**.py"
       - "Pulse.Web/tests/**.py"
       - "Pulse.Web/app/requirements.txt"
+      # test_status_vocabulary.py parses these two directly -- it checks that
+      # the status words the collectors EMIT match the cases app.js renders.
+      # Without them the test cannot fire on the changes that break it: a
+      # collector adding a level string, or app.js dropping a badge case.
+      - "Pulse.Web/app/static/app.js"
+      - "Pulse.Web/scripts/**.ps1"
       - ".github/workflows/python-tests.yml"
   workflow_dispatch:
 
