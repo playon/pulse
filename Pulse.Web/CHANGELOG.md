@@ -27,6 +27,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - Pulse now reads LogMeIn's own log for proof the venue is blocking remote support. Repeated killed handshakes on LogMeIn's gateway connections raise a warning with the timeline you can hand venue IT, and after IT lifts the block, the Network tab shows exactly when the unit came back — even though the live test now passes.
 
 ### Fixed
+- Disk **Error** events now show a red badge instead of a grey one. On the Disks tab an Error was rendering in neutral grey - calmer on screen than the amber Warning next to it - so the more serious event looked like the less serious one. Also fixed: a status Pulse doesn't recognise now shows grey ("unknown") rather than green, so a new kind of problem can no longer look like a pass.
 - Pulse now keeps its own launcher up to date. `C:\Pulse\Pulse.bat` — what the Start Menu shortcut runs — was a frozen copy from whenever the unit was first set up, so fixes to the update steps (Chrome install, download, extract, install) never reached a VPU that already had Pulse. Each production launch now replaces it with the launcher that shipped in the installed release.
 - Four icons were missing and had been rendering as blank space: the Stop button on Network Capture, the Traceroute heading, the "needs attention" heading on Camera Connectivity, and the "Back to Camera Connectivity" button. They now show the icon they were always meant to.
 

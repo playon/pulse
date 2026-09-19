@@ -316,7 +316,11 @@ function statusBadge(status) {
   const cap = (status || "").charAt(0).toUpperCase() + (status || "").slice(1);
   if (s === "running" || s === "up" || s === "pass" || s === "ok" || s === "healthy")
     return badge(cap, "pass");
-  if (s === "stopped" || s === "down" || s === "fail" || s === "critical")
+  // "error" belongs here: Get-DiskHealth.ps1:94 emits Critical|Error|Warning
+  // and app.js renders statusBadge(e.level), so without this case a disk
+  // ERROR event fell through to muted -- grey, and calmer on screen than the
+  // amber WARNING next to it. severityChip has always mapped error to red.
+  if (s === "stopped" || s === "down" || s === "fail" || s === "critical" || s === "error")
     return badge(cap, "fail");
   if (s === "warning" || s === "warn" || s === "degraded")
     return badge(cap, "warn");
@@ -2043,14 +2047,16 @@ function kvRowHtml(label, html) {
 
 function severityChip(sev, text) {
   const s = (sev || "").toLowerCase();
-  // muted/info/none → neutral grey, so "no data" states don't masquerade as
-  // healthy green. Everything unrecognised still falls through to ok (green) —
-  // unchanged for existing callers.
+  // Healthy is now EXPLICIT and the fallback is neutral. It used to be the
+  // other way round: anything unrecognised fell through to green, so a
+  // collector that started emitting a new severity word would render it as
+  // healthy rather than as unknown. A word nobody taught this helper must
+  // degrade to grey, never to a pass.
   const cls =
     s === "critical" || s === "error" ? "sev-chip-crit" :
     s === "warning" ? "sev-chip-warn" :
-    s === "muted" || s === "info" || s === "none" || s === "unknown" ? "sev-chip-muted" :
-    "sev-chip-ok";
+    s === "ok" || s === "pass" || s === "good" || s === "healthy" ? "sev-chip-ok" :
+    "sev-chip-muted";
   return `<span class="sev-chip ${cls}">${esc(text || sev)}</span>`;
 }
 
