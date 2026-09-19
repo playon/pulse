@@ -320,9 +320,17 @@ function statusBadge(status) {
   // and app.js renders statusBadge(e.level), so without this case a disk
   // ERROR event fell through to muted -- grey, and calmer on screen than the
   // amber WARNING next to it. severityChip has always mapped error to red.
-  if (s === "stopped" || s === "down" || s === "fail" || s === "critical" || s === "error")
+  // "unhealthy": Get-DiskHealth.ps1:54 passes MSFT_PhysicalDisk.HealthStatus
+  // through verbatim (Healthy|Warning|Unhealthy|Unknown). Without this case a
+  // failing SMART drive showed a grey pill in the Disks table while
+  // main.py:1830 was already raising it as a CRITICAL dashboard finding --
+  // two screens, opposite verdicts on the same drive.
+  if (s === "stopped" || s === "down" || s === "fail" || s === "critical" ||
+      s === "error" || s === "unhealthy")
     return badge(cap, "fail");
-  if (s === "warning" || s === "warn" || s === "degraded")
+  // "paused": Get-Services.ps1:111 emits $svc.Status.ToString() verbatim, so
+  // a paused Pixellot service is neither running nor stopped.
+  if (s === "warning" || s === "warn" || s === "degraded" || s === "paused")
     return badge(cap, "warn");
   if (s === "notfound") return badge("Not Found", "muted");
   return badge(cap || "Unknown", "muted");
@@ -1474,9 +1482,12 @@ function _subsystemHealth(findings) {
   // its health from the cached event log: any recent Error-level entry
   // turns it amber. (Falls back to Healthy when events aren't loaded.)
   const evEntries = (cached("events") || {}).entries || [];
-  const evErrorCount = evEntries.filter(
-    (e) => (e.level || "").toLowerCase() === "error"
-  ).length;
+  const evErrorCount = evEntries.filter((e) => {
+    // Critical counts too. Filtering on "error" alone meant a box whose only
+    // recent entries were Windows Level 1 (Critical) showed a clean sidebar.
+    const l = (e.level || "").toLowerCase();
+    return l === "error" || l === "critical";
+  }).length;
 
   // ids are nav page ids — updateNavHealth() lights the matching sidebar link.
   // Re-keyed for the 6-group IA: the old `system` panel split into hardware /
@@ -6139,9 +6150,20 @@ function renderEvents() {
 
     function levelChip(level) {
       const l = (level || "").toLowerCase();
+      // "critical" has to come first and has to be LOUDER than error:
+      // Get-EventLogs.ps1:87 maps Windows Level 1 to "Critical", and this
+      // helper used to fall through to the info arm -- which both coloured
+      // it blue AND relabelled the cell "Information". The most severe class
+      // of Windows event was displayed as the least severe one.
+      if (l === "critical") return '<span class="ev-level-chip ev-level-fatal">Critical</span>';
       if (l === "error") return '<span class="ev-level-chip ev-level-error">Error</span>';
       if (l === "warning") return '<span class="ev-level-chip ev-level-warn">Warning</span>';
-      return '<span class="ev-level-chip ev-level-info">Information</span>';
+      if (l === "info" || l === "information" || !l)
+        return '<span class="ev-level-chip ev-level-info">Information</span>';
+      // Anything else (Get-EventLogs emits "Level<N>" for verbose tiers) is
+      // echoed rather than relabelled. Showing the real word is always more
+      // honest than asserting a severity we did not recognise.
+      return '<span class="ev-level-chip ev-level-info">' + esc(level) + '</span>';
     }
 
     evBody.innerHTML = `
