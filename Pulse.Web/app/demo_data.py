@@ -554,6 +554,11 @@ def _demo_network_capture(**kw):
         }]
     return {
         "durationSec": int((kw or {}).get("DurationSec", 30)),
+        # Demo stands in for a patched VPU, which is the only kind that can
+        # capture packets. Unpatched units return captureMode "counters" with
+        # nulls for everything the October 2018 packet monitor cannot measure.
+        "captureMode": "capture",
+        "osBuild": "17763.8880",
         "totalPackets": total,
         "inspectedPackets": inspected,
         "droppedPackets": 0,

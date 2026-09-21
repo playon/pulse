@@ -37,6 +37,26 @@
     Each packet is also logged 5-10 times, once per component/edge it crosses,
     tagged Appearance 1..N -- so only Appearance 1 is counted.
 
+    TWO PKTMON GENERATIONS ARE IN THE FLEET. Same OS build, different patch
+    level, completely different command surface -- measured on two benches:
+
+      VPU2     17763.8880  pktmon 10.0.17763.1801  full CLI
+      vpu-home 17763.253   pktmon 10.0.17763.1     1809 RTM, dated 2018-09-15
+
+    The RTM build's entire CLI is 'filter | comp | reset | start | stop'. It
+    has no 'counters', no 'etl2txt', no 'status', and no --capture: on it,
+    'start -c' means --components, not --capture. So packet capture is simply
+    not available there, and since Pixellot never applies the Windows monthly
+    cumulative, 17763.253 is the state much of the fleet is in -- the patched
+    unit is the exception. What the RTM build CAN do is counters: 'start -c all'
+    then 'stop' prints the same per-component table (exit code 87, but the
+    output is good). So this script probes 'pktmon start help' for --capture and
+    runs one of two paths, reporting which one through captureMode.
+
+    On the counters path droppedPackets is null, NOT 0. The RTM table has no
+    drop column, and reporting a zero we did not measure is the same lie as a
+    green tick over an empty capture.
+
     RELIABILITY, also measured. The two data sources are not equally good:
 
       * 'pktmon counters' was correct on every run. Packet and drop totals
@@ -142,6 +162,62 @@ function Get-PktmonNicTotals {
     return $totals
 }
 
+function Get-PktmonCapability {
+    <#
+        Returns 'capture' when this pktmon can capture packets to a file, or
+        'counters' when it is the 1809 RTM build that can only do counters.
+
+        Probed by behaviour rather than by file version, because the version
+        number does not tell us which flags shipped. 'pktmon start help' lists
+        '-c, --capture' on the full build and '-c, --components' on the RTM one.
+    #>
+    $help = (Invoke-Pktmon @('start', 'help')).Output
+    if ($help -match '--capture') { return 'capture' }
+    return 'counters'
+}
+
+function Get-PktmonTableTotals {
+    <#
+        Parses the per-component counter table that the RTM build prints from
+        'pktmon stop', e.g.
+
+          Intel(R) Ethernet Connection (7) I219-LM
+           Id Name              Counter  Direction Packets    Bytes | ...
+           10 Intel(R) Ether... Upper    Rx            118  147,232 | Tx  34  4,668
+
+        Only the FIRST component row under each adapter heading is counted --
+        that row IS the adapter, and every row below it re-reports the same
+        packets at each NDIS edge. Numbers are comma-grouped.
+
+        Returns a hashtable with Packets. Drops are deliberately absent: this
+        table has no drop column.
+    #>
+    param([string]$Text)
+
+    $totals = @{ Packets = 0 }
+    if (-not $Text) { return $totals }
+
+    $takenForGroup = $false
+    foreach ($line in ($Text -split "`r?`n")) {
+        if (-not $line.Trim()) { continue }
+
+        # An adapter heading sits at column 0; every table row is indented.
+        if ($line -notmatch '^\s') {
+            $takenForGroup = $false
+            continue
+        }
+        if ($takenForGroup) { continue }
+
+        # " 10 Intel(R) Ether... Upper Rx 118 147,232 | Tx 34 4,668"
+        if ($line -match '^\s*\d+\s+.+?\s+(?:Upper|Lower)\s+(?:Rx|Tx)\s+([\d,]+)\s+[\d,]+\s*\|\s*(?:Rx|Tx)\s+([\d,]+)\s+[\d,]+\s*$') {
+            $totals.Packets += [int]($Matches[1] -replace ',', '')
+            $totals.Packets += [int]($Matches[2] -replace ',', '')
+            $takenForGroup = $true
+        }
+    }
+    return $totals
+}
+
 try {
     # -- Check pktmon availability --------------------------------
     $pktmonPath = Get-Command pktmon -ErrorAction SilentlyContinue
@@ -177,6 +253,19 @@ try {
         # Older/locked-down boxes: fall back to direction tags only.
     }
 
+    # -- Which pktmon is this? ------------------------------------
+    # The fleet runs two generations behind the same OS build number, so the
+    # flags available have to be probed, not assumed. See .NOTES.
+    $captureMode = Get-PktmonCapability
+    $osBuild = ''
+    try {
+        $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
+        $osBuild = "$($cv.CurrentBuild).$($cv.UBR)"
+    }
+    catch {
+        $osBuild = [string][System.Environment]::OSVersion.Version.Build
+    }
+
     # -- Clean up any prior state ---------------------------------
     $null = Invoke-Pktmon @('stop')
     $null = Invoke-Pktmon @('filter', 'remove')
@@ -200,6 +289,65 @@ try {
             } | ConvertTo-Json -Compress
             return
         }
+    }
+
+    # -- Counters-only path: 1809 RTM pktmon ----------------------
+    # This build cannot capture packets at all. Rather than fail the card, run
+    # the measurement it does support and say plainly what is missing and why.
+    if ($captureMode -eq 'counters') {
+        $startRtm = Invoke-Pktmon @('start', '-c', 'all')
+        if ($startRtm.ExitCode -ne 0) {
+            $null = Invoke-Pktmon @('filter', 'remove')
+            [ordered]@{
+                error = $true
+                message = "pktmon start failed (exit $($startRtm.ExitCode)). $((($startRtm.Output) -replace '\s+', ' ').Trim())"
+                script = 'Start-NetworkCapture.ps1'
+            } | ConvertTo-Json -Compress
+            return
+        }
+
+        Start-Sleep -Seconds $DurationSec
+
+        # 'stop' prints the counter table AND exits 87 on this build, so the
+        # exit code is ignored here and the output is what matters.
+        $stopRtm = Invoke-Pktmon @('stop')
+        $null = Invoke-Pktmon @('filter', 'remove')
+
+        $rtmTotals = Get-PktmonTableTotals -Text $stopRtm.Output
+        $rtmPackets = [int]$rtmTotals.Packets
+
+        $rtmFindings = @()
+        $rtmFindings += [ordered]@{
+            severity = 'info'
+            title    = 'This VPU cannot capture packets until Windows is updated'
+            body     = "Windows is at build $osBuild, whose packet monitor is the original October 2018 release. It can count traffic, which is what the totals above are, but it cannot record the packets themselves -- so connection resets, retransmissions and the endpoint list are unavailable on this unit. A current VPU reports all of them. This is the same missing Windows cumulative update that the Software Updates card reports."
+        }
+        if ($rtmPackets -eq 0) {
+            $rtmFindings += [ordered]@{
+                severity = 'info'
+                title    = 'No streaming traffic seen'
+                body     = "Nothing crossed ports 443, 1935, 80 or UDP 2088 during the ${DurationSec}s measurement. That is expected on an idle VPU -- run this again while an event is streaming."
+            }
+        }
+
+        [ordered]@{
+            durationSec      = $DurationSec
+            captureMode      = 'counters'
+            osBuild          = $osBuild
+            totalPackets     = $rtmPackets
+            inspectedPackets = 0
+            # Null, not 0. This build's table has no drop column, and a zero we
+            # never measured reads as "no drops" to whoever opens the card.
+            droppedPackets   = $null
+            tcpRetransmits   = $null
+            tcpResets        = $null
+            tcpSyns          = $null
+            tcpSynAcks       = $null
+            tcpFins          = $null
+            topTalkers       = @()
+            findings         = @($rtmFindings)
+        } | ConvertTo-Json -Depth 5 -Compress
+        return
     }
 
     # -- Start capture (ETL file, headers only) -------------------
@@ -492,6 +640,8 @@ try {
 
     [ordered]@{
         durationSec     = $DurationSec
+        captureMode     = 'capture'
+        osBuild         = $osBuild
         totalPackets    = $totalPackets
         inspectedPackets = $parsedPackets
         droppedPackets  = $droppedPackets
