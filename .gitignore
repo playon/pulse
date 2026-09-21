@@ -31,6 +31,9 @@ Pulse.Web/pulse-launch-done
 #  - .claude/worktrees/ : per-session git worktree metadata
 #  - .preview-* : symlinks into a sibling worktree, used to preview another
 #    session's branch from this checkout (paths are machine-local)
+#  - .impeccable/ : snapshots and scratch state from the local design tooling
+#    (critique reports, overlay server config). Per-session and machine-local.
 runners/app/
 .claude/worktrees/
 .preview-*
+.impeccable/
