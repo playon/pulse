@@ -17,9 +17,9 @@ try {
     #  - prod-echo.pixellot.tv covers TCP 443 + UDP 123/443/2088 per the CSV;
     #    we hit those specific subdomain entries in addition to the wider
     #    pixellot.tv apex test (some venues filter on FQDN, not IP).
-    #  - scorebot.sportzcast.net binds to TCP 1400-1405 for ScoreConnect; the
-    #    range is venue-dependent so every port is marked optional. Not all
-    #    schools have ScoreConnect.
+    #  - scorebot.sportzcast.net (TCP 1400-1405) is NOT tested. It was, as
+    #    optional rows, until the range was dropped -- see the note in the
+    #    port list below.
     # Discover the VPU's configured DNS server so the DNS check tests the
     # resolver the box actually uses -- not a hardcoded public IP like 8.8.8.8,
     # which locked-down venue networks block by design (the VPU resolves names
