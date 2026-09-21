@@ -797,17 +797,67 @@ html.dark .channel-moved-banner {
 
 /* ── Top findings ───────────────────────────────────────────── */
 /* The list lives in .cc-findings, inside the Command Center. */
+/* A disclosure button, not a link: it opens the fix in place. The jump to the
+   owning tab lives inside the panel it opens. */
 .finding-item {
     display: flex;
     align-items: center;
     gap: 10px;
+    width: 100%;
     padding: 8px 10px;
+    border: none;
+    background: none;
+    font: inherit;
+    text-align: left;
     border-radius: 6px;
     text-decoration: none;
     transition: background 0.15s;
     color: var(--c-text);
     cursor: pointer;
 }
+.finding-item:focus-visible {
+    outline: 2px solid var(--c-accent-blue);
+    outline-offset: -2px;
+}
+/* The base chevron points right; as a disclosure it reads down when closed
+   and up when the fix is showing. */
+.finding-item .finding-arrow { transform: rotate(90deg); }
+.finding-item[aria-expanded="true"] .finding-arrow { transform: rotate(-90deg); }
+.finding-item[aria-expanded="true"] { background: var(--c-tint-blue-faint); }
+.finding-detail {
+    padding: 2px 10px 12px 44px;
+}
+.finding-rec {
+    font-size: 0.78rem;
+    line-height: 1.5;
+    color: var(--c-muted);
+    margin: 0 0 8px;
+    max-width: 68ch;
+}
+.finding-rec-none { font-style: italic; }
+.finding-open {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 0.74rem;
+    font-weight: 600;
+    color: var(--c-accent-blue);
+    text-decoration: none;
+}
+.finding-open:hover { text-decoration: underline; }
+.cc-findings-actions { display: inline-flex; align-items: center; gap: 10px; }
+.finding-copy {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--c-muted);
+    background: none;
+    border: 1px solid var(--c-border);
+    border-radius: 5px;
+    padding: 3px 8px;
+    cursor: pointer;
+    transition: color 0.12s, border-color 0.12s;
+}
+.finding-copy:hover { color: var(--c-accent-blue); border-color: var(--c-accent-blue); }
 .finding-item:hover { background: var(--c-tint-blue-faint); }
 .finding-dot {
     width: 8px;
@@ -840,7 +890,7 @@ html.dark .channel-moved-banner {
     flex-shrink: 0;
     transition: transform 0.15s;
 }
-.finding-item:hover .finding-arrow { transform: translateX(2px); color: var(--c-muted); }
+.finding-item:hover .finding-arrow { color: var(--c-muted); }
 
 /* Below ~640px the verdict phrase takes its own line. Holding it in a 132px
    nowrap column beside the title left the title about 90px wide and wrapped
@@ -849,6 +899,9 @@ html.dark .channel-moved-banner {
     .finding-item  { flex-wrap: wrap; row-gap: 2px; }
     .finding-cat   { min-width: 0; }
     .finding-title { flex: 0 0 calc(100% - 24px); }
+    /* The 44px indent lines the fix up under the title on desktop; at phone
+       width that is a quarter of the screen. */
+    .finding-detail { padding-left: 18px; }
 }
 
 /* ── Active findings ──────────────────────────────────────── */

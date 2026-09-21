@@ -1576,6 +1576,48 @@ function _findingPageFor(cat) {
   return map[(cat || "").toLowerCase()] || "dashboard";
 }
 
+// Page id -> the label the sidebar uses for it, so a "what to do" panel can
+// name the tab that owns the fix in the same words the nav does.
+function _pageLabel(pageId) {
+  for (var s = 0; s < NAV_SECTIONS.length; s++) {
+    var pages = NAV_SECTIONS[s].pages || [];
+    for (var i = 0; i < pages.length; i++) {
+      if (pages[i].id === pageId) return pages[i].label;
+    }
+  }
+  return pageId;
+}
+
+// Expand a finding in place. The recommendation text -- written in main.py and
+// the best copy in the product -- used to render ONLY inside the owning tab's
+// issues panel, so the dashboard showed a title and a chevron and the answer
+// was a tab switch away. Most agents never made the trip. The jump is still
+// here, as a named link inside the panel, but reading what to do no longer
+// costs you your place.
+function toggleFinding(i) {
+  var btn = document.getElementById("finding-btn-" + i);
+  var panel = document.getElementById("finding-detail-" + i);
+  if (!btn || !panel) return;
+  var open = btn.getAttribute("aria-expanded") === "true";
+  btn.setAttribute("aria-expanded", open ? "false" : "true");
+  panel.hidden = open;
+}
+
+// Everything a ticket needs, as text: the unit, the verdict, and every finding
+// with what to do about it. Pulse could state a problem in five places and an
+// agent still had to retype it into the ticket by hand.
+function copyFindingsForTicket() {
+  var txt = window.__pulseTicketText || "";
+  if (!txt || !navigator.clipboard) return;
+  navigator.clipboard.writeText(txt).then(function () {
+    var el = document.getElementById("finding-copy-btn");
+    if (!el) return;
+    var was = el.textContent;
+    el.textContent = "Copied";
+    setTimeout(function () { el.textContent = was; }, 1600);
+  });
+}
+
 var _dashNicRefreshTimer = null;
 
 function _renderNicRows(ports) {
@@ -1831,6 +1873,41 @@ function renderDashboard() {
   const timeStr = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   const baselineStr = "Checked " + subsystems.length + " area" + (subsystems.length === 1 ? "" : "s");
 
+  // Ticket text, assembled from what is already on screen -- unit, verdict,
+  // and every finding with its recommendation. Built here rather than in the
+  // click handler so it always matches the render the agent is looking at.
+  // Nothing is authored: this is the same copy the panels show, laid out so it
+  // can be pasted whole.
+  (function buildTicketText() {
+    var rdy = dash.readiness || {};
+    var meta = _RDY_META[rdy.status] || null;
+    var lines = [];
+    lines.push("Pulse - " + (id.vpuName || id.hostname || "VPU"));
+    if (id.hostname && id.vpuName) lines.push("Host: " + id.hostname);
+    lines.push("Checked: " + new Date().toLocaleString());
+    lines.push("");
+    if (meta) {
+      lines.push("Stream readiness: " + meta.word + " - " + meta.tag);
+      var nb = (rdy.blockers || []).length, nr = (rdy.risks || []).length;
+      lines.push(nb
+        ? nb + (nb === 1 ? " thing is" : " things are") + " stopping tonight's game, " + nr + " risk" + (nr === 1 ? "" : "s") + " tonight"
+        : "Nothing is stopping tonight's game, " + nr + " risk" + (nr === 1 ? "" : "s") + " tonight");
+      lines.push("");
+    }
+    if (!sortedFindings.length) {
+      lines.push("No findings.");
+    } else {
+      sortedFindings.forEach(function (f) {
+        var v = VERDICT[toneOf(f)] || verdictFor(f.severity);
+        lines.push("[" + v.word + "] " + (f.title || ""));
+        var rec = (f.recommendation || "").trim();
+        if (rec) lines.push("    " + rec);
+        lines.push("");
+      });
+    }
+    window.__pulseTicketText = lines.join("\n").replace(/\n+$/, "\n");
+  })();
+
   // Network config — prefer dashboard-embedded data, fall back to full network cache
   const netCfg = dash.networkConfig || net.config || {};
   const uplinkName = netCfg.uplinkAdapter?.interfaceAlias || "—";
@@ -1915,7 +1992,10 @@ function renderDashboard() {
           <span class="dash-hdr-icon">${svgIcon("clipboard-list", 16)}</span>
           <h3 class="card-label mb-0">FINDINGS</h3>
         </div>
-        <span class="cc-findings-count">${totalFindings} issue${totalFindings === 1 ? "" : "s"}</span>
+        <div class="cc-findings-actions">
+          <span class="cc-findings-count">${totalFindings} issue${totalFindings === 1 ? "" : "s"}</span>
+          <button class="finding-copy" id="finding-copy-btn" onclick="copyFindingsForTicket()" title="Copy the unit, the verdict and every finding with its fix, ready to paste into a ticket">Copy for ticket</button>
+        </div>
       </div>
       <div class="cc-findings-list">
         ${visibleFindings.map((f, i) => {
@@ -1924,13 +2004,22 @@ function renderDashboard() {
           const fp = _findingPageFor(f.category);
           const encTitle = encodeURIComponent(f.title || "");
           const v = VERDICT[toneOf(f)] || verdictFor(f.severity);
+          const rec = (f.recommendation || "").trim();
           return groupBreak + `
-        <a class="finding-item" href="#${esc(fp)}" onclick="event.preventDefault();findingJump('${esc(fp)}','${encTitle}')" title="Opens the ${esc(f.category)} tab and highlights this issue">
-          <span class="finding-dot finding-dot-${esc(v.tone)}"></span>
-          <span class="finding-cat finding-cat-${esc(v.tone)}">${esc(v.word)}</span>
-          <span class="finding-title">${esc(f.title)}</span>
-          <span class="finding-arrow">${svgIcon("chevron", 14)}</span>
-        </a>`;
+        <div class="finding-row">
+          <button class="finding-item" id="finding-btn-${i}" type="button"
+                  aria-expanded="false" aria-controls="finding-detail-${i}"
+                  onclick="toggleFinding(${i})">
+            <span class="finding-dot finding-dot-${esc(v.tone)}"></span>
+            <span class="finding-cat finding-cat-${esc(v.tone)}">${esc(v.word)}</span>
+            <span class="finding-title">${esc(f.title)}</span>
+            <span class="finding-arrow">${svgIcon("chevron", 14)}</span>
+          </button>
+          <div class="finding-detail" id="finding-detail-${i}" hidden>
+            ${rec ? `<p class="finding-rec">${esc(rec)}</p>` : `<p class="finding-rec finding-rec-none">No fix recorded for this finding yet. Open ${esc(_pageLabel(fp))} for the full detail.</p>`}
+            <a class="finding-open" href="#${esc(fp)}" onclick="event.preventDefault();findingJump('${esc(fp)}','${encTitle}')">Open ${esc(_pageLabel(fp))}${svgIcon("chevron", 13)}</a>
+          </div>
+        </div>`;
         }).join("")}
         ${overflowCount > 0 ? `<div class="cc-findings-overflow">+${overflowCount} more. Open the relevant tab for the full list</div>` : ""}
       </div>
