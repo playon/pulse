@@ -2796,6 +2796,7 @@ function _pingCardHtml(p, resolutionWorks) {
       '<span class="net-ping-dot" style="background:' + dot + '"></span>' +
       '<span class="net-ping-label">' + esc(p.label) + '</span>' +
       '<span class="net-ping-target font-mono">' + esc(p.target) + '</span>' +
+      statusBadge(p.status) +
     '</div>' +
     '<div class="net-ping-stats">' +
       '<div class="net-ping-stat"><span class="net-ping-stat-label">Latency</span><span class="net-ping-stat-value">' + esc(latency) + '</span></div>' +

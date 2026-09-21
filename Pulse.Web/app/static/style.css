@@ -176,7 +176,7 @@ html.dark #sidebar { background: var(--c-surface-2); }
 .badge-notfound { background: var(--c-border); color: var(--c-muted); }
 
 /* ── Severity badges ───────────────────────────────────────── */
-.sev-ok { background: var(--c-tint-green); color: var(--c-accent-green); border-left: 3px solid var(--c-accent-green); }
+.sev-ok { background: var(--c-tint-green); color: var(--c-accent-green); }
 
 /* ── Sidebar brand ─────────────────────────────────────────── */
 /* Full Pulse wordmark + heartbeat as the brand block.
@@ -692,10 +692,10 @@ html.dark .channel-moved-banner {
    The 90-second triage artifact: one big PASS/WARN/FAIL verdict at the top of
    the Dashboard, with the blockers/risks that drove it. A left accent stripe
    carries the verdict colour. */
-.rdy-card { margin-bottom: 1rem; border-left: 4px solid var(--c-border); padding: 1rem 1.25rem; }
-.rdy-card-pass { border-left-color: var(--c-accent-green); }
-.rdy-card-warn { border-left-color: var(--c-accent-amber); }
-.rdy-card-fail { border-left-color: var(--c-accent-red); }
+.rdy-card { margin-bottom: 1rem; padding: 1rem 1.25rem; }
+.rdy-card-pass { border-color: var(--c-accent-green); }
+.rdy-card-warn { border-color: var(--c-accent-amber); }
+.rdy-card-fail { border-color: var(--c-accent-red); }
 
 .rdy-main { display: flex; align-items: center; gap: 1rem; }
 .rdy-badge {
@@ -1354,16 +1354,16 @@ html.dark .channel-moved-banner {
     letter-spacing: 0.04em;
     text-transform: uppercase;
 }
-.svc-deps-current  { background: var(--c-tint-green); border-left: 3px solid var(--c-accent-green); }
+.svc-deps-current  { background: var(--c-tint-green); box-shadow: inset 0 0 0 1px var(--c-accent-green); }
 .svc-deps-current  svg, .svc-deps-current .svc-deps-pill { color: var(--c-accent-green); }
 .svc-deps-current  .svc-deps-pill { background: var(--c-tint-green); }
-.svc-deps-outdated { background: var(--c-tint-amber); border-left: 3px solid var(--c-accent-amber); }
+.svc-deps-outdated { background: var(--c-tint-amber); box-shadow: inset 0 0 0 1px var(--c-accent-amber); }
 .svc-deps-outdated svg, .svc-deps-outdated .svc-deps-pill { color: var(--c-accent-amber); }
 .svc-deps-outdated .svc-deps-pill { background: var(--c-tint-amber); }
-.svc-deps-missing  { background: var(--c-tint-red);   border-left: 3px solid var(--c-accent-red); }
+.svc-deps-missing  { background: var(--c-tint-red);   box-shadow: inset 0 0 0 1px var(--c-accent-red); }
 .svc-deps-missing  svg, .svc-deps-missing .svc-deps-pill { color: var(--c-accent-red); }
 .svc-deps-missing  .svc-deps-pill { background: var(--c-tint-red); }
-.svc-deps-newer    { background: var(--c-surface-3);   border-left: 3px solid var(--c-muted); }
+.svc-deps-newer    { background: var(--c-surface-3);   box-shadow: inset 0 0 0 1px var(--c-muted); }
 .svc-deps-newer    svg, .svc-deps-newer .svc-deps-pill { color: var(--c-muted); }
 .svc-deps-newer    .svc-deps-pill { background: var(--c-surface-3); }
 
@@ -1375,7 +1375,7 @@ html.dark .channel-moved-banner {
     padding: 8px 12px;
     border-radius: 6px;
     background: var(--c-tint-amber, rgba(217, 119, 6, 0.08));
-    border-left: 3px solid var(--c-accent-amber, #d97706);
+    box-shadow: inset 0 0 0 1px var(--c-accent-amber, #d97706);
     color: var(--c-text);
     font-size: 0.8rem;
     line-height: 1.45;
@@ -1397,11 +1397,11 @@ html.dark .channel-moved-banner {
 /* "ok" used to mean green — but EOL is informational, not a celebration,
    even when years away.  Now: blue/info for >1y or unknown, amber for
    <1y, red for <90d or past. */
-.sys-lifecycle-ok   { background: var(--c-tint-blue);  border-left: 3px solid var(--c-accent-blue); }
+.sys-lifecycle-ok   { background: var(--c-tint-blue);  box-shadow: inset 0 0 0 1px var(--c-accent-blue); }
 .sys-lifecycle-ok   svg { color: var(--c-accent-blue); }
-.sys-lifecycle-warn { background: var(--c-tint-amber); border-left: 3px solid var(--c-accent-amber); }
+.sys-lifecycle-warn { background: var(--c-tint-amber); box-shadow: inset 0 0 0 1px var(--c-accent-amber); }
 .sys-lifecycle-warn svg { color: var(--c-accent-amber); }
-.sys-lifecycle-crit { background: var(--c-tint-red);   border-left: 3px solid var(--c-accent-red);   }
+.sys-lifecycle-crit { background: var(--c-tint-red);   box-shadow: inset 0 0 0 1px var(--c-accent-red);   }
 .sys-lifecycle-crit svg { color: var(--c-accent-red); }
 
 /* Peripherals panel (mouse / keyboard / monitor) */
@@ -1449,7 +1449,7 @@ html.dark .channel-moved-banner {
 .sw-concern-banner {
     display: flex; align-items: center; gap: 8px;
     padding: 8px 12px; margin-bottom: 12px;
-    background: var(--c-tint-amber); border-left: 3px solid var(--c-accent-amber);
+    background: var(--c-tint-amber); box-shadow: inset 0 0 0 1px var(--c-accent-amber);
     border-radius: 6px;
     color: var(--c-text); font-size: 0.85rem;
 }
@@ -2285,8 +2285,8 @@ details[open] > .cam-details-btn::before { transform: rotate(90deg); }
    row reads as its own card-within-card. */
 .cam-finding-row { border-radius: 6px; padding: 10px 14px; margin-bottom: 10px; box-shadow: inset 0 0 0 1px var(--c-border); }
 .cam-finding-row:last-child { margin-bottom: 0; }
-.cam-finding-row-critical { background: var(--c-tint-red); border-left: 3px solid var(--c-accent-red); }
-.cam-finding-row-warning  { background: var(--c-tint-amber); border-left: 3px solid var(--c-accent-amber); }
+.cam-finding-row-critical { background: var(--c-tint-red); box-shadow: inset 0 0 0 1px var(--c-accent-red); }
+.cam-finding-row-warning  { background: var(--c-tint-amber); box-shadow: inset 0 0 0 1px var(--c-accent-amber); }
 .cam-finding-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
 .cam-finding-pill { font-size: 0.65rem; font-weight: 700; border-radius: 3px; padding: 2px 6px; color: var(--c-on-accent); flex-shrink: 0; }
 .cam-finding-pill-critical { background: var(--c-pill-critical); }
@@ -2299,8 +2299,8 @@ details[open] > .cam-details-btn::before { transform: rotate(90deg); }
    headroom on that port. Fills use --c-status-* (they are fills, not text);
    the note titles use --c-accent-* per the a11y pass in PR #138. */
 .cam-poe-note { border-radius: 6px; padding: 10px 14px; box-shadow: inset 0 0 0 1px var(--c-border); }
-.cam-poe-note-info { background: var(--c-tint-blue); border-left: 3px solid var(--c-accent-blue); }
-.cam-poe-note-warn { background: var(--c-tint-amber); border-left: 3px solid var(--c-accent-amber); }
+.cam-poe-note-info { background: var(--c-tint-blue); box-shadow: inset 0 0 0 1px var(--c-accent-blue); }
+.cam-poe-note-warn { background: var(--c-tint-amber); box-shadow: inset 0 0 0 1px var(--c-accent-amber); }
 .cam-poe-note-title { font-size: 0.8rem; font-weight: 600; margin-bottom: 4px; }
 .cam-poe-note-info .cam-poe-note-title { color: var(--c-accent-blue); }
 .cam-poe-note-warn .cam-poe-note-title { color: var(--c-accent-amber); }
@@ -2391,10 +2391,10 @@ details[open] > .cam-details-btn::before { transform: rotate(90deg); }
 .fi-result-detail { font-size: 0.78rem; color: var(--c-muted); margin-top: 3px; line-height: 1.45; }
 
 .fi-verdict-card { border-radius: 8px; padding: 20px; margin-bottom: 16px; }
-.fi-verdict-cable   { background: var(--c-tint-amber);  border-left: 4px solid var(--c-accent-amber); }
-.fi-verdict-nic     { background: var(--c-tint-red);     border-left: 4px solid var(--c-accent-red); }
-.fi-verdict-camera  { background: var(--c-tint-amber);   border-left: 4px solid var(--c-accent-amber); }
-.fi-verdict-unknown { background: var(--c-surface-3);   border-left: 4px solid var(--c-dim); }
+.fi-verdict-cable   { background: var(--c-tint-amber);  box-shadow: inset 0 0 0 1px var(--c-accent-amber); }
+.fi-verdict-nic     { background: var(--c-tint-red);     box-shadow: inset 0 0 0 1px var(--c-accent-red); }
+.fi-verdict-camera  { background: var(--c-tint-amber);   box-shadow: inset 0 0 0 1px var(--c-accent-amber); }
+.fi-verdict-unknown { background: var(--c-surface-3);   box-shadow: inset 0 0 0 1px var(--c-dim); }
 .fi-verdict-title { font-size: 1.05rem; font-weight: 700; margin-bottom: 8px; color: var(--c-text); }
 .fi-verdict-body  { font-size: 0.875rem; color: var(--c-text); line-height: 1.6; }
 
@@ -2433,9 +2433,9 @@ details[open] > .fi-hist-summary::before { transform: rotate(90deg); }
     margin-top: 0.75rem; padding: 0.75rem 0.875rem; border-radius: 6px;
 }
 .svc-quick-action-result.hidden { display: none; }
-.svc-result-ok  { background: var(--c-tint-green); border-left: 3px solid var(--c-accent-green); color: var(--c-text); }
-.svc-result-err { background: var(--c-tint-red);   border-left: 3px solid var(--c-accent-red);   color: var(--c-text); }
-.svc-result-warn { background: var(--c-tint-amber); border-left: 3px solid var(--c-accent-amber); color: var(--c-text); }
+.svc-result-ok  { background: var(--c-tint-green); box-shadow: inset 0 0 0 1px var(--c-accent-green); color: var(--c-text); }
+.svc-result-err { background: var(--c-tint-red);   box-shadow: inset 0 0 0 1px var(--c-accent-red);   color: var(--c-text); }
+.svc-result-warn { background: var(--c-tint-amber); box-shadow: inset 0 0 0 1px var(--c-accent-amber); color: var(--c-text); }
 .svc-result-output {
     margin-top: 6px; padding: 6px 8px; border-radius: 4px;
     background: var(--c-surface-3); color: var(--c-text);
@@ -2470,14 +2470,13 @@ details[open] > .fi-hist-summary::before { transform: rotate(90deg); }
     padding: 14px;
     display: flex;
     flex-direction: column;
-    border-left: 4px solid;
 }
 /* Theme-aware accent colors + thicker stripe so the running/stopped
    indicator is legible at a glance — was 3px raw hex that washed out
    on the dark surface. */
-.svc-tile-running { border-left-color: var(--c-accent-green); }
-.svc-tile-stopped { border-left-color: var(--c-accent-red); }
-.svc-tile-muted   { border-left-color: var(--c-dimmer); }
+.svc-tile-running { border-color: var(--c-accent-green); }
+.svc-tile-stopped { border-color: var(--c-accent-red); }
+.svc-tile-muted   { border-color: var(--c-dimmer); }
 .svc-tile-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
 .svc-tile-name { font-size: 0.85rem; font-weight: 600; color: var(--c-text); }
 .svc-tile-display { font-size: 0.7rem; color: var(--c-muted); margin-bottom: 4px; }
@@ -2641,7 +2640,7 @@ details[open] > .fi-hist-summary::before { transform: rotate(90deg); }
 .px-log-deps-warn {
     display: flex; gap: 10px; align-items: flex-start;
     padding: 10px 14px; border-radius: 6px;
-    background: var(--c-tint-red); border-left: 3px solid var(--c-accent-red);
+    background: var(--c-tint-red); box-shadow: inset 0 0 0 1px var(--c-accent-red);
     color: var(--c-text);
 }
 .px-log-deps-warn svg { flex-shrink: 0; color: var(--c-accent-red); margin-top: 2px; }
@@ -2918,8 +2917,8 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
   padding: 0.625rem 0.75rem; border-radius: 6px; margin-bottom: 0.5rem;
 }
 .audio-finding:last-child { margin-bottom: 0; }
-.audio-finding-warning { background: var(--c-tint-amber, rgba(217, 119, 6, 0.08)); border-left: 3px solid var(--c-accent-amber, #d97706); }
-.audio-finding-info    { background: var(--c-tint-blue-faint); border-left: 3px solid var(--c-accent-blue); }
+.audio-finding-warning { background: var(--c-tint-amber, rgba(217, 119, 6, 0.08)); box-shadow: inset 0 0 0 1px var(--c-accent-amber, #d97706); }
+.audio-finding-info    { background: var(--c-tint-blue-faint); box-shadow: inset 0 0 0 1px var(--c-accent-blue); }
 .audio-finding-pill {
   font-size: 0.65rem; font-weight: 700; border-radius: 3px;
   padding: 2px 6px; color: var(--c-on-accent); flex-shrink: 0;
@@ -3083,10 +3082,10 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
     border: 1px solid var(--c-border);
     background: var(--c-surface-3);
 }
-.net-ping-pass { border-left: 3px solid var(--c-accent-green); }
-.net-ping-warn { border-left: 3px solid var(--c-accent-amber); }
-.net-ping-fail { border-left: 3px solid var(--c-accent-red); }
-.net-ping-info { border-left: 3px solid var(--c-accent-blue); }
+.net-ping-pass { border-color: var(--c-accent-green); }
+.net-ping-warn { border-color: var(--c-accent-amber); }
+.net-ping-fail { border-color: var(--c-accent-red); }
+.net-ping-info { border-color: var(--c-accent-blue); }
 
 .net-ping-header {
     display: flex;
@@ -3920,9 +3919,9 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
 }
 
 /* ── SC III crash auto-restart panel ────────────────────────── */
-.sc3-recovery { border-left: 3px solid var(--c-border); }
-.sc3-recovery-on { border-left-color: var(--c-accent-green); }
-.sc3-recovery-off { border-left-color: var(--c-accent-amber); }
+.sc3-recovery { box-shadow: inset 0 0 0 1px var(--c-border); border-radius: 6px; }
+.sc3-recovery-on { box-shadow: inset 0 0 0 1px var(--c-accent-green); }
+.sc3-recovery-off { box-shadow: inset 0 0 0 1px var(--c-accent-amber); }
 .sc3-recovery-head {
     display: flex;
     align-items: flex-start;
