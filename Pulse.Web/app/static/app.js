@@ -1809,7 +1809,7 @@ function _renderVolumes(volumes) {
 // The policy table + rollup live server-side (_compute_readiness in main.py);
 // this just renders the verdict record that rides on dash.readiness.
 var _RDY_META = {
-  PASS: { word: "PASS", icon: "check", tone: "pass", tag: "Game-ready. Nothing found that puts an game's stream at risk." },
+  PASS: { word: "PASS", icon: "check", tone: "pass", tag: "Game-ready. Nothing found that puts a game's stream at risk." },
   WARN: { word: "WARNING", icon: "alert", tone: "warn", tag: "Streaming is possible, but may not be reliable. Fix the issues below before the stream goes on air." },
   FAIL: { word: "FAIL", icon: "x",     tone: "fail", tag: "Stream-blocker(s) present. Fix this before the game." },
 };
