@@ -90,8 +90,9 @@ try {
         # understand. Scoreboard health is covered properly by the
         # ScoreConnect tab, which tests the thing that actually matters (the
         # bot connection and the live feed) rather than egress to a port
-        # range. sportzcast.net stays in the domain-reachability list, so a
-        # venue filter against Sportzcast is still visible.
+        # range. sportzcast.net has since been dropped from the
+        # domain-reachability list too, so Pulse no longer probes Sportzcast
+        # at all.
     )
 
     # DNS reachability against the *configured* resolver (prepended so it
