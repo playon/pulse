@@ -1902,9 +1902,18 @@ function renderDashboard() {
   // opinion or is deferring to a check it already counted.
   const toneOf = (f) => {
     const own = verdictFor(f.severity).tone;
+    // A finding can name the readiness entry that supersedes it (main.py sets
+    // supersededBy where one condition is reported by two records -- a full
+    // C:/D: drive). Take that entry's class: it is the one the policy actually
+    // weighed, and the one the counts on this card are built from.
+    const superseded = f.supersededBy ? _toneByCode[f.supersededBy] : null;
+    if (superseded) return superseded;
     const policy = _toneByCode[f.code];
     if (!policy) return own;                                  // no readiness record
-    if (policy === "info" && own !== "info") return "warning"; // never demote
+    // The policy may ESCALATE -- deciding what stops tonight's game is its
+    // job -- but it must never silently DEMOTE a finding to an FYI. This is
+    // the fallback for codes with no explicit supersession.
+    if (policy === "info" && own !== "info") return "warning";
     return policy;
   };
 

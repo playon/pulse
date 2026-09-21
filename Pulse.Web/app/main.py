@@ -1796,6 +1796,19 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
             cleanup_hint = (
                 "The Disks page can clear space for you: open Disks and use "
                 "Storage Cleanup." if letter == "D" else None)
+            # Readiness gates C: and D: through its own per-drive checks
+            # (F15a/F15b below), because a blocker on C: and a risk on D: is
+            # not the same call. That left one full drive described by two
+            # records: this finding, and readiness' own entry. The policy
+            # table classed this one `info` to stop it double-counting in the
+            # rollup, and the dashboard then rendered a full recording drive
+            # as "Worth knowing" while the same card counted it as a risk one
+            # line above.
+            #
+            # Say which record wins, in the data, instead of leaving each
+            # layer to infer it: readiness drops the superseded copy from its
+            # audit record, and the UI takes the tone of the entry named here.
+            superseded_by = {"C": "disk-c-critical", "D": "disk-d-critical"}.get(letter)
             findings.append(
                 {
                     "code": "disk-critical",
@@ -1807,6 +1820,7 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                         consequence,
                         cleanup_hint,
                     ])),
+                    **({"supersededBy": superseded_by} if superseded_by else {}),
                 }
             )
         # No warning tier below 90% — disk fill alerts are critical-only.
@@ -2537,7 +2551,11 @@ _READINESS_POLICY = {
     "mem-elevated":          "info",     # F20 80–90% snapshot
     "cpu-critical":          "info",     # snapshot >90% — readiness uses the average (F17)
     "mem-critical":          "info",     # snapshot >90% — readiness uses the average (F19)
-    "disk-critical":         "info",     # a volume >90% — readiness gates via its own F15a/b
+    # Kept classified so test_every_critical_finding_code_is_classified holds,
+    # but for C:/D: the finding carries supersededBy and never reaches here --
+    # F15a/F15b report those drives at their own class. This entry is the
+    # fallback for any OTHER volume >90%.
+    "disk-critical":         "info",
     "disk-smart-wear":       "info",     # SSD ≥80% rated life — heads-up, won't stop tonight's game
     "temp-critical":         "info",     # 85°C snapshot — readiness gate is 90°C (F14)
     "tz-non-us":             "info",     # F25
@@ -2624,6 +2642,11 @@ def _compute_readiness(findings, performance=None, disk_health=None,
     # (1) Finding-derived classes, straight from the policy table.
     for f in (findings or []):
         code = f.get("code") or ""
+        # A finding that names its successor is the same condition a
+        # readiness-specific check below reports at the right class. Adding it
+        # too would put one full drive in the record twice, once as `info`.
+        if f.get("supersededBy"):
+            continue
         add(_readiness_class(code), code, f.get("title", ""),
             f.get("recommendation", ""), f.get("category", ""))
 
