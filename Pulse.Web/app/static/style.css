@@ -1454,40 +1454,60 @@ html.dark .channel-moved-banner {
     align-items: start;
     margin-top: 0.5rem;
 }
-/* Port-led tile: the port number leads (priority) with the protocol beside it
-   and a status pill — no hosts/domains (those live in Domain Reachability). A
-   top accent strip carries the status colour (green reachable / amber
-   no-failover / dim optional / red blocked-required), via --rowaccent. */
+/* Service-led tile: what the endpoint DOES leads, "UDP 2088" sits beneath it,
+   and a status pill sits right. Status reads twice — a dot beside the name
+   (the same signal the Dashboard findings list uses) and the pill's own word —
+   so it never depends on one colour alone. --rowaccent tints both.
+
+   This used to carry a 3px colour strip along the top edge. A thick coloured
+   rule on a rounded card is decoration standing in for a status signal, and it
+   was the only thing distinguishing a blocked tile from a reachable one at a
+   glance. The dot says it, and the pill says it in words. */
 .net-port-card {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    padding: 9px 12px 10px;
+    gap: 3px;
+    padding: 10px 12px 11px;
     background: var(--c-surface-2);
     border: 1px solid var(--c-border);
-    border-top: 3px solid var(--rowaccent, var(--c-border));
     border-radius: 8px;
     transition: border-color 0.12s ease;
+}
+.net-port-dot {
+    width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+    background: var(--rowaccent, var(--c-border));
+}
+/* Two columns leave about 135px for the name, so "Live video - backup path"
+   wraps to three lines while "Clock sync" takes one and the grid goes ragged
+   (71px next to 120px). One column below 640px: every name fits on one line
+   and the tiles read as a uniform list. */
+@media (max-width: 640px) {
+    .net-port-grid { grid-template-columns: 1fr; }
 }
 .net-port-card:hover { border-color: var(--rowaccent, var(--c-border)); }
 .net-port-card.is-fail { border-color: rgba(220, 38, 38, 0.4); }
 /* Top row of a port tile: port number + ? tooltip cue on the left, the shared
    .badge-* status pill (same one Service Reachability rows use) on the right. */
 .net-port-card-head {
-    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
 }
 .net-port-card-lead {
-    display: inline-flex; align-items: center; gap: 7px; min-width: 0;
+    display: inline-flex; align-items: baseline; gap: 7px; min-width: 0; flex: 1 1 auto;
 }
 /* Port number leads (priority); protocol sits below it as a small label. */
-.net-port-num {
-    font-size: 1.1rem; font-weight: 700; color: var(--c-text);
+/* The service name leads. It wraps to two lines rather than truncating —
+   "Live video - last resort" has to stay readable, and a clipped service name
+   is worse than a taller tile. */
+.net-port-name {
+    font-size: 0.82rem; font-weight: 600; color: var(--c-text);
+    line-height: 1.25; min-width: 0;
+}
+/* Protocol + port, the tier-2 detail. Monospace here is measurement, not
+   costume: these are numbers a tech reads back to venue IT digit by digit. */
+.net-port-addr {
+    font-size: 0.68rem; font-weight: 500; color: var(--c-muted);
     font-family: "SF Mono","Cascadia Mono","Fira Code",monospace;
     letter-spacing: 0.01em; white-space: nowrap;
-}
-.net-port-proto-tag {
-    font-size: 0.62rem; font-weight: 600; color: var(--c-muted);
-    text-transform: uppercase; letter-spacing: 0.08em;
 }
 .net-port-card-foot {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;

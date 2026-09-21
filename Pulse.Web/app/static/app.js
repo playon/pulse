@@ -3105,6 +3105,33 @@ const NET_PORT_IMPACT = {
   "RTMP Fallback": "Last-resort streaming path (RTMP over TCP/1935) used only when both Zixi/UDP connections are blocked: games start ~4 minutes late with no packet-loss protection. If this is blocked too, a venue with both UDP ports blocked can't broadcast at all. (Tested against a stable public RTMP host. That proves TCP/1935 is open by port, not that pixellot.stream itself is allowed.)",
   "Scorebot": "SportzCast scoreboard software can't connect or update (SportzCast sites only).",
 };
+// What each endpoint IS, in words a tier-1 agent can act on. The `purpose`
+// keys are the engineering names the collector emits; several are vendor or
+// protocol jargon ("Zixi Streaming", "RTMP Fallback", "NTP") that mean nothing
+// to someone taking a call from an athletic director. The tile leads with
+// these; the protocol/port stays underneath as the detail tier 2 needs.
+//
+// The three streaming rungs are deliberately named as one chain -- main /
+// backup / last resort -- because that is the single most useful thing the
+// Network tab can tell someone: which way the game is going out tonight.
+const NET_PORT_LABEL = {
+  "DNS":              "Name lookup (DNS)",
+  "NTP":              "Clock sync",
+  "Pixellot":         "Pixellot updates",
+  "Pixellot Echo":    "Pixellot cloud services",
+  "NFHS Network":     "NFHS scheduling",
+  "Singular Overlay": "On-screen graphics",
+  "LogMeIn":          "Remote support",
+  "Zixi Streaming":   "Live video – main path",
+  "Zixi Backup":      "Live video – backup path",
+  "RTMP Fallback":    "Live video – last resort",
+  "Scorebot":         "SportzCast scoreboard",
+};
+// A tile covering several services that share one port (the five TCP/443
+// endpoints). Naming them all would not fit; the pill carries N/M and the
+// tooltip points at Service Reachability for the breakdown.
+const NET_PORT_LABEL_SHARED = "Cloud services";
+
 const NET_DOMAIN_IMPACT = {
   "nfhsnetwork.com": "Event scheduling, broadcast watermarks, and viewer access are unavailable.",
   "pixellot.tv": "System management and software updates are blocked, and the stream fails to broadcast.",
@@ -3263,6 +3290,30 @@ function _renderPortConnectivity(ports) {
       var pb = Math.min.apply(null, b.items.map(function(p) { return Number(p.port) || 0; }));
       return pa !== pb ? pa - pb : a.order - b.order;
     });
+
+    // The three streaming rungs are one failover chain and now say so on their
+    // faces ("main path" / "backup path" / "last resort"). Ascending port order
+    // scattered them -- backup (UDP/443), last resort (TCP/1935), main
+    // (UDP/2088) -- so the tiles contradicted the chain they name. Keep them
+    // contiguous and in chain order, anchored where the first one already sorted
+    // to, so the reading order matches the order the stream actually tries.
+    function isRung(g) {
+      var p0 = g.items[0] || {};
+      return !p0.optional && STREAM_RUNG_PURPOSES.indexOf(p0.purpose) !== -1;
+    }
+    var firstRung = groups.findIndex(isRung);
+    if (firstRung !== -1) {
+      var rungs = groups.filter(isRung).sort(function(a, b) {
+        return STREAM_RUNG_PURPOSES.indexOf(a.items[0].purpose)
+             - STREAM_RUNG_PURPOSES.indexOf(b.items[0].purpose);
+      });
+      if (rungs.length > 1) {
+        var rest = groups.filter(function(g) { return !isRung(g); });
+        // Everything before the first rung is a non-rung group, so firstRung is
+        // also its count in `rest`.
+        groups = rest.slice(0, firstRung).concat(rungs, rest.slice(firstRung));
+      }
+    }
     return groups;
   }
 
@@ -3281,7 +3332,14 @@ function _renderPortConnectivity(ports) {
       var contiguous = portsN[portsN.length - 1] - portsN[0] + 1 === portsN.length;
       num = contiguous ? portsN[0] + "–" + portsN[portsN.length - 1] : portsN.join(",");
     }
-    return { num: num, proto: proto };
+    // The service leads; "UDP 2088" becomes the detail line beneath it.
+    var purposes = {};
+    items.forEach(function(p) { if (p.purpose) purposes[p.purpose] = 1; });
+    var distinct = Object.keys(purposes);
+    var label = distinct.length === 1
+      ? (NET_PORT_LABEL[distinct[0]] || distinct[0])
+      : NET_PORT_LABEL_SHARED;
+    return { num: num, proto: proto, label: label, addr: proto + " " + num };
   }
 
   // Status rollup for a (possibly multi-port) group → pill + accent colour.
@@ -3305,9 +3363,17 @@ function _renderPortConnectivity(ports) {
     return { pillTxt: pillTxt, pillCls: pillCls, accent: accent, stateCls: stateCls };
   }
 
-  // Port-led tile: the port number leads (priority) with the protocol beside
-  // it and a status pill — no hosts/domains (those live in Domain Reachability).
-  // A port shared by several required services (TCP/443) shows an N/M count.
+  // Service-led tile: what the endpoint DOES leads, with "UDP 2088" as the
+  // detail line and a status pill on the right. A port shared by several
+  // required services (TCP/443) shows an N/M count. No hosts/domains -- those
+  // live in Domain Reachability.
+  //
+  // This tile used to lead with the bare port number, which put six integers
+  // across the top of the page -- 53, 123, 443, 443, 1935, 2088, two of them
+  // the same number with opposite verdicts -- and left the three streaming
+  // rungs indistinguishable from each other. The section comment above has
+  // said "uniform rows, service-led, protocol/port as metadata" the whole
+  // time; the implementation had drifted the other way.
   function card(group) {
     var items = group.items, p0 = items[0], st = rollup(items), pp = portParts(items);
     // Impact-if-blocked bubble on hover/focus/tap: single-service ports surface
@@ -3326,11 +3392,14 @@ function _renderPortConnectivity(ports) {
     var help = impact ? '<span class="domain-help net-port-help" aria-hidden="true">?</span>' : "";
     return '<div class="net-port-card net-tip' + st.stateCls + '" style="--rowaccent:' + st.accent + '" tabindex="0"' + aria + '>' + tip +
       '<div class="net-port-card-head">' +
-        '<span class="net-port-card-lead"><span class="net-port-num">' + esc(pp.num) + '</span>' + help + '</span>' +
+        '<span class="net-port-card-lead">' +
+          '<span class="net-port-dot"></span>' +
+          '<span class="net-port-name">' + esc(pp.label) + '</span>' + help +
+        '</span>' +
         badge(st.pillTxt, st.pillCls) +
       '</div>' +
       '<div class="net-port-card-foot">' +
-        '<span class="net-port-proto-tag">' + esc(pp.proto) + '</span>' +
+        '<span class="net-port-addr">' + esc(pp.addr) + '</span>' +
       '</div>' +
     '</div>';
   }
@@ -3353,11 +3422,11 @@ function _renderPortConnectivity(ports) {
     // Guard the degenerate case — don't render "All 0 required reachable".
     summary = '<span class="net-port-summary net-port-summary-opt">No required ports tested</span>';
   } else if (reqBlocked === 0) {
-    summary = '<span class="net-port-summary net-port-summary-ok">' + svgIcon("check", 13) + ' All ' + required.length + ' required reachable</span>';
+    summary = '<span class="net-port-summary net-port-summary-ok">' + svgIcon("check", 13) + ' All ' + required.length + ' connections this VPU needs are open</span>';
   } else if (nonStreamBlocked === 0 && health.healthy) {
     summary = '<span class="net-port-summary net-port-summary-warn">' + svgIcon("triangle", 13) + ' Streaming OK · ' + health.blocked.length + ' failover path' + (health.blocked.length === 1 ? "" : "s") + ' blocked</span>';
   } else {
-    summary = '<span class="net-port-summary net-port-summary-bad">' + svgIcon("triangle", 13) + ' ' + reqBlocked + ' of ' + required.length + ' required blocked</span>';
+    summary = '<span class="net-port-summary net-port-summary-bad">' + svgIcon("triangle", 13) + ' The venue is blocking ' + reqBlocked + ' of the ' + required.length + ' connections this VPU needs</span>';
   }
   // Optional count = tiles shown (a multi-host group or port range is one tile).
   if (optGroups.length) summary += '<span class="net-port-summary-opt">· ' + optGroups.length + ' optional</span>';
