@@ -77,6 +77,10 @@ const HIDDEN_TRUNCATION = `(() => {
     if (el.children.length) continue;
     const t = (el.textContent || "").trim();
     if (!t) continue;
+    // Visually-hidden text is clipped on purpose -- that is the whole
+    // mechanism. It exists so a signal carried by colour or an icon has an
+    // accessible name, and a title= on it would be wrong, not missing.
+    if (el.classList.contains("sr-only")) continue;
     if (el.scrollWidth <= el.clientWidth + 1) continue;
     if (el.getAttribute("title")) continue;
     let p = el.parentElement, scrollable = false;
