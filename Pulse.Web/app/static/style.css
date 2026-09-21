@@ -10,10 +10,16 @@
      BOTH --c-surface (#ffffff) and --c-bg (#f1f5f9). The tiers below carry
      10-12px metadata (log timestamps, gauge sublabels, card section labels),
      which is never "large text", so 3:1 is not good enough.
-     Ratios on #ffffff / #f1f5f9:  muted 7.6/6.9 · dim 5.6/5.1 · dimmer 4.8/4.3 */
+     The ramp is measured against every light surface it lands on, INCLUDING
+     --c-deep-bg. The first cut checked only #ffffff and #f1f5f9 and recorded
+     "dimmer 4.8/4.3" -- 4.3 is already under 4.5, and --c-deep-bg (#e8eef5,
+     the sidebar) is darker still, so the nav section labels sat at 4.07:1.
+     Measure the tier against the DARKEST light surface, not the page body.
+     Ratios on #ffffff / #f1f5f9 / #e8eef5:
+       muted 7.6/6.9/6.5 · dim 5.6/5.1/4.8 · dimmer 5.4/4.9/4.6 */
   --c-muted:     #475569;
   --c-dim:       #5b6980;
-  --c-dimmer:    #64748b;
+  --c-dimmer:    #5d6b80;
   --c-deep-bg:   #e8eef5;
   --c-tint-green:    rgba(22,163,74,0.12);
   --c-tint-red:      rgba(220,38,38,0.12);
@@ -892,17 +898,7 @@ html.dark .channel-moved-banner {
 }
 .finding-item:hover .finding-arrow { color: var(--c-muted); }
 
-/* Below ~640px the verdict phrase takes its own line. Holding it in a 132px
-   nowrap column beside the title left the title about 90px wide and wrapped
-   a one-line finding to six. */
-@media (max-width: 640px) {
-    .finding-item  { flex-wrap: wrap; row-gap: 2px; }
-    .finding-cat   { min-width: 0; }
-    .finding-title { flex: 0 0 calc(100% - 24px); }
-    /* The 44px indent lines the fix up under the title on desktop; at phone
-       width that is a quarter of the screen. */
-    .finding-detail { padding-left: 18px; }
-}
+
 
 /* ── Active findings ──────────────────────────────────────── */
 .af-header {
@@ -1530,13 +1526,7 @@ html.dark .channel-moved-banner {
     width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
     background: var(--rowaccent, var(--c-border));
 }
-/* Two columns leave about 135px for the name, so "Live video - backup path"
-   wraps to three lines while "Clock sync" takes one and the grid goes ragged
-   (71px next to 120px). One column below 640px: every name fits on one line
-   and the tiles read as a uniform list. */
-@media (max-width: 640px) {
-    .net-port-grid { grid-template-columns: 1fr; }
-}
+
 .net-port-card:hover { border-color: var(--rowaccent, var(--c-border)); }
 .net-port-card.is-fail { border-color: rgba(220, 38, 38, 0.4); }
 /* Top row of a port tile: port number + ? tooltip cue on the left, the shared
