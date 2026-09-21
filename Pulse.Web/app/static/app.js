@@ -1947,7 +1947,14 @@ function renderDashboard() {
   // The policy wins. Severity stays on the wire untouched for the audit
   // record and for every other tab; only this card's display defers.
   const rdyVerdict = resolveReadiness(dash.readiness);
-  const _rdy = rdyVerdict || {};
+  // Finding tones are built from the REAL readiness record, not from a
+  // previewed one. The demo chips substitute a verdict whose codes do not
+  // match the findings actually on the box, so every finding it does not
+  // mention lost its policy class and fell through to the collector severity:
+  // on the PASS chip the card read "Nothing is stopping tonight's game" above
+  // two rows reading "Stops tonight's game". The card previews a state; the
+  // findings describe the unit, and they stay true in every preview.
+  const _rdy = dash.readiness || {};
   const _toneByCode = {};
   (_rdy.blockers || []).forEach((b) => { if (b.code) _toneByCode[b.code] = "critical"; });
   (_rdy.risks    || []).forEach((r) => { if (r.code) _toneByCode[r.code] = "warning";  });
@@ -1973,10 +1980,24 @@ function renderDashboard() {
     const superseded = f.supersededBy ? _toneByCode[f.supersededBy] : null;
     if (superseded) return superseded;
     const policy = _toneByCode[f.code];
-    if (!policy) return own;                                  // no readiness record
+    if (!policy) {
+      // No policy class for this finding. Two ways to get here on a live
+      // unit: no readiness record rode along at all (an older payload, or a
+      // bundle shared in from another unit via peer.py), or the finding named
+      // a superseding entry whose own check did not fire -- `disk-critical`
+      // declares supersededBy: "disk-d-critical", and _compute_readiness
+      // skips it, so if F15b does not fire the finding has no class anywhere.
+      //
+      // Fall back to the collector's severity but CAP IT AT "risk". A
+      // collector severity of "critical" means "serious finding"; it does NOT
+      // mean "stops tonight's game". Those are different scales and only the
+      // policy decides the second one. Reading `own` unguarded is what put
+      // "Stops tonight's game" on a 91%-full recording drive, which does not
+      // stop an event.
+      return own === "info" ? "info" : "warning";
+    }
     // The policy may ESCALATE -- deciding what stops tonight's game is its
-    // job -- but it must never silently DEMOTE a finding to an FYI. This is
-    // the fallback for codes with no explicit supersession.
+    // job -- but it must never silently DEMOTE a finding to an FYI.
     if (policy === "info" && own !== "info") return "warning";
     return policy;
   };
