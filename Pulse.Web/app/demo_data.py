@@ -946,7 +946,7 @@ DEMO = {
             {"time": (datetime.now() - timedelta(minutes=28)).isoformat(), "eventId": 1074,
              "kind": "restart", "category": "planned",
              "process": "C:\\Windows\\system32\\shutdown.exe (VPU)", "user": "VPU\\Pixellot",
-             "reasonCode": "0x800000ff", "reasonText": "No title for this reason could be found",
+             "reasonCode": "0x800000ff", "reasonText": "Reason not recorded by Windows",
              "comment": "", "byPulse": False, "source": "Planned - external",
              "message": "The process C:\\Windows\\system32\\shutdown.exe (VPU) has initiated the restart of computer VPU on behalf of user VPU\\Pixellot ... Reason Code: 0x800000ff  Shutdown Type: restart  Comment:"},
             # Pulse-initiated reboot — stamped comment, positively attributed.

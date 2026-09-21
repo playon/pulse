@@ -183,12 +183,20 @@ function updateNavHealth() {
     const h = health[el.dataset.page];
     if (h === "Critical" || h === "Warning") {
       slot.className = "nav-status " + (h === "Critical" ? "nav-status-crit" : "nav-status-warn");
-      slot.innerHTML = svgIcon("triangle", 14);
-      slot.title = h;
+      // The glyph is identical for both levels; only its colour differs. Give
+      // the marker a real accessible name so the level does not rest on
+      // colour alone, and match the Dashboard's wording.
+      var word = h === "Critical" ? "Stops tonight's game" : "Risk tonight";
+      slot.innerHTML = svgIcon("triangle", 14) + '<span class="sr-only">' + word + '</span>';
+      slot.setAttribute("role", "img");
+      slot.setAttribute("aria-label", word);
+      slot.title = word;
     } else {
       slot.className = "nav-status";
       slot.innerHTML = "";
       slot.removeAttribute("title");
+      slot.removeAttribute("role");
+      slot.removeAttribute("aria-label");
     }
   });
 }
@@ -311,6 +319,14 @@ function badge(text, type) {
   return `<span class="inline-block px-2 py-0.5 rounded text-xs font-medium badge-${esc(type)}">${esc(text)}</span>`;
 }
 
+// Link speed in the unit a tech says out loud. There was no shared formatter:
+// _renderNicRows inlined this ternary and the fault isolator has its own copy
+// nested inside another function, so it was not reachable from here.
+function fmtSpeed(mbps) {
+  if (!mbps) return "\u2014";
+  return mbps >= 1000 ? (mbps / 1000) + " Gbps" : mbps + " Mbps";
+}
+
 function statusBadge(status) {
   const s = (status || "").toLowerCase();
   const cap = (status || "").charAt(0).toUpperCase() + (status || "").slice(1);
@@ -411,6 +427,14 @@ function gauge(label, value, unit, color, opts) {
       : raw > warnAt
         ? "var(--c-accent-amber)"
         : color || "var(--c-accent-blue)";
+  // The ring has always coloured itself against these thresholds, and that was
+  // the only thing saying whether a number was OK. A tier-1 agent looking at
+  // "64%" cannot tell good from bad, and a blue ring reads as "fine" by
+  // default -- so the gauges were six identical-looking dials carrying no
+  // verdict. Say it in a word, which also means the state no longer rests on
+  // colour alone.
+  const state = raw > critAt ? "crit" : raw > warnAt ? "warn" : "ok";
+  const stateWord = state === "crit" ? "Too high" : state === "warn" ? "Running high" : "Normal";
   return `<div class="flex flex-col items-center gap-2">
     <div class="relative" style="width:7rem;height:7rem">
       <svg viewBox="0 0 100 100" class="w-full h-full">
@@ -424,6 +448,7 @@ function gauge(label, value, unit, color, opts) {
       </div>
     </div>
     <span class="text-xs text-pulse-muted font-medium">${esc(label)}</span>
+    ${value != null ? `<span class="gauge-verdict gauge-verdict-${state}">${esc(stateWord)}</span>` : ""}
   </div>`;
 }
 
@@ -1366,6 +1391,29 @@ function _camHardwareCard(c, port) {
   var sensor = c.sensor || {};
   var portLabel = port ? (port.portLabel || port.name) : null;
 
+  // A one-line headline per camera. These cards are ~30 fields each and six
+  // of them differ only in the last octet of an IP, so scanning them at 11pm
+  // meant reading everything to learn nothing.
+  //
+  // It states WHAT WAS CHECKED, not a health verdict. Pulse observes exactly
+  // two things here -- whether the camera answers its HTTP admin probe, and
+  // whether the port negotiated the speed this model expects. A camera can
+  // fail the admin probe and still stream fine over RTSP, so the copy must
+  // not promote either signal into "this camera is broken"/"this camera is
+  // healthy".
+  var headline, headlineCls;
+  if (port && port.isUp === false) {
+    headline = "No link on this port"; headlineCls = "cam-hl-bad";
+  } else if (!hasCgi) {
+    headline = "Not answering admin requests"; headlineCls = "cam-hl-warn";
+  } else if (port && port.linkSpeedMbps && c.expectedSpeedMbps
+             && port.linkSpeedMbps < c.expectedSpeedMbps) {
+    headline = "Link is slow: " + fmtSpeed(port.linkSpeedMbps)
+      + ", expected " + fmtSpeed(c.expectedSpeedMbps); headlineCls = "cam-hl-warn";
+  } else {
+    headline = "Answering, link at full speed"; headlineCls = "cam-hl-ok";
+  }
+
   var deviceRows =
     _camDetailKv("IP", c.ip) +
     _camDetailKv("MAC", c.cgiMac || c.mac) +
@@ -1387,8 +1435,13 @@ function _camHardwareCard(c, port) {
       svgIcon("camera", 14) + ' ' + esc(c.ip) +
       (c.modelNumber ? ' <span class="cam-model-label">' + esc(c.modelNumber) + '</span>' : '') +
       (portLabel ? ' <span class="cam-hw-port">' + esc(portLabel) + '</span>' : '') +
-      (hasCgi ? ' <span class="cam-cgi-badge" title="Camera answered Pulse&#39;s admin probe (CGI)">CGI</span>' : ' <span class="cam-cgi-badge cam-cgi-none" title="Camera did not answer Pulse&#39;s admin probe (CGI). It may be offline or unreachable">No CGI</span>') +
+      // Was "CGI" / "No CGI" -- the name of the HTTP admin interface Pulse
+      // probes, which tells a tech nothing about the camera. What they need
+      // is whether it answered. (See also project note: a camera can pass
+      // RTSP and still fail this channel, which is its own fault signature.)
+      (hasCgi ? ' <span class="cam-cgi-badge" title="The camera answered Pulse\'s admin probe over HTTP (CGI).">Answering</span>' : ' <span class="cam-cgi-badge cam-cgi-none" title="The camera did not answer Pulse\'s admin probe over HTTP (CGI). It may be offline, unreachable, or refusing admin requests while streaming fine.">Not answering</span>') +
     '</div>' +
+    '<div class="cam-hl ' + headlineCls + '">' + esc(headline) + '</div>' +
 
     // Device identity
     '<div class="cam-detail-group">' +
@@ -1483,8 +1536,11 @@ function renderCalibrations() {
           <div class="flex items-center gap-2 mb-2"><span class="font-semibold">OCR / scoreboard</span>${ocr.calibrated ? badge("Calibrated", "pass") : badge("Not calibrated", "warn")}</div>
           <div class="kv-grid">
             ${kvRowHtml("Last calibrated", ocr.lastCalibrated ? _pcFmtDate(ocr.lastCalibrated) : "—")}
-            ${kvRowHtml("enhanced_pip.txt", ocr.hasEnhancedPip ? badge("present", "pass") : badge("missing", "warn"))}
-            ${kvRowHtml("innerobjects.txt", ocr.hasInnerObjects ? badge("present", "pass") : badge("missing", "warn"))}
+            <!-- Was "enhanced_pip.txt" / "innerobjects.txt": the filenames Pulse
+                 checks for, used as the labels a tech reads. Say what they are.
+                 Badge casing also differed from every other Present pill. -->
+            ${kvRowHtml("Picture-in-picture layout", ocr.hasEnhancedPip ? badge("Set up", "pass") : badge("Missing", "warn"))}
+            ${kvRowHtml("Scoreboard regions", ocr.hasInnerObjects ? badge("Set up", "pass") : badge("Missing", "warn"))}
           </div>
         </div>
       </div>
@@ -1629,7 +1685,9 @@ function _renderNicRows(ports) {
   for (let i = 0; i < count; i++) {
     if (i < ports.length) {
       const p = ports[i];
-      if (p.isOcr) roles.push("OCR");
+      // "OCR" was never expanded in visible text anywhere in Pulse -- the
+      // only explanation lived in a hover tooltip. Say what the camera is for.
+      if (p.isOcr) roles.push("Scoreboard");
       else if (p.isUp && (p.camerasDetected || []).length > 0) roles.push("Camera " + (++camNum));
       else roles.push(null);
     } else {
@@ -1638,35 +1696,38 @@ function _renderNicRows(ports) {
   }
   // Tooltips on each badge so the colored chips have plain-English meaning
   // for techs glancing at the dashboard — was previously no legend at all.
+  // The badge word IS the meaning now; the tooltip only adds detail. "Error"
+  // used to sit here on a port that was up and passing traffic at 100 Mbps --
+  // the word said the card had failed, its own tooltip said "up but
+  // degraded", and only the tooltip was right. The same condition was also
+  // called DEGRADED on Camera Connectivity and "running slow" in Findings.
   const statusTip = {
-    Linked: "Link up at the expected speed",
-    Error:  "Link is up but degraded (e.g. 100 Mbps on a Gigabit port)",
-    Down:   "No physical link detected on this port",
+    Linked: "Link is up at the expected speed.",
+    Slow:   "The port works, but it negotiated a slower speed than it should -- usually a cable or switch-port problem, not the camera.",
+    Down:   "No cable link detected on this port.",
   };
   for (let i = 0; i < count; i++) {
     if (i < ports.length) {
       const p = ports[i];
-      const speed = p.linkSpeedMbps
-        ? p.linkSpeedMbps >= 1000 ? (p.linkSpeedMbps / 1000) + " Gbps" : p.linkSpeedMbps + " Mbps"
-        : "—";
+      const speed = fmtSpeed(p.linkSpeedMbps);
       let status, cls;
       if (!p.isUp) { status = "Down"; cls = "muted"; }
-      else if (p.isDegraded) { status = "Error"; cls = "warn"; }
+      else if (p.isDegraded) { status = "Slow"; cls = "warn"; }
       else { status = "Linked"; cls = "pass"; }
       const role = roles[i];
-      const roleTip = role === "OCR"
-        ? "OCR (scoreboard overlay) camera port"
+      const roleTip = role === "Scoreboard"
+        ? "The OCR camera. It reads the scoreboard for the on-screen score overlay."
         : role
           ? "Pixellot camera detected on this port"
           : "";
       const roleBadge = role
-        ? ` <span class="badge-ol badge-ol-info" title="${esc(roleTip)}">${esc(role)}</span>`
+        ? ` <span class="badge-ol badge-ol-info" title="${esc(roleTip)}" aria-label="${esc(roleTip || role)}">${esc(role)}</span>`
         : "";
       rows.push(`<div class="dash-nic-row">
         <span class="dash-nic-port">Port ${i + 1}</span>
-        <span class="dash-nic-name">${esc(p.name)}</span>
+        <span class="dash-nic-name" title="${esc(p.name)}">${esc(p.name)}</span>
         <span class="dash-nic-speed">${p.isUp ? esc(speed) : "—"}</span>
-        <span class="dash-nic-badges"><span class="badge-ol badge-ol-${cls}" title="${esc(statusTip[status] || "")}">${esc(status)}</span>${roleBadge}</span>
+        <span class="dash-nic-badges"><span class="badge-ol badge-ol-${cls}" title="${esc(statusTip[status] || "")}" aria-label="Port ${i + 1}: ${esc(statusTip[status] || status)}">${esc(status)}</span>${roleBadge}</span>
       </div>`);
     } else {
       rows.push(`<div class="dash-nic-row">
@@ -1962,7 +2023,7 @@ function renderDashboard() {
     <div class="dash-header">
       <div>
         <div class="dash-title-row">
-          <h2 class="text-2xl font-bold text-white">Dashboard</h2>
+          <h1 class="text-2xl font-bold text-white">Dashboard</h1>
         </div>
         ${vpuName ? `<p class="text-sm text-pulse-muted">${esc(vpuName)}</p>` : ""}
       </div>
@@ -2181,7 +2242,7 @@ function renderDashboard() {
 function pageHeader(title, subtitle, actionsHtml) {
   return `<div class="page-header">
     <div>
-      <h2 class="page-title">${esc(title)}</h2>
+      <h1 class="page-title">${esc(title)}</h1>
       ${subtitle ? `<p class="page-subtitle">${esc(subtitle)}</p>` : ""}
     </div>
     <div class="page-actions">${actionsHtml || ""}</div>
@@ -3025,7 +3086,30 @@ function _renderLiveNetHealth(h) {
   }
   _prevLiveCounters = { failures: curFailures, resets: curResets };
 
+  // A verdict above the numbers. Six raw TCP counters with no thresholds on
+  // screen told a tier-1 agent nothing: the >2 warn / >10 fail rule below
+  // existed only as a colour on one gauge, and "Segs Out/s" is not a
+  // sentence anyone can act on. The counters all stay -- tier 2 reads them
+  // directly -- but the panel now leads with what they add up to.
+  var liveVerdict, liveVerdictCls;
+  if (retrans > 10) {
+    liveVerdict = "The network is struggling: " + retrans.toFixed(1)
+      + " packets a second are being re-sent. Expect the stream to stutter.";
+    liveVerdictCls = "status-fail";
+  } else if (retrans > 2) {
+    liveVerdict = "The network is re-sending " + retrans.toFixed(1)
+      + " packets a second. Worth watching during the game.";
+    liveVerdictCls = "status-warn";
+  } else if (failuresDelta > 0 || resetsDelta > 0) {
+    liveVerdict = "Connections are dropping and being remade. The link is up, but something is cutting sessions short.";
+    liveVerdictCls = "status-warn";
+  } else {
+    liveVerdict = "Traffic is flowing normally. Nothing is being re-sent.";
+    liveVerdictCls = "status-pass";
+  }
+
   el.innerHTML =
+    '<p class="net-live-verdict ' + liveVerdictCls + '">' + esc(liveVerdict) + '</p>' +
     '<div class="net-live-gauges">' +
       _liveGauge("Retransmits/s", retrans, retCls) +
       _liveGauge("Established", tcp.established || 0, "") +
@@ -3056,7 +3140,11 @@ function _renderLiveNetHealth(h) {
     (nics.length ? '<div class="net-live-conns">' +
       '<div class="net-live-conns-title">Network Interfaces (' + nics.length + ')</div>' +
       '<table class="data-table"><thead><tr>' +
-        '<th>Interface</th><th title="Output queue length. Sustained above 2 means the NIC can\'t drain fast enough">Queue</th><th>RX Err</th><th>TX Err</th><th>RX/s</th><th>TX/s</th>' +
+        '<th>Interface</th>'
+        + '<th title="Output queue length. Sustained above 2 means the NIC cannot drain fast enough.">Waiting to send<span class="th-unit">queue, 0-2 normal</span></th>'
+        + '<th>Receive errors</th><th>Send errors</th>'
+        + '<th>Download<span class="th-unit">per second</span></th>'
+        + '<th>Upload<span class="th-unit">per second</span></th>' +
       '</tr></thead><tbody>' +
       nics.map(function(n) {
         var qCls  = (n.queueLen || 0) > 2 ? "status-warn" : "";
@@ -4058,7 +4146,7 @@ function _netTimeSyncCard(cfg, ntp, ntpPeers) {
   } else {
     peersHtml =
       '<table class="data-table"><thead><tr>' +
-        '<th>Peer</th><th>State</th><th>Stratum</th><th>Last Sync</th><th>Poll</th>' +
+        '<th>Peer</th><th>State</th><th>Hops<span class="th-unit">from a reference clock</span></th><th>Last Sync</th><th>Poll<span class="th-unit">how often it checks</span></th>' +
       '</tr></thead><tbody>' +
       peers.map(function(p) {
         var stateCls = (p.state || "").toLowerCase() === "active" ? "status-pass" : "text-pulse-muted";
@@ -4085,7 +4173,7 @@ function _netTimeSyncCard(cfg, ntp, ntpPeers) {
     <div class="kv-grid">
       ${kvRowHtml("Source", esc(sourceDisplay) + " " + approvedChip)}
       ${kvRow("Source IP", sourceIpDisplay)}
-      ${kvRow("Stratum", stratumDisplay)}
+      ${kvRowHtml("Clock source quality", esc(stratumDisplay) + '<span class="kv-hint">how many hops from a reference clock \u2014 lower is better</span>')}
       ${kvRow("Last sync", lastSyncDisplay)}
       ${kvRowHtml("Drift status", driftLabel)}
     </div>
@@ -4655,7 +4743,9 @@ function _camPortTile(port, index, ctx) {
   let stateTxt, stateCls, dotCls;
   if (!p.isUp) { stateTxt = downLabelMap[p.downReason] || "Down"; stateCls = "fail"; dotCls = "cam-dot-down"; }
   else if (p.connecting) { stateTxt = "Connecting"; stateCls = "info"; dotCls = "cam-dot-connecting"; }
-  else if (p.isDegraded) { stateTxt = "Degraded"; stateCls = "warn"; dotCls = "cam-dot-warn"; }
+  // "Slow", matching the Dashboard NIC row and the Findings wording for
+  // the identical condition. This tile used to say "Degraded" for it.
+  else if (p.isDegraded) { stateTxt = "Slow"; stateCls = "warn"; dotCls = "cam-dot-warn"; }
   // Fully linked → always green. OCR vs Main is shown by the role badge, so
   // the status dot just signals link health (green = established) and never
   // lingers blue, which reads as "still connecting".
@@ -4809,7 +4899,7 @@ function _camNicDiagramHtml(ports, showLiveBadge, sysInfo) {
     if (!p) return "—";              // padding slot, no physical port
     if (!p.isUp) return "No link";
     if (p.connecting) return "Connecting";
-    if (p.isDegraded) return "Degraded";
+    if (p.isDegraded) return "Slow";
     return "Linked";
   }
   // Physical ports: reversed (highest port on left = physical chassis left)
@@ -7068,7 +7158,7 @@ function installSc3() {
     <div class="sc3-modal-box">
       <div class="sc3-modal-header">
         <span class="sc3-modal-title">${svgIcon("download", 16)} Install ScoreConnect III</span>
-        <button class="sc3-modal-close" onclick="closeSc3Modal()" title="Close">${svgIcon("x", 16)}</button>
+        <button class="sc3-modal-close" onclick="closeSc3Modal()" title="Close" aria-label="Close">${svgIcon("x", 16)}</button>
       </div>
       <div class="sc3-modal-body">
         <div class="sc3-warn-box">
@@ -7206,7 +7296,7 @@ function _renderSc3Progress(status) {
     <div class="sc3-modal-box">
       <div class="sc3-modal-header">
         <span class="sc3-modal-title">${svgIcon("download", 16)} Installing ScoreConnect III</span>
-        ${_sc3Installing ? "" : `<button class="sc3-modal-close" onclick="closeSc3Modal()" title="Close">${svgIcon("x", 16)}</button>`}
+        ${_sc3Installing ? "" : `<button class="sc3-modal-close" onclick="closeSc3Modal()" title="Close" aria-label="Close">${svgIcon("x", 16)}</button>`}
       </div>
       <div class="sc3-modal-body">
         <div class="sc3-steps">${stepsHtml}</div>
@@ -7777,8 +7867,8 @@ function renderScoreConnect() {
         ${config.firmware ? kvRow("Firmware", config.firmware) : ""}
         ${config.eventType ? kvRow("Event Type", config.eventType) : ""}
         ${kvRow("Network", data.networkStatus)}
-        ${kvRowHtml("Local Stream", data.hasLocalStream != null
-          ? (data.hasLocalStream ? '<span class="status-pass">Detected</span>' : '<span class="status-fail">Not detected</span>')
+        ${kvRowHtml("Scoreboard feed reaching the VPU", data.hasLocalStream != null
+          ? (data.hasLocalStream ? '<span class="status-pass">Yes</span>' : '<span class="status-fail">No</span>')
           : '—')}
       </div>
       ${data.rawData ? `
@@ -8477,7 +8567,7 @@ function renderFaultIsolator() {
       "</div>" +
       '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:12px">' +
         '<button id="fi-startover" class="btn-outline btn-ol-blue">Start Over</button>' +
-        (_fi.phase === 3 && !_fi.checking ? '<button id="fi-infer" class="btn-outline btn-ol-muted">No Spare CHU: Infer</button>' : "") +
+        (_fi.phase === 3 && !_fi.checking ? '<button id="fi-infer" class="btn-outline btn-ol-muted">No spare camera: work it out</button>' : "") +
         '<button id="fi-action" class="btn-outline btn-ol-blue"' + (_fi.checking ? " disabled" : "") + ">" + esc(btnLabel) + "</button>" +
       "</div>";
   }
@@ -8491,7 +8581,7 @@ function renderFaultIsolator() {
 
   $page().innerHTML = pageHeader(
     "Camera Connection Troubleshooting",
-    "Swap test that pins a camera fault to the port, the cable, or the camera (CHU).",
+    "Swap test that pins a camera fault to the port, the cable, or the camera head itself.",
     '<button class="btn-outline btn-ol-blue" onclick="navigate(\'cameras\')">' + svgIcon("arrow-left", 14) + " Back to Camera Connectivity</button>"
   ) + diagramCard + '<div class="card">' + stepDots() + inner + historyTable() + "</div>" +
     '<div id="fi-history-wrap">' + _fiHistoryHtml(_fiHistoryCache || []) + '</div>';
@@ -8871,7 +8961,7 @@ function renderFaultIsolator() {
       showResult("Phase 3: " + sl2 + ". The cable is fine; the fault follows the camera.", "", "info");
       _fi.phase = 3;
       _fi.phaseTitle = "DOES THE FAULT FOLLOW THE CAMERA?";
-      _fi.phaseInstruction = "Keep the new cable on " + tn2 + ". Connect a known-good camera, then Check Now. No spare? Click \"No Spare CHU: Infer\".";
+      _fi.phaseInstruction = "Keep the new cable on " + tn2 + ". Connect a known-good camera, then Check Now. No spare camera? Click \"No spare camera: work it out\".";
       _fi.actionLabel = "Check Now";
       renderFaultIsolator();
       return;
@@ -8895,8 +8985,8 @@ function renderFaultIsolator() {
         var v3 = "Link restored with a known-good camera, so the camera is the fault.";
         addHistory("Phase 4 - Camera Test", cfg3, sl3, v3, "Pass");
         showResult("Phase 4: " + sl3 + ". The fault follows the camera.", "", "pass");
-        conclude("Camera", "CONCLUSION: FAULTY CAMERA (CHU)",
-          "Replacing the camera restored the link, so the original camera (CHU) is the fault. Replace the camera unit.");
+        conclude("Camera", "CONCLUSION: FAULTY CAMERA",
+          "Replacing the camera restored the link, so the original camera is the fault. Replace the camera unit.");
         renderFaultIsolator();
         return;
       }
@@ -8922,11 +9012,11 @@ function renderFaultIsolator() {
     var tn = portLabel(_fi.testIdx);
     var cfg = "Port: " + tn + "  |  Cable: (NEW)  |  Camera: (no spare available)";
     addHistory("Phase 4 - SKIPPED", cfg, "—",
-      "No spare CHU, so this is inferred from Phase 2 and Phase 3.", "Info");
+      "No spare camera, so this is inferred from Phase 2 and Phase 3.", "Info");
     showResult("Phase 4 skipped, conclusion inferred.",
-      "The NIC port (Phase 2) and the cable (Phase 3) are both cleared, so the camera (CHU) is the remaining suspect.", "info");
-    conclude("LikelyCamera", "LIKELY CAMERA (CHU) FAULT: UNVERIFIED",
-      "The NIC port and cable are already cleared, so the camera (CHU) is the remaining suspect. Replace it when a known-good spare is available. If a known-good camera still fails, the NIC hardware is the next suspect: run the full diagnostic and escalate.");
+      "The NIC port (Phase 2) and the cable (Phase 3) are both cleared, so the camera is the remaining suspect.", "info");
+    conclude("LikelyCamera", "PROBABLY THE CAMERA \u2014 SWAP TEST NOT FINISHED",
+      "The NIC port and cable are already cleared, so the camera is the remaining suspect. This was not confirmed by a swap, because no spare camera was available. Replace it when a known-good spare is on hand. If a known-good camera still fails, the NIC hardware is the next suspect: run the full diagnostic and escalate.");
     renderFaultIsolator();
   }
 }
