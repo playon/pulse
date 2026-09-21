@@ -39,6 +39,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - Four icons were missing and had been rendering as blank space: the Stop button on Network Capture, the Traceroute heading, the "needs attention" heading on Camera Connectivity, and the "Back to Camera Connectivity" button. They now show the icon they were always meant to.
 
 ### Removed
+- The **SportzCast scoreboard** port test is gone from the Network tab. Nothing on the VPU requires TCP/1400-1405, so six tiles that could never fail readiness made up almost the whole Optional section and read as six more ports to understand. Scoreboard health is covered properly on the **ScoreConnect** tab, which tests the bot connection and the live feed. `sportzcast.net` stays in Service Reachability, so a venue filter against SportzCast is still visible.
 - The **Inspection Report** tab is gone. Everything it showed still lives on the Dashboard, Hardware, Network and Camera Connectivity tabs.
 
 ### Changed

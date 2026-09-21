@@ -3434,7 +3434,6 @@ const NET_PORT_IMPACT = {
   "Zixi Backup": "Backup live-stream connection (Zixi over UDP/443, the same streaming protocol as UDP/2088, not HTTPS). Either Zixi port alone carries a fully healthy stream; with both blocked the broadcast degrades to the RTMP fallback.",
   "Zixi Streaming": "The primary live-stream connection (Zixi over UDP/2088). If blocked, the stream fails over to Zixi UDP/443, then to the degraded RTMP fallback (TCP/1935).",
   "RTMP Fallback": "Last-resort streaming path (RTMP over TCP/1935) used only when both Zixi/UDP connections are blocked: games start ~4 minutes late with no packet-loss protection. If this is blocked too, a venue with both UDP ports blocked can't broadcast at all. (Tested against a stable public RTMP host. That proves TCP/1935 is open by port, not that pixellot.stream itself is allowed.)",
-  "Scorebot": "SportzCast scoreboard software can't connect or update (SportzCast sites only).",
 };
 // What each endpoint IS, in words a tier-1 agent can act on. The `purpose`
 // keys are the engineering names the collector emits; several are vendor or
@@ -3456,7 +3455,6 @@ const NET_PORT_LABEL = {
   "Zixi Streaming":   "Live video – main path",
   "Zixi Backup":      "Live video – backup path",
   "RTMP Fallback":    "Live video – last resort",
-  "Scorebot":         "SportzCast scoreboard",
 };
 // A tile covering several services that share one port (the five TCP/443
 // endpoints). Naming them all would not fit; the pill carries N/M and the
@@ -3587,7 +3585,7 @@ function _renderPortConnectivity(ports) {
 
   // Combine related results into one tile: hosts sharing a protocol/port (the
   // six TCP/443 services) group together, and a single host's port range
-  // (Scorebot 1400–1405) collapses to one tile. Two passes — by proto/port
+  // range on one host collapses to one tile. Two passes -- by proto/port
   // first, then by host for the leftovers — mirroring the original card grid.
   function groupPorts(list) {
     var byPort = {}, portOrder = [];
@@ -3649,8 +3647,8 @@ function _renderPortConnectivity(ports) {
   }
 
   // Port number (the priority) + protocol for the port-led tile. A shared port
-  // (443 across several hosts) → "443"; a range on one host (Scorebot
-  // 1400–1405) → "1400–1405". Hosts/domains are intentionally NOT shown on the
+  // (443 across several hosts) -> "443"; a contiguous range on one host
+  // collapses to "start-end". Hosts/domains are intentionally NOT shown on the
   // tile — the domain detail lives in the Domain Reachability column.
   function portParts(items) {
     var proto = (items[0].protocol || "TCP").toUpperCase();
