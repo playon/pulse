@@ -336,6 +336,39 @@ function statusBadge(status) {
   return badge(cap || "Unknown", "muted");
 }
 
+// -- The severity vocabulary -----------------------------------------
+// ONE set of words for "how bad is this", framed the way a tier-1 agent
+// has to think about it: is tonight's game in danger, yes or no.
+//
+// The product used to carry two unreconciled severity vocabularies on one
+// screen. The readiness card spoke blockers/risks (its policy language,
+// _compute_readiness in main.py) while the findings list beside it spoke
+// CRITICAL/WARNING (the collector language), so a dashboard could read
+// "0 blockers - 2 risks" directly above "[CRITICAL] Streaming is degraded".
+// Both were correct in their own terms and the pair was unreadable: the
+// first thing an agent sees gave two answers to "is this unit OK".
+//
+// The codes stay exactly as they are on the wire and in the audit record
+// (main.py:4840 exports blockers/risks by code). Only the display collapses.
+var VERDICT = {
+  critical: { word: "Stops tonight's game", tone: "critical" },
+  warning:  { word: "Risk tonight",         tone: "warning"  },
+  info:     { word: "Worth knowing",        tone: "info"     },
+};
+// Collector synonyms. main.py emits "warning" 25 times and "warn" once
+// (main.py:3961); before this map that single finding rendered with no
+// colour at all -- .finding-cat-warn and .finding-dot-warn have no rule,
+// so the chip fell back to grey and the dot to no background.
+var _VERDICT_ALIAS = { warn: "warning", critical: "critical", fail: "critical", error: "critical", info: "info" };
+
+// Severity code -> the one display record. Anything unmapped degrades to
+// neutral and SAYS so, rather than borrowing a colour it did not earn.
+function verdictFor(severity) {
+  var s = (severity || "").toLowerCase();
+  s = _VERDICT_ALIAS[s] || s;
+  return VERDICT[s] || { word: "Unknown - report this", tone: "info" };
+}
+
 function loading() {
   return `<div class="flex items-center gap-3 text-pulse-muted loading-pulse py-12 justify-center">
     <svg class="w-5 h-5 animate-spin" viewBox="0 0 24 24" fill="none">
@@ -1647,7 +1680,7 @@ function _renderVolumes(volumes) {
 // The policy table + rollup live server-side (_compute_readiness in main.py);
 // this just renders the verdict record that rides on dash.readiness.
 var _RDY_META = {
-  PASS: { word: "PASS", icon: "check", tone: "pass", tag: "Game-ready. No blockers, no risks." },
+  PASS: { word: "PASS", icon: "check", tone: "pass", tag: "Game-ready. Nothing found that puts tonight's game at risk." },
   WARN: { word: "WARNING", icon: "alert", tone: "warn", tag: "Should stream, but fix the issues below before game time." },
   FAIL: { word: "FAIL", icon: "x",     tone: "fail", tag: "Don't expect a clean broadcast tonight. Fix this before the game." },
 };
@@ -1701,8 +1734,12 @@ function readinessCard(verdict, freshness) {
     +   '</div>'
     + '</div>'
     + '<div class="rdy-foot">'
-    +   '<span>' + blockers.length + ' blocker' + (blockers.length === 1 ? '' : 's') + ' · ' + risks.length + ' risk' + (risks.length === 1 ? '' : 's') + '</span>'
-    +   '<span class="rdy-policy">policy ' + esc(verdict.policyVersion || "v1") + '</span>'
+    +   '<span>' + (blockers.length
+          ? blockers.length + (blockers.length === 1 ? ' thing is' : ' things are') + " stopping tonight's game"
+          : "Nothing is stopping tonight's game") + '</span>'
+    +   '<span>' + (risks.length
+          ? risks.length + (risks.length === 1 ? ' risk' : ' risks') + ' tonight'
+          : 'No risks tonight') + '</span>'
     + '</div>'
     + demoBar
     + '</div>';
@@ -1732,37 +1769,57 @@ function renderDashboard() {
   const disk = _systemDiskPct(perf);
   const temp = perf.temperature?.celsius;
 
-  const warnCount = findings.filter((f) => f.severity === "warning").length;
-  const critCount = findings.filter((f) => f.severity === "critical").length;
-  const totalFindings = findings.length;
-  const sevColor = critCount > 0 ? "critical" : warnCount > 0 ? "warn" : "ok";
+  // -- One source of truth for "how bad is this" ----------------------
+  // A finding's own `severity` is the collector's opinion. The readiness
+  // policy table (_readiness_class in main.py) is what actually decides
+  // whether tonight's game is at risk, and it already drives the big verdict
+  // word at the top of this card. When the two disagreed the dashboard
+  // printed both, 100px apart: "0 blockers - 2 risks" directly above
+  // "[CRITICAL] Streaming is degraded". Two answers to "is this unit OK",
+  // and the agent reading it has no way to tell which one to believe.
+  //
+  // The policy wins. Severity stays on the wire untouched for the audit
+  // record and for every other tab; only this card's display defers.
+  const _rdy = dash.readiness || {};
+  const _toneByCode = {};
+  (_rdy.blockers || []).forEach((b) => { if (b.code) _toneByCode[b.code] = "critical"; });
+  (_rdy.risks    || []).forEach((r) => { if (r.code) _toneByCode[r.code] = "warning";  });
+  (_rdy.info     || []).forEach((n) => { if (n.code) _toneByCode[n.code] = "info";     });
+  // The policy may ESCALATE a finding -- deciding what stops tonight's game is
+  // exactly its job -- but it must never silently DEMOTE one to an FYI.
+  //
+  // Demotion is the dangerous direction, and it happens for a legitimate
+  // reason: main.py:2540 classes `disk-critical` as info *because* readiness
+  // gates the same volume through its own per-drive F15a/F15b checks. One
+  // full drive, two records. Letting the info class win printed "Worth
+  // knowing" on a drive the same card was counting as a risk one line above.
+  //
+  // So: a blocker is critical, a risk is a risk, and anything the collector
+  // called a problem stays at least a risk even where the policy has no
+  // opinion or is deferring to a check it already counted.
+  const toneOf = (f) => {
+    const own = verdictFor(f.severity).tone;
+    const policy = _toneByCode[f.code];
+    if (!policy) return own;                                  // no readiness record
+    if (policy === "info" && own !== "info") return "warning"; // never demote
+    return policy;
+  };
 
-  // Show BOTH counts (e.g. "2 Critical · 5 Warnings"), not just the highest.
-  const _critTxt = critCount > 0 ? `${critCount} Critical` : "";
-  const _warnTxt = warnCount > 0 ? `${warnCount} Warning${warnCount === 1 ? "" : "s"}` : "";
-  const sevLabel = (critCount || warnCount)
-    ? [_critTxt, _warnTxt].filter(Boolean).join(" · ")
-    : "All Clear";
-  // Two-tone version for the big Command Center heading — critical in red,
-  // warnings in amber, so the split reads at a glance.
-  const sevHtml = (critCount || warnCount)
-    ? [
-        critCount > 0 ? `<span class="cc-sev-crit">${critCount} Critical</span>` : "",
-        warnCount > 0 ? `<span class="cc-sev-warn">${warnCount} Warning${warnCount === 1 ? "" : "s"}</span>` : "",
-      ].filter(Boolean).join(`<span class="cc-sev-sep">·</span>`)
-    : `<span class="cc-sev-ok">All Clear</span>`;
+  const warnCount = findings.filter((f) => toneOf(f) === "warning").length;
+  const critCount = findings.filter((f) => toneOf(f) === "critical").length;
+  const totalFindings = findings.length;
 
   // Findings are shown in a single consolidated list, grouped by severity
   // (critical first, then warning, then info) — the natural triage order.
   // The sort is stable, so each group keeps its original ordering.
   // Cap at 10 to keep the panel from sprawling; surface a "+N more" hint
   // when there are more.
-  const _SEV_RANK = { critical: 0, error: 0, warning: 1, warn: 1, info: 2 };
+  const _TONE_RANK = { critical: 0, warning: 1, info: 2 };
   const sortedFindings = findings
     .map((f, i) => [f, i])  // decorate with index for a stable sort
     .sort((a, b) => {
-      const ra = _SEV_RANK[(a[0].severity || "").toLowerCase()] ?? 3;
-      const rb = _SEV_RANK[(b[0].severity || "").toLowerCase()] ?? 3;
+      const ra = _TONE_RANK[toneOf(a[0])] ?? 3;
+      const rb = _TONE_RANK[toneOf(b[0])] ?? 3;
       return ra !== rb ? ra - rb : a[1] - b[1];
     })
     .map((pair) => pair[0]);
@@ -1772,7 +1829,7 @@ function renderDashboard() {
   const subsystems = _subsystemHealth(findings);
   const now = new Date();
   const timeStr = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  const baselineStr = subsystems.length + " panel" + (subsystems.length === 1 ? "" : "s") + " checked";
+  const baselineStr = "Checked " + subsystems.length + " area" + (subsystems.length === 1 ? "" : "s");
 
   // Network config — prefer dashboard-embedded data, fall back to full network cache
   const netCfg = dash.networkConfig || net.config || {};
@@ -1863,13 +1920,14 @@ function renderDashboard() {
       <div class="cc-findings-list">
         ${visibleFindings.map((f, i) => {
           const prev = visibleFindings[i - 1];
-          const groupBreak = i > 0 && prev.severity !== f.severity ? `<div class="cc-findings-divider"></div>` : "";
+          const groupBreak = i > 0 && toneOf(prev) !== toneOf(f) ? `<div class="cc-findings-divider"></div>` : "";
           const fp = _findingPageFor(f.category);
           const encTitle = encodeURIComponent(f.title || "");
+          const v = VERDICT[toneOf(f)] || verdictFor(f.severity);
           return groupBreak + `
         <a class="finding-item" href="#${esc(fp)}" onclick="event.preventDefault();findingJump('${esc(fp)}','${encTitle}')" title="Opens the ${esc(f.category)} tab and highlights this issue">
-          <span class="finding-dot finding-dot-${esc(f.severity)}"></span>
-          <span class="finding-cat finding-cat-${esc(f.severity)}">[${esc((f.severity || "").toUpperCase())}]</span>
+          <span class="finding-dot finding-dot-${esc(v.tone)}"></span>
+          <span class="finding-cat finding-cat-${esc(v.tone)}">${esc(v.word)}</span>
           <span class="finding-title">${esc(f.title)}</span>
           <span class="finding-arrow">${svgIcon("chevron", 14)}</span>
         </a>`;
