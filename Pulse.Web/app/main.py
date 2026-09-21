@@ -1792,9 +1792,10 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
         name = f"Drive {letter}:" if len(letter) == 1 else "Disk"
         # D: is classed info (see F15b), so its title has to carry the
         # consequence — "Worth knowing" next to a bare "Drive D: almost full"
-        # reads as ignorable, and losing the school's recording is not.
-        if letter == "D":
-            name += " — recordings may not save"
+        # reads as ignorable, and losing the school's recording is not. This
+        # is a suffix on the finished title, not on `name`: `name` is
+        # interpolated as f"{name} almost full" below.
+        title_tail = " — recordings may not save" if letter == "D" else ""
         if pct > 90:
             # At >90% on D: the Disks page shows the Storage Cleanup card —
             # point the tech straight at it instead of a vague "clear VODs".
@@ -1819,7 +1820,7 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                     "code": "disk-critical",
                     "severity": "critical",
                     "category": "Storage",
-                    "title": f"{name} almost full",
+                    "title": f"{name} almost full{title_tail}",
                     "recommendation": " ".join(filter(None, [
                         f"Free up space now. {label} is {pct:g}% full.",
                         consequence,
