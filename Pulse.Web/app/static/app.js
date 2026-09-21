@@ -322,6 +322,30 @@ function badge(text, type) {
 // Link speed in the unit a tech says out loud. There was no shared formatter:
 // _renderNicRows inlined this ternary and the fault isolator has its own copy
 // nested inside another function, so it was not reachable from here.
+// "OCR" -> the words a tech uses, at the DISPLAY layer only.
+//
+// The data value must not change. `role` comes from Pixellot's cameras.cfg on
+// a real unit and the backend pattern-matches the substring to identify the
+// scoreboard camera at all (main.py:1991, 2390, 2406, and the model table at
+// 445 maps R2SD-G/S5SD-G/E8NC-G to "OCR / Scoreboard"). Renaming it would
+// break camera identification app-wide. So translate on the way out.
+//
+// The variants carry real meaning and are preserved:
+//   OCR        the 100 Mbps scoreboard camera
+//   OCR-1G     the E8NC-G 1 Gbps variant -- a 100 Mbps link on THIS one is
+//              genuinely degraded, which is why the suffix exists
+//   OCR 2      a second scoreboard camera, index kept
+function camRoleLabel(v) {
+  var s = String(v == null ? "" : v);
+  if (!s || s.indexOf("OCR") === -1) return s;
+  var suffix = s.replace(/^.*?OCR(-1G)?/, "").trim();   // "", "2", "/ Scoreboard"
+  var base = /OCR-1G/.test(s) ? "Scoreboard (1 Gbps)" : "Scoreboard";
+  // "OCR / Scoreboard" from the model table already says scoreboard; drop the
+  // redundant tail rather than printing "Scoreboard / Scoreboard".
+  if (/^\/?\s*Scoreboard$/i.test(suffix)) suffix = "";
+  return suffix ? base + " " + suffix : base;
+}
+
 function fmtSpeed(mbps) {
   if (!mbps) return "\u2014";
   return mbps >= 1000 ? (mbps / 1000) + " Gbps" : mbps + " Mbps";
@@ -1359,7 +1383,7 @@ function renderCameraHardware() {
 
   $page().innerHTML = `
     ${pageHeader("Camera Hardware",
-      "Full CGI probe of every camera head on an active port: identity, firmware, network, stream, and sensor settings.",
+      "Everything each camera reports about itself: identity, firmware, network, stream, and sensor settings.",
       `<button class="btn-outline btn-ol-blue" onclick="_camHwRefresh()">${svgIcon("refresh", 14)} Refresh</button>`)}
 
     <div class="card">
@@ -1417,7 +1441,7 @@ function _camHardwareCard(c, port) {
   var deviceRows =
     _camDetailKv("IP", c.ip) +
     _camDetailKv("MAC", c.cgiMac || c.mac) +
-    _camDetailKv("Role", c.role) +
+    _camDetailKv("Role", camRoleLabel(c.role)) +
     _camDetailKv("Identity", c.identitySource);
   if (hasCgi) {
     deviceRows +=
@@ -1522,7 +1546,7 @@ function renderCalibrations() {
     : `<div class="info-chip">No sports calibrated. The main camera's multisport calibration is empty.</div>`;
 
   $page().innerHTML = `
-    ${pageHeader("Camera Calibrations", "Main-camera multisport stitch and OCR / scoreboard calibration status.",
+    ${pageHeader("Camera Calibrations", "Main-camera multisport stitch and scoreboard-camera calibration status.",
       `<button class="btn-outline btn-ol-blue" onclick="dataCache['pixellot-config']=null;renderCalibrations()">${svgIcon("refresh", 14)} Refresh</button>`)}
 
     <div class="card">
@@ -1533,7 +1557,7 @@ function renderCalibrations() {
           ${sportsBlock}
         </div>
         <div class="flex-1" style="min-width:260px">
-          <div class="flex items-center gap-2 mb-2"><span class="font-semibold">OCR / scoreboard</span>${ocr.calibrated ? badge("Calibrated", "pass") : badge("Not calibrated", "warn")}</div>
+          <div class="flex items-center gap-2 mb-2"><span class="font-semibold">Scoreboard camera</span>${ocr.calibrated ? badge("Calibrated", "pass") : badge("Not calibrated", "warn")}</div>
           <div class="kv-grid">
             ${kvRowHtml("Last calibrated", ocr.lastCalibrated ? _pcFmtDate(ocr.lastCalibrated) : "—")}
             <!-- Was "enhanced_pip.txt" / "innerobjects.txt": the filenames Pulse
@@ -1923,7 +1947,14 @@ function renderDashboard() {
   // The policy wins. Severity stays on the wire untouched for the audit
   // record and for every other tab; only this card's display defers.
   const rdyVerdict = resolveReadiness(dash.readiness);
-  const _rdy = rdyVerdict || {};
+  // Finding tones are built from the REAL readiness record, not from a
+  // previewed one. The demo chips substitute a verdict whose codes do not
+  // match the findings actually on the box, so every finding it does not
+  // mention lost its policy class and fell through to the collector severity:
+  // on the PASS chip the card read "Nothing is stopping tonight's game" above
+  // two rows reading "Stops tonight's game". The card previews a state; the
+  // findings describe the unit, and they stay true in every preview.
+  const _rdy = dash.readiness || {};
   const _toneByCode = {};
   (_rdy.blockers || []).forEach((b) => { if (b.code) _toneByCode[b.code] = "critical"; });
   (_rdy.risks    || []).forEach((r) => { if (r.code) _toneByCode[r.code] = "warning";  });
@@ -1949,10 +1980,24 @@ function renderDashboard() {
     const superseded = f.supersededBy ? _toneByCode[f.supersededBy] : null;
     if (superseded) return superseded;
     const policy = _toneByCode[f.code];
-    if (!policy) return own;                                  // no readiness record
+    if (!policy) {
+      // No policy class for this finding. Two ways to get here on a live
+      // unit: no readiness record rode along at all (an older payload, or a
+      // bundle shared in from another unit via peer.py), or the finding named
+      // a superseding entry whose own check did not fire -- `disk-critical`
+      // declares supersededBy: "disk-d-critical", and _compute_readiness
+      // skips it, so if F15b does not fire the finding has no class anywhere.
+      //
+      // Fall back to the collector's severity but CAP IT AT "risk". A
+      // collector severity of "critical" means "serious finding"; it does NOT
+      // mean "stops tonight's game". Those are different scales and only the
+      // policy decides the second one. Reading `own` unguarded is what put
+      // "Stops tonight's game" on a 91%-full recording drive, which does not
+      // stop an event.
+      return own === "info" ? "info" : "warning";
+    }
     // The policy may ESCALATE -- deciding what stops tonight's game is its
-    // job -- but it must never silently DEMOTE a finding to an FYI. This is
-    // the fallback for codes with no explicit supersession.
+    // job -- but it must never silently DEMOTE a finding to an FYI.
     if (policy === "info" && own !== "info") return "warning";
     return policy;
   };
@@ -3389,7 +3434,6 @@ const NET_PORT_IMPACT = {
   "Zixi Backup": "Backup live-stream connection (Zixi over UDP/443, the same streaming protocol as UDP/2088, not HTTPS). Either Zixi port alone carries a fully healthy stream; with both blocked the broadcast degrades to the RTMP fallback.",
   "Zixi Streaming": "The primary live-stream connection (Zixi over UDP/2088). If blocked, the stream fails over to Zixi UDP/443, then to the degraded RTMP fallback (TCP/1935).",
   "RTMP Fallback": "Last-resort streaming path (RTMP over TCP/1935) used only when both Zixi/UDP connections are blocked: games start ~4 minutes late with no packet-loss protection. If this is blocked too, a venue with both UDP ports blocked can't broadcast at all. (Tested against a stable public RTMP host. That proves TCP/1935 is open by port, not that pixellot.stream itself is allowed.)",
-  "Scorebot": "SportzCast scoreboard software can't connect or update (SportzCast sites only).",
 };
 // What each endpoint IS, in words a tier-1 agent can act on. The `purpose`
 // keys are the engineering names the collector emits; several are vendor or
@@ -3411,7 +3455,6 @@ const NET_PORT_LABEL = {
   "Zixi Streaming":   "Live video – main path",
   "Zixi Backup":      "Live video – backup path",
   "RTMP Fallback":    "Live video – last resort",
-  "Scorebot":         "SportzCast scoreboard",
 };
 // A tile covering several services that share one port (the five TCP/443
 // endpoints). Naming them all would not fit; the pill carries N/M and the
@@ -3542,7 +3585,7 @@ function _renderPortConnectivity(ports) {
 
   // Combine related results into one tile: hosts sharing a protocol/port (the
   // six TCP/443 services) group together, and a single host's port range
-  // (Scorebot 1400–1405) collapses to one tile. Two passes — by proto/port
+  // range on one host collapses to one tile. Two passes -- by proto/port
   // first, then by host for the leftovers — mirroring the original card grid.
   function groupPorts(list) {
     var byPort = {}, portOrder = [];
@@ -3604,8 +3647,8 @@ function _renderPortConnectivity(ports) {
   }
 
   // Port number (the priority) + protocol for the port-led tile. A shared port
-  // (443 across several hosts) → "443"; a range on one host (Scorebot
-  // 1400–1405) → "1400–1405". Hosts/domains are intentionally NOT shown on the
+  // (443 across several hosts) -> "443"; a contiguous range on one host
+  // collapses to "start-end". Hosts/domains are intentionally NOT shown on the
   // tile — the domain detail lives in the Domain Reachability column.
   function portParts(items) {
     var proto = (items[0].protocol || "TCP").toUpperCase();
@@ -4866,7 +4909,7 @@ function _camPortTile(port, index, ctx) {
     : "";
 
   const cams = p.camerasDetected || [];
-  var camLabel = p.cameraLabel;
+  var camLabel = camRoleLabel(p.cameraLabel);   // display only; p.cameraLabel stays raw
   // Badge color: OCR → blue, Main Camera N → teal, generic Camera/Pixellot → muted.
   var camLabelCls;
   if (p.isOcr) camLabelCls = "badge-ol-info";
@@ -5484,7 +5527,7 @@ function _camPoeCardHtml(poe, ports) {
     var match = (ports || [])[p.port - 1] || null;
     var sub;
     if (p.readOk === false)              sub = "Read rejected by driver";
-    else if (match && match.cameraLabel) sub = match.cameraLabel;
+    else if (match && match.cameraLabel) sub = camRoleLabel(match.cameraLabel);
     else                                 sub = p.poeOn ? "Powered device" : "No device powered";
     return '<div class="cam-poe-row" id="cam-poe-row-' + p.port + '">' +
       '<div class="cam-poe-row-label">' +
@@ -6805,10 +6848,10 @@ function renderHelp() {
         <li><strong>A camera is missing or slow.</strong> Check <strong>Camera Connectivity</strong> for the port's link
         and speed (camera ports should be 1 Gbps), then <strong>Camera Hardware</strong> for firmware and reachability.</li>
         <li><strong>Scores aren't showing.</strong> Check <strong>ScoreConnect</strong> for the service and the
-        scoreboard feed, and confirm the OCR camera is calibrated under <strong>Calibrations</strong>.</li>
+        scoreboard feed, and confirm the scoreboard camera is calibrated under <strong>Calibrations</strong>.</li>
         <li><strong>Pixellot Agent looks stuck.</strong> <strong>Service Status</strong> shows the Agent, Coordinator, and
-        Watchdog. The documented first fix is <strong>Restart Agent + Coordinator</strong> on the
-        <strong>Pixellot Software</strong> tab.</li>
+        Watchdog. The documented first fix is the <strong>Restart Agent + Coordinator</strong> button
+        on that same tab.</li>
         <li><strong>Recording errors, or the disk is filling up.</strong> Check <strong>Disks</strong> for free space and drive
         health, and scan <strong>Pixellot Logs</strong> for fatal/restart markers (it flags the known CUDNN/TensorFlow
         dependency error).</li>
@@ -8601,7 +8644,7 @@ function renderFaultIsolator() {
   function portOption(p, i, excludeIdx) {
     if (i === excludeIdx) return "";
     // Camera label (Main Camera 1, OCR, etc.) — same one shown on the port tile.
-    var camLbl = p.cameraLabel ? " (" + p.cameraLabel + ")" : "";
+    var camLbl = p.cameraLabel ? " (" + camRoleLabel(p.cameraLabel) + ")" : "";
     var down = !p.isUp || !(p.linkSpeedMbps > 0);
     var spd;
     if (down) spd = ": no link";
