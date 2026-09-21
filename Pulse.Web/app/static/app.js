@@ -3327,8 +3327,14 @@ function _renderCapture(el, d) {
       '<div class="net-cap-stat"><span class="net-cap-stat-val ' + ((d.tcpRetransmits || 0) > 0 ? 'status-warn' : '') + '">' + esc(String(d.tcpRetransmits || 0)) + '</span><span class="net-cap-stat-label">Retransmits</span></div>' +
       '<div class="net-cap-stat"><span class="net-cap-stat-val ' + ((d.tcpResets || 0) > 0 ? 'status-warn' : '') + '">' + esc(String(d.tcpResets || 0)) + '</span><span class="net-cap-stat-label">Resets</span></div>' +
       '<div class="net-cap-stat"><span class="net-cap-stat-val ' + ((d.droppedPackets || 0) > 0 ? 'status-fail' : '') + '">' + esc(String(d.droppedPackets || 0)) + '</span><span class="net-cap-stat-label">Drops</span></div>' +
-      '<div class="net-cap-stat"><span class="net-cap-stat-val">' + esc(String(d.tcpSyns || 0)) + '</span><span class="net-cap-stat-label">SYN</span></div>' +
-      '<div class="net-cap-stat"><span class="net-cap-stat-val">' + esc(String(d.tcpFins || 0)) + '</span><span class="net-cap-stat-label">FIN</span></div>' +
+      // "Inspected" replaced the old SYN and FIN tiles. Packets is a NIC
+      // counter and is always right; retransmits/resets/endpoints come from
+      // decoding the capture file, which pktmon on the fleet's 1809 build
+      // does erratically. Showing how many packets were actually decoded is
+      // the difference between "nothing is wrong" and "nothing was measured".
+      // The SYN/FIN tiles went because pktmon never logs an outbound SYN on
+      // this build, so that tile read 0 on a perfectly healthy VPU.
+      '<div class="net-cap-stat"><span class="net-cap-stat-val">' + esc(String(d.inspectedPackets != null ? d.inspectedPackets : "—")) + '</span><span class="net-cap-stat-label">Inspected</span></div>' +
     '</div>' +
     // Findings
     (findings.length ? '<div class="net-cap-findings">' +
@@ -3354,7 +3360,7 @@ function _renderCapture(el, d) {
             '</tr>';
           }).join("") +
           '</tbody></table>'
-        : '<p class="net-cap-empty">No outbound destinations parsed from the capture. This Windows build may not expose IP details through etl2txt.</p>') +
+        : '<p class="net-cap-empty">No endpoints were decoded from the capture. Windows recorded the packet totals above but did not write the per-packet detail this table needs, which it does intermittently on the VPU image. Run the capture again.</p>') +
     '</div>';
 }
 
