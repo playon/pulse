@@ -1664,14 +1664,40 @@ function toggleFinding(i) {
 // agent still had to retype it into the ticket by hand.
 function copyFindingsForTicket() {
   var txt = window.__pulseTicketText || "";
-  if (!txt || !navigator.clipboard) return;
-  navigator.clipboard.writeText(txt).then(function () {
-    var el = document.getElementById("finding-copy-btn");
+  var el = document.getElementById("finding-copy-btn");
+  function say(msg) {
     if (!el) return;
-    var was = el.textContent;
-    el.textContent = "Copied";
-    setTimeout(function () { el.textContent = was; }, 1600);
-  });
+    if (!el.dataset.label) el.dataset.label = el.textContent;
+    el.textContent = msg;
+    setTimeout(function () { el.textContent = el.dataset.label; }, 2000);
+  }
+  if (!txt) { say("Nothing to copy"); return; }
+
+  // navigator.clipboard exists only in a secure context. http://localhost is
+  // one; http://<vpu-ip>:8765 is NOT, and app/peer.py makes that a real way to
+  // reach Pulse. Both failure paths used to `return` silently and the button
+  // looked broken, so fall back to a hidden textarea + execCommand, which works
+  // on an insecure origin, and say so when even that fails.
+  function fallback() {
+    try {
+      var ta = document.createElement("textarea");
+      ta.value = txt;
+      ta.setAttribute("readonly", "");
+      ta.style.cssText = "position:fixed;top:0;left:-9999px;opacity:0";
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      say(ok ? "Copied" : "Copy failed");
+    } catch (e) {
+      say("Copy failed");
+    }
+  }
+
+  if (!navigator.clipboard) { fallback(); return; }
+  navigator.clipboard.writeText(txt)
+    .then(function () { say("Copied"); })
+    .catch(fallback);   // rejected when the document is not focused, or denied
 }
 
 var _dashNicRefreshTimer = null;
@@ -1783,9 +1809,9 @@ function _renderVolumes(volumes) {
 // The policy table + rollup live server-side (_compute_readiness in main.py);
 // this just renders the verdict record that rides on dash.readiness.
 var _RDY_META = {
-  PASS: { word: "PASS", icon: "check", tone: "pass", tag: "Game-ready. Nothing found that puts tonight's game at risk." },
-  WARN: { word: "WARNING", icon: "alert", tone: "warn", tag: "Should stream, but fix the issues below before game time." },
-  FAIL: { word: "FAIL", icon: "x",     tone: "fail", tag: "Don't expect a clean broadcast tonight. Fix this before the game." },
+  PASS: { word: "PASS", icon: "check", tone: "pass", tag: "Game-ready. Nothing found that puts a game's stream at risk." },
+  WARN: { word: "WARNING", icon: "alert", tone: "warn", tag: "Streaming is possible, but may not be reliable. Fix the issues below before the stream goes on air." },
+  FAIL: { word: "FAIL", icon: "x",     tone: "fail", tag: "Stream-blocker(s) present. Fix this before the game." },
 };
 
 // Demo-only: flip the card through all three states live (e.g. in a meeting).
@@ -1808,10 +1834,23 @@ function _demoVerdict(state) {
   ] };
 }
 
-function readinessCard(verdict, freshness) {
+// The verdict every surface on this card must agree on. The demo swap used to
+// live inside readinessCard and rewrite its local parameter, so the card showed
+// one verdict while the findings list, the counts and the ticket text read
+// dash.readiness and showed another. With the FAIL chip active the card said
+// "FAIL - 1 thing is stopping tonight's game" and the clipboard said
+// "WARNING - Nothing is stopping tonight's game, 3 risks tonight".
+//
+// Resolve it here, once, and hand the SAME object to everything.
+function resolveReadiness(raw) {
   var isDemo = (typeof window !== "undefined" && window.__PULSE_DEMO_MODE);
-  if (isDemo && _readinessDemoState) verdict = _demoVerdict(_readinessDemoState);
+  if (isDemo && _readinessDemoState) return _demoVerdict(_readinessDemoState);
+  return raw || null;
+}
+
+function readinessCard(verdict, freshness) {
   if (!verdict || !verdict.status) return "";
+  var isDemo = (typeof window !== "undefined" && window.__PULSE_DEMO_MODE);
   var meta = _RDY_META[verdict.status] || _RDY_META.WARN;
   var blockers = verdict.blockers || [];
   var risks = verdict.risks || [];
@@ -1883,7 +1922,8 @@ function renderDashboard() {
   //
   // The policy wins. Severity stays on the wire untouched for the audit
   // record and for every other tab; only this card's display defers.
-  const _rdy = dash.readiness || {};
+  const rdyVerdict = resolveReadiness(dash.readiness);
+  const _rdy = rdyVerdict || {};
   const _toneByCode = {};
   (_rdy.blockers || []).forEach((b) => { if (b.code) _toneByCode[b.code] = "critical"; });
   (_rdy.risks    || []).forEach((r) => { if (r.code) _toneByCode[r.code] = "warning";  });
@@ -1949,13 +1989,45 @@ function renderDashboard() {
   // Nothing is authored: this is the same copy the panels show, laid out so it
   // can be pasted whole.
   (function buildTicketText() {
-    var rdy = dash.readiness || {};
+    var rdy = rdyVerdict || {};
     var meta = _RDY_META[rdy.status] || null;
+    var isDemo = (typeof window !== "undefined" && window.__PULSE_DEMO_MODE);
     var lines = [];
+
+    // Demo data is synthetic down to the venue name and the serial. The screen
+    // says DEMO DATA in the header; the clipboard said nothing, so a paste
+    // landed fabricated findings in a real ticket looking exactly like a real
+    // reading.
+    if (isDemo) {
+      lines.push("*** DEMO DATA - not a real VPU. Do not paste into a ticket. ***");
+      lines.push("");
+    }
+    // A previewed verdict is a card state someone clicked, not this unit's
+    // reading. Say so rather than exporting it silently.
+    if (_readinessDemoState) {
+      lines.push("*** READINESS PREVIEW (" + _readinessDemoState + ") - not this unit's real verdict. ***");
+      lines.push("");
+    }
+
     lines.push("Pulse - " + (id.vpuName || id.hostname || "VPU"));
     if (id.hostname && id.vpuName) lines.push("Host: " + id.hostname);
-    lines.push("Checked: " + new Date().toLocaleString());
+    // The serial is what an RMA needs, and it was on screen but not in here.
+    if (id.serialNumber) lines.push("Serial: " + id.serialNumber);
+
+    // Was `new Date()` -- the moment the dashboard rendered, which asserts a
+    // freshness the data does not have. Leave Pulse open twenty minutes and it
+    // claimed a check made just now. The card renders rdy.timestamp ("as of
+    // 09:46 AM") while the ticket said 09:53:20: seven minutes apart, same
+    // screen, same data. Use the collection time, and name it.
+    if (rdy.timestamp) {
+      lines.push("Data collected: " + new Date(rdy.timestamp)
+        .toLocaleString([], { timeZoneName: "short" }));
+    } else {
+      lines.push("Data collected: unknown (copied " + new Date()
+        .toLocaleString([], { timeZoneName: "short" }) + ")");
+    }
     lines.push("");
+
     if (meta) {
       lines.push("Stream readiness: " + meta.word + " - " + meta.tag);
       var nb = (rdy.blockers || []).length, nr = (rdy.risks || []).length;
@@ -1964,13 +2036,40 @@ function renderDashboard() {
         : "Nothing is stopping tonight's game, " + nr + " risk" + (nr === 1 ? "" : "s") + " tonight");
       lines.push("");
     }
-    if (!sortedFindings.length) {
+
+    // Itemise from the READINESS RECORD, not from `findings`.
+    //
+    // The header counted rdy.blockers/risks while the body listed findings, and
+    // those are not the same set: _compute_readiness computes cpu-sustained,
+    // mem-sustained, temp-90, disk-c-critical and disk-d-critical itself, and
+    // none of them exists as a dashboard finding. Verified against the real
+    // function -- a pegged CPU, exhausted memory and a 93C unit produced
+    // "4 risks tonight" over a single camera-cable line, with the three severe
+    // ones named nowhere. The ticket was least complete exactly when the unit
+    // was in the worst shape.
+    //
+    // The record is already the reconciled set: one entry per condition (see
+    // supersededBy), each carrying title and recommendation, and its bucket IS
+    // the policy's class. Unclassified codes land in `info`, so nothing from
+    // `findings` is lost.
+    var items = [];
+    (rdy.blockers || []).forEach(function (e) { items.push(["critical", e]); });
+    (rdy.risks    || []).forEach(function (e) { items.push(["warning",  e]); });
+    (rdy.info     || []).forEach(function (e) { items.push(["info",     e]); });
+
+    if (!items.length && sortedFindings.length) {
+      // No readiness record rode along (older payload, non-VPU host): fall back
+      // to the findings themselves rather than reporting nothing.
+      sortedFindings.forEach(function (f) { items.push([toneOf(f), f]); });
+    }
+
+    if (!items.length) {
       lines.push("No findings.");
     } else {
-      sortedFindings.forEach(function (f) {
-        var v = VERDICT[toneOf(f)] || verdictFor(f.severity);
-        lines.push("[" + v.word + "] " + (f.title || ""));
-        var rec = (f.recommendation || "").trim();
+      items.forEach(function (pair) {
+        var v = VERDICT[pair[0]] || VERDICT.info, e = pair[1];
+        lines.push("[" + v.word + "] " + (e.title || ""));
+        var rec = (e.recommendation || "").trim();
         if (rec) lines.push("    " + rec);
         lines.push("");
       });
@@ -2039,7 +2138,7 @@ function renderDashboard() {
     </div>
 
     <!-- Stream Readiness — lead the triage page with "are we game-ready?" -->
-    ${readinessCard(dash.readiness, baselineStr)}
+    ${readinessCard(rdyVerdict, baselineStr)}
 
     ${(dash.sourceErrors && dash.sourceErrors.length) ? `
     <!-- Partial-failure notice — some diagnostic scripts didn't complete -->
@@ -2064,7 +2163,7 @@ function renderDashboard() {
         </div>
         <div class="cc-findings-actions">
           <span class="cc-findings-count">${totalFindings} issue${totalFindings === 1 ? "" : "s"}</span>
-          <button class="finding-copy" id="finding-copy-btn" onclick="copyFindingsForTicket()" title="Copy the unit, the verdict and every finding with its fix, ready to paste into a ticket">Copy for ticket</button>
+          <button class="finding-copy" id="finding-copy-btn" aria-live="polite" onclick="copyFindingsForTicket()" title="Copy the unit, the verdict and every finding with its fix, ready to paste into a ticket">Copy for ticket</button>
         </div>
       </div>
       <div class="cc-findings-list">
@@ -5734,7 +5833,7 @@ function renderServices() {
         <div>
           <div class="svc-quick-action-title">Restart Agent + Coordinator</div>
           <div class="svc-quick-action-body">
-            The documented first fix when the Pixellot Agent or Coordinator stops responding. Try it before escalating for a hardware return (RMA). <span class="font-mono">Runs c:\\pixellot\\bin\\keepagentup.exe.</span>
+            Run this when Agent or Coordinator stop responding. <span class="font-mono">Runs c:\\pixellot\\bin\\keepagentup.exe.</span>
           </div>
         </div>
         <button class="btn-outline btn-ol-blue" id="svc-keepagent-btn" title="Documented first-line remedy when Agent/Coordinator is unresponsive">
