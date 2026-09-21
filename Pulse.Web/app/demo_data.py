@@ -773,7 +773,6 @@ DEMO = {
             {"domain": "nfhsnetwork.com", "resolvedTo": "52.20.181.43", "status": "pass", "resolutionMs": round(random.uniform(8, 25), 1)},
             {"domain": "pixellot.tv", "resolvedTo": "52.20.181.44", "status": "pass", "resolutionMs": round(random.uniform(5, 18), 1)},
             {"domain": "software.pixellot.tv", "resolvedTo": "52.20.181.45", "status": "pass", "resolutionMs": round(random.uniform(6, 20), 1)},
-            {"domain": "sportzcast.net", "resolvedTo": "104.26.11.87", "status": "pass", "resolutionMs": round(random.uniform(10, 35), 1)},
             {"domain": "service.singular.live", "resolvedTo": "76.76.21.21", "status": "pass", "resolutionMs": round(random.uniform(12, 40), 1)},
             {"domain": "logmein.com", "resolvedTo": "216.52.233.2", "status": "pass", "resolutionMs": round(random.uniform(5, 15), 1)},
         ]
@@ -800,13 +799,6 @@ DEMO = {
             # Required — RTMP fallback egress (last streaming rung; probed
             # against a stable public RTMP host, see Test-NetworkPorts.ps1)
             {"purpose": "RTMP Fallback", "host": "a.rtmp.youtube.com", "port": 1935, "protocol": "TCP", "status": "pass", "optional": False},
-            # Optional — Sportzcast Scorebot range (ScoreConnect deployments only)
-            {"purpose": "Scorebot", "host": "scorebot.sportzcast.net", "port": 1400, "protocol": "TCP", "status": "pass", "optional": True},
-            {"purpose": "Scorebot", "host": "scorebot.sportzcast.net", "port": 1401, "protocol": "TCP", "status": "pass", "optional": True},
-            {"purpose": "Scorebot", "host": "scorebot.sportzcast.net", "port": 1402, "protocol": "TCP", "status": "pass", "optional": True},
-            {"purpose": "Scorebot", "host": "scorebot.sportzcast.net", "port": 1403, "protocol": "TCP", "status": "pass", "optional": True},
-            {"purpose": "Scorebot", "host": "scorebot.sportzcast.net", "port": 1404, "protocol": "TCP", "status": "pass", "optional": True},
-            {"purpose": "Scorebot", "host": "scorebot.sportzcast.net", "port": 1405, "protocol": "TCP", "status": "pass", "optional": True},
         ]
     },
     # SSL-inspection detector — every service presents a public-CA cert that
