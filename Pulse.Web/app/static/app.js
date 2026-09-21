@@ -3465,7 +3465,6 @@ const NET_DOMAIN_IMPACT = {
   "nfhsnetwork.com": "Event scheduling, broadcast watermarks, and viewer access are unavailable.",
   "pixellot.tv": "System management and software updates are blocked, and the stream fails to broadcast.",
   "software.pixellot.tv": "Software and firmware updates are blocked.",
-  "sportzcast.net": "SportzCast scoreboard software can't connect or update (SportzCast sites only).",
   "service.singular.live": "On-screen graphics and scorebug overlays won't load.",
   "logmein.com": "The support team can't diagnose the VPU remotely.",
 };
