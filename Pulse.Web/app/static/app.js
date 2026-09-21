@@ -3361,19 +3361,41 @@ async function _runCapture(duration) {
   if (spinner) spinner.style.display = "none";
 }
 
+// One capture stat tile. A metric the collector could not measure arrives as
+// null and must render as an em dash, never as 0 -- on an unpatched VPU the
+// packet monitor cannot see resets or drops at all, and a zero in that tile
+// reads as "no resets, no drops" to whoever opens the card.
+function _capStat(label, val, badClass) {
+  var measured = (val != null);
+  var cls = (measured && val > 0 && badClass) ? badClass : "";
+  return '<div class="net-cap-stat">' +
+    '<span class="net-cap-stat-val ' + cls + '">' + esc(measured ? String(val) : "—") + '</span>' +
+    '<span class="net-cap-stat-label">' + esc(label) + '</span>' +
+  '</div>';
+}
+
 function _renderCapture(el, d) {
   var findings = d.findings || [];
   var topTalkers = d.topTalkers || [];
+  // Unpatched VPUs run the October 2018 packet monitor, which can count
+  // traffic but cannot record it. The collector says which path it took.
+  var countersOnly = (d.captureMode === "counters");
 
   el.innerHTML =
     // Summary stats
     '<div class="net-cap-summary">' +
-      '<div class="net-cap-stat"><span class="net-cap-stat-val">' + esc(String(d.totalPackets || 0)) + '</span><span class="net-cap-stat-label">Packets</span></div>' +
-      '<div class="net-cap-stat"><span class="net-cap-stat-val ' + ((d.tcpRetransmits || 0) > 0 ? 'status-warn' : '') + '">' + esc(String(d.tcpRetransmits || 0)) + '</span><span class="net-cap-stat-label">Retransmits</span></div>' +
-      '<div class="net-cap-stat"><span class="net-cap-stat-val ' + ((d.tcpResets || 0) > 0 ? 'status-warn' : '') + '">' + esc(String(d.tcpResets || 0)) + '</span><span class="net-cap-stat-label">Resets</span></div>' +
-      '<div class="net-cap-stat"><span class="net-cap-stat-val ' + ((d.droppedPackets || 0) > 0 ? 'status-fail' : '') + '">' + esc(String(d.droppedPackets || 0)) + '</span><span class="net-cap-stat-label">Drops</span></div>' +
-      '<div class="net-cap-stat"><span class="net-cap-stat-val">' + esc(String(d.tcpSyns || 0)) + '</span><span class="net-cap-stat-label">SYN</span></div>' +
-      '<div class="net-cap-stat"><span class="net-cap-stat-val">' + esc(String(d.tcpFins || 0)) + '</span><span class="net-cap-stat-label">FIN</span></div>' +
+      _capStat("Packets", d.totalPackets != null ? d.totalPackets : 0, null) +
+      _capStat("Retransmits", d.tcpRetransmits, "status-warn") +
+      _capStat("Resets", d.tcpResets, "status-warn") +
+      _capStat("Drops", d.droppedPackets, "status-fail") +
+      // "Inspected" replaced the old SYN and FIN tiles. Packets is a NIC
+      // counter and is always right; retransmits/resets/endpoints come from
+      // decoding the capture file, which pktmon on the fleet's 1809 build
+      // does erratically. Showing how many packets were actually decoded is
+      // the difference between "nothing is wrong" and "nothing was measured".
+      // The SYN/FIN tiles went because pktmon never logs an outbound SYN on
+      // this build, so that tile read 0 on a perfectly healthy VPU.
+      _capStat("Inspected", d.inspectedPackets, null) +
     '</div>' +
     // Findings
     (findings.length ? '<div class="net-cap-findings">' +
@@ -3399,7 +3421,10 @@ function _renderCapture(el, d) {
             '</tr>';
           }).join("") +
           '</tbody></table>'
-        : '<p class="net-cap-empty">No outbound destinations parsed from the capture. This Windows build may not expose IP details through etl2txt.</p>') +
+        : '<p class="net-cap-empty">' + (countersOnly
+            ? 'Not available on this VPU. Its version of Windows can count traffic but cannot record it, so there is no per-packet detail to list endpoints from. See the note above.'
+            : 'No endpoints were decoded from the capture. Windows recorded the packet totals above but did not write the per-packet detail this table needs, which it does intermittently on the VPU image. Run the capture again.')
+          + '</p>') +
     '</div>';
 }
 

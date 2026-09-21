@@ -521,6 +521,63 @@ def _demo_poe_power():
     }
 
 
+def _demo_network_capture(**kw):
+    """Demo payload for the Advanced Diagnostics packet-capture card.
+
+    Kept faithful to what the real collector can actually report on the fleet
+    image, because the previous version of this payload is why a completely
+    broken card looked healthy for so long: it invented a full set of stats and
+    top talkers, so demo mode showed a working capture while every real VPU
+    returned a pktmon parameter error. Two invariants from the live script are
+    preserved here.
+
+    Packet totals come from the NIC counters while the decoded count comes from
+    the capture file, so inspected is always a subset of the total -- never a
+    separate roll of the dice that can exceed it. And tcpSyns stays 0 because
+    pktmon on Windows 1809 never logs an outbound SYN; a demo showing 94 of
+    them would re-hide exactly the kind of defect this payload once masked.
+    """
+    total = random.randint(1800, 4200)
+    inspected = int(total * random.uniform(0.85, 1.0))
+    retransmits = random.randint(0, 6)
+    if retransmits > 0:
+        findings = [{
+            "severity": "info",
+            "title": f"{retransmits} TCP retransmission(s) detected",
+            "body": "Minor retransmissions. These only matter if they are sustained.",
+        }]
+    else:
+        findings = [{
+            "severity": "pass",
+            "title": "No issues detected",
+            "body": f"Inspected {inspected} packets over 30s with no retransmissions, resets, or drops.",
+        }]
+    return {
+        "durationSec": int((kw or {}).get("DurationSec", 30)),
+        # Demo stands in for a patched VPU, which is the only kind that can
+        # capture packets. Unpatched units return captureMode "counters" with
+        # nulls for everything the October 2018 packet monitor cannot measure.
+        "captureMode": "capture",
+        "osBuild": "17763.8880",
+        "totalPackets": total,
+        "inspectedPackets": inspected,
+        "droppedPackets": 0,
+        "tcpRetransmits": retransmits,
+        "tcpResets": 0,
+        "tcpSyns": 0,
+        "tcpSynAcks": random.randint(40, 120),
+        "tcpFins": random.randint(20, 60),
+        "topTalkers": [
+            {"remoteAddr": "52.20.181.46", "remotePort": 1935, "remoteHost": "live.pixellot.tv", "packets": random.randint(600, 1500)},
+            {"remoteAddr": "52.217.44.54", "remotePort": 443, "remoteHost": "software.pixellot.tv", "packets": random.randint(300, 800)},
+            {"remoteAddr": "52.20.181.44", "remotePort": 443, "remoteHost": "api.pixellot.tv", "packets": random.randint(100, 400)},
+            {"remoteAddr": "52.20.181.45", "remotePort": 443, "remoteHost": "cloud.pixellot.tv", "packets": random.randint(80, 300)},
+            {"remoteAddr": "76.76.21.21", "remotePort": 443, "remoteHost": "service.singular.live", "packets": random.randint(20, 80)},
+        ],
+        "findings": findings,
+    }
+
+
 DEMO = {
     "Get-SystemIdentity.ps1": lambda **kw: {
         "computerSystem": {"name": _VENUE["hostname"], "manufacturer": "HP", "model": "HP Z2 Tower G9 Workstation Desktop PC"},
@@ -1108,29 +1165,7 @@ DEMO = {
             {"name": "intel[r] i211 gigabit network connection", "queueLen": 0, "rxErrors": 0, "txErrors": 0, "rxPktSec": random.randint(400, 1200), "txPktSec": random.randint(1000, 4000)},
         ],
     },
-    "Start-NetworkCapture.ps1": lambda **kw: {
-        "durationSec": int((kw or {}).get("DurationSec", 30)),
-        "totalPackets": random.randint(1800, 4200),
-        "droppedPackets": 0,
-        "tcpRetransmits": random.randint(0, 6),
-        "tcpResets": random.randint(0, 3),
-        "tcpSyns": random.randint(40, 120),
-        "tcpFins": random.randint(20, 60),
-        "components": [
-            {"name": "Intel(R) I211 Gigabit Network Connection", "packets": random.randint(1500, 3500), "drops": 0},
-            {"name": "Intel(R) I210 Gigabit Network Connection", "packets": random.randint(200, 800), "drops": 0},
-        ],
-        "topTalkers": [
-            {"remoteAddr": "52.20.181.46", "remotePort": 1935, "remoteHost": "live.pixellot.tv", "packets": random.randint(600, 1500)},
-            {"remoteAddr": "52.217.44.54", "remotePort": 443, "remoteHost": "s3.amazonaws.com", "packets": random.randint(300, 800)},
-            {"remoteAddr": "52.20.181.44", "remotePort": 443, "remoteHost": "api.pixellot.tv", "packets": random.randint(100, 400)},
-            {"remoteAddr": "52.20.181.45", "remotePort": 443, "remoteHost": "cloud.pixellot.tv", "packets": random.randint(80, 300)},
-            {"remoteAddr": "76.76.21.21", "remotePort": 443, "remoteHost": "service.singular.live", "packets": random.randint(20, 80)},
-        ],
-        "findings": [
-            {"severity": "pass", "title": "No issues detected", "body": "Captured ~3000 packets over 30s with no retransmissions, resets, or drops."},
-        ],
-    },
+    "Start-NetworkCapture.ps1": lambda **kw: _demo_network_capture(**kw),
     "Test-Traceroute.ps1": lambda **kw: {
         "target": (kw or {}).get("Target", "pixellot.tv"),
         "targetIp": "52.20.181.44",
