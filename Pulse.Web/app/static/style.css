@@ -1736,14 +1736,6 @@ html.dark .channel-moved-banner {
     border-bottom: 1px solid var(--c-border);
     margin-bottom: 8px;
 }
-.nic-sys-chip {
-    font-size: 0.68rem;
-    font-weight: 600;
-    color: var(--c-accent-blue);
-    background: var(--c-tint-blue);
-    border-radius: 999px;
-    padding: 2px 9px;
-}
 /* Flip-layout toggle: right-aligned in the diagram header (margin-left:auto
    works whether or not the live-refresh badge is present). */
 .nic-layout-toggle {
@@ -1847,6 +1839,40 @@ html.dark .channel-moved-banner {
 .orient-acpin { fill: var(--c-muted); }
 .orient-caption { font-size: 0.66rem; line-height: 1.5; color: var(--c-muted); }
 .orient-caption strong { color: var(--c-text); font-weight: 600; }
+/* Camera-head reference panel: the head on the pole for this system type.
+   Pixellot's renders are white on transparent, so they sit on the recessed
+   surface; on a plain white card they would vanish in the light theme. */
+.nic-ref-panels { display: flex; gap: 16px; align-items: stretch; flex-wrap: wrap; justify-content: center; }
+.nic-ref-panels > .nic-orient-panel { margin-left: 0; }
+/* Two cameras side by side: wider than the shared 360px reference-panel cap. */
+.cam-head-panel { display: flex; flex-direction: column; max-width: none; }
+.cam-head-items { display: flex; gap: 16px; flex-wrap: wrap; }
+.cam-head-item { width: 176px; display: flex; flex-direction: column; }
+.cam-head-fig {
+    height: 132px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--c-surface-2);
+    border-radius: 6px;
+    padding: 8px;
+    margin-bottom: 8px;
+}
+.cam-head-fig img { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; }
+.cam-head-name { font-size: 0.8rem; font-weight: 600; color: var(--c-text); margin-bottom: 2px; }
+.cam-head-facts {
+    display: grid; grid-template-columns: auto 1fr; gap: 2px 8px;
+    margin: 8px 0 0; font-size: 0.72rem; line-height: 1.4;
+}
+.cam-head-facts dt { color: var(--c-muted); }
+.cam-head-facts dd { margin: 0; font-weight: 600; color: var(--c-text); }
+.cam-head-facts dd.status-pass { color: var(--c-accent-green); }
+.cam-head-facts dd.status-fail { color: var(--c-accent-red); }
+.cam-head-facts dd.status-warn { color: var(--c-accent-amber); }
+.cam-head-facts dd.text-pulse-muted { color: var(--c-muted); }
+/* Port lines run the item's full width under Expected / Connected: in the
+   value column alone "Port 2 at 100 Mbps (Slow)" wrapped onto two lines. */
+.cam-head-facts .cam-head-ports { grid-column: 1 / -1; font-weight: 400; display: flex; flex-direction: column; gap: 1px; margin-top: 2px; }
+.cam-head-facts .cam-head-ports .status-warn { color: var(--c-accent-amber); }
+.cam-head-facts .cam-head-ports .status-pass { color: var(--c-accent-green); }
 .nic-diagram-ports {
     display: flex;
     gap: 48px;
@@ -3070,6 +3096,59 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
     line-height: 1.6;
 }
 .net-issue-details li + li { margin-top: 2px; }
+
+/* Under a finding's body on the Dashboard, the Network card and Camera
+   Connectivity: one row per affected port or service, the line to send venue
+   IT, and a collapsed "How Pulse knows". The body above is written to be read
+   aloud to a school; these are for whoever acts on it. */
+.finding-details {
+    margin: 0 0 8px;
+    padding-left: 1rem;
+    list-style: disc;
+    font-size: 0.72rem;
+    color: var(--c-dim);
+    line-height: 1.6;
+    max-width: 68ch;
+}
+.finding-details li + li { margin-top: 2px; }
+.finding-it {
+    margin: 8px 0 0;
+    max-width: 68ch;
+    font-size: 0.74rem;
+    line-height: 1.5;
+    color: var(--c-text);
+}
+.finding-it-label { font-weight: 600; margin-right: 4px; }
+.finding-evidence {
+    margin: 6px 0 0;
+    max-width: 68ch;
+    font-size: 0.72rem;
+    color: var(--c-dim);
+}
+.finding-evidence > summary {
+    cursor: pointer;
+    width: max-content;
+    color: var(--c-muted);
+}
+.finding-evidence > summary:focus-visible {
+    outline: 2px solid var(--c-accent-blue);
+    outline-offset: 2px;
+}
+.finding-evidence > p { margin: 4px 0 0; line-height: 1.5; }
+/* The Dashboard detail puts "Open <page>" under the extras; keep a gap. */
+.finding-detail > .finding-evidence,
+.finding-detail > .finding-it { margin-bottom: 8px; }
+/* The Network card's issue body runs the card's full width; match it so the
+   venue-IT line and the evidence don't stop short of the text above them. */
+.net-issue-text .finding-it,
+.net-issue-text .finding-evidence { max-width: none; }
+.net-tip-evidence { display: block; margin-top: 5px; color: var(--c-muted); }
+/* On Camera Connectivity the finding sits on a severity-tinted row; the dim
+   ramp washes out there, so match the row's own body text. */
+.cam-finding-row .finding-details,
+.cam-finding-row .finding-evidence { color: var(--c-muted); }
+.cam-finding-row .finding-details { margin: 6px 0 0; }
+.cam-poe-note-evidence { font-size: 0.72rem; color: var(--c-dim); line-height: 1.4; margin-top: 4px; }
 
 /* Local Network Health — ping cards */
 .net-ping-grid {

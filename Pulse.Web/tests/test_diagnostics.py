@@ -24,6 +24,14 @@ import main  # noqa: E402
 import powershell  # noqa: E402
 
 
+def _finding_text(f):
+    """Everything a finding tells the reader: the body, the venue-IT line,
+    the evidence and the per-row details. Findings carry their facts in
+    whichever of these fits the audience, so assert against all of them."""
+    return " ".join([f.get("recommendation") or "", f.get("it") or "",
+                     f.get("evidence") or ""] + list(f.get("details") or []))
+
+
 # ── Version comparison (GPU compat caps) ─────────────────────
 class TestVersionCompare(unittest.TestCase):
     def test_wildcard_cap_allows_any_patch(self):
@@ -809,8 +817,8 @@ class TestAdapterRoles(unittest.TestCase):
         self.assertIsNotNone(f)
         self.assertEqual(f["severity"], "critical")
         self.assertIn("camera port", f["title"].lower())
-        self.assertIn("Ethernet 28", f["recommendation"])
-        self.assertIn("no cable connected", f["recommendation"])  # motherboard cable is out
+        self.assertIn("Ethernet 28", _finding_text(f))
+        self.assertIn("no cable connected", _finding_text(f))  # motherboard cable is out
 
     def test_motherboard_disabled_note(self):
         cfg = self._bad()
@@ -838,7 +846,7 @@ class TestAdapterRoles(unittest.TestCase):
                 ipc["ipv4DefaultGateway"] = "192.168.100.1"   # scalar, not a list
         f = main._camera_nic_uplink_finding(cfg)
         self.assertIsNotNone(f)
-        self.assertIn("192.168.100.1", f["recommendation"])  # full gateway, not "1"
+        self.assertIn("192.168.100.1", _finding_text(f))  # full gateway, not "1"
 
 
 # ── Wi-Fi card disabled (Pixellot Connect) ───────────────────────────
@@ -884,7 +892,7 @@ class TestWifiDisabled(unittest.TestCase):
         self.assertIsNotNone(f)
         self.assertEqual(f["severity"], "warning")
         self.assertIn("Connect", f["recommendation"])
-        self.assertIn("Wireless-AC 9560", f["recommendation"])
+        self.assertIn("Wireless-AC 9560", _finding_text(f))
 
     def test_enabled_wifi_does_not_warn(self):
         self.assertIsNone(main._wifi_disabled_finding(self._cfg(wifi_status="Up", wifi_admin="Up")))
@@ -927,7 +935,7 @@ class TestDnsProbeFalsePositive(unittest.TestCase):
     def test_dns_reported_when_nothing_resolves(self):
         # DNS fails AND no hostname-based service passed → genuine DNS problem, still flag.
         titles = self._net_titles(self._ports("fail", "fail"))
-        self.assertTrue(any("DNS is blocked" in t for t in titles), titles)
+        self.assertTrue(any("blocking name lookups" in t for t in titles), titles)
 
 
 # ── NTP source allowlist (PDF #9) ────────────────────────────
@@ -1071,6 +1079,139 @@ class TestReadinessPolicy(unittest.TestCase):
         )
 
 
+
+# ── Zero cameras must never read PASS ─────────────────────────────────
+class TestNoCamerasNeverPasses(unittest.TestCase):
+    """North East (MD) Gym, 2026-09-22, web-v1.3.0: 2 main cameras expected,
+    none connected, the venue's internet cable in camera port 2 -- and Stream
+    Readiness said PASS "Game-ready". The cold-start guard read port 2's link
+    as proof of a camera; the Dashboard never re-collected; and with no
+    expected count the check would not have run at all."""
+
+    def setUp(self):
+        self._saved_start = main._PROCESS_START_MONO
+        self._saved_tracker = main._PORT_STATE_TRACKER
+        main._PORT_STATE_TRACKER = {}
+        main._PROCESS_START_MONO = main.time.monotonic()  # inside the grace window
+
+    def tearDown(self):
+        main._PROCESS_START_MONO = self._saved_start
+        main._PORT_STATE_TRACKER = self._saved_tracker
+
+    @staticmethod
+    def _port(name, mac, up):
+        return {"name": name, "status": "Up" if up else "Disconnected",
+                "linkSpeedMbps": 1000 if up else None, "mac": mac, "arpEntries": []}
+
+    def _north_east(self):
+        nics = {"ports": [
+            self._port("Ethernet 28", "00:30:64:5F:61:86", True),   # the internet cable
+            self._port("Ethernet 29", "00:30:64:5F:61:87", False),
+            self._port("Ethernet 30", "00:30:64:5F:61:88", False),
+            self._port("Ethernet 31", "00:30:64:5F:61:89", False),
+        ]}
+        cfg = {"adapters": [
+            {"name": "Ethernet 5", "interfaceDescription": "Intel(R) Ethernet Connection (7) I219-LM",
+             "status": "Disconnected", "adminStatus": "Up", "physicalMediaType": "802.3",
+             "macAddress": "E0-D5-5E-00-00-01", "interfaceIndex": 22, "pciBus": 0},
+            {"name": "Ethernet 28", "interfaceDescription": "Intel(R) 82574L Gigabit Network Connection #13",
+             "status": "Up", "adminStatus": "Up", "physicalMediaType": "802.3",
+             "macAddress": "00-30-64-5F-61-86", "interfaceIndex": 23, "pciBus": 4},
+        ], "ipConfigurations": [
+            {"interfaceAlias": "Ethernet 28", "interfaceIndex": 23, "ipv4DefaultGateway": "10.10.60.1"},
+        ]}
+        return nics, cfg
+
+    def _findings(self, nics, cfg=None, expected=2, probes=None, identity=None):
+        return main._compute_findings(
+            identity=identity or _identity("5.37.2"), performance={}, services={}, nics=nics,
+            network_config=cfg, probe_results={} if probes is None else probes,
+            expectations={"expectedMainCameras": expected} if expected else None)
+
+    def test_internet_cable_link_is_not_camera_evidence(self):
+        nics, cfg = self._north_east()
+        f = self._findings(nics, cfg)
+        cam = [x for x in f if x["code"] == "cam-none"]
+        self.assertEqual(len(cam), 1, [x["code"] for x in f])
+        self.assertIn("internet cable", " ".join(cam[0]["details"]))
+        self.assertIn("carrying the internet cable", cam[0]["recommendation"])
+        verdict = main._compute_readiness(f)
+        self.assertEqual(verdict["status"], "FAIL")
+        self.assertIn("cam-none", [b["code"] for b in verdict["blockers"]])
+
+    def test_zero_cameras_fire_without_an_expected_count(self):
+        nics, cfg = self._north_east()
+        cam = [x for x in self._findings(nics, cfg, expected=None) if x["code"] == "cam-none"]
+        self.assertEqual(len(cam), 1)
+        self.assertNotIn("expected", cam[0]["title"])
+
+    def test_non_vpu_host_without_count_stays_quiet(self):
+        nics, cfg = self._north_east()
+        f = self._findings(nics, cfg, expected=None,
+                           identity={**_identity("5.37.2"), "isNonVpuHost": True})
+        self.assertEqual([x for x in f if x["code"].startswith("cam-")], [])
+
+    def test_cold_start_on_a_real_camera_link_is_pending_not_pass(self):
+        # The VPU2 case (camera links up, caches cold) still doesn't fire the
+        # critical, but it no longer reads as a pass either.
+        nics = {"ports": [self._port("Ethernet 28", "00:30:64:5F:61:86", True)]}
+        f = self._findings(nics)
+        self.assertEqual([x["code"] for x in f if x["code"].startswith("cam-")], ["cam-count-pending"])
+        self.assertEqual(main._compute_readiness(f)["status"], "WARN")
+
+    def test_camera_tab_carries_the_same_finding(self):
+        nics, cfg = self._north_east()
+        ports = main._enrich_ports(nics, None, {})
+        main._flag_uplink_ports(ports, cfg)
+        f = main._camera_count_findings(ports, 2, {}, True)
+        self.assertEqual([x["code"] for x in f], ["cam-none"])
+
+
+class TestMainCameraCount(unittest.TestCase):
+    """_count_main_cameras counts each camera once, by MAC, across the
+    neighbour table and the CGI probes. It used to take max(ARP, probes)."""
+
+    @staticmethod
+    def _port(macs, up=True, ocr=False, uplink=False):
+        return {"isUp": up, "isOcr": ocr, "hasInternetUplink": uplink,
+                "camerasDetected": [{"mac": m, "role": "Main Camera"} for m in macs]}
+
+    def test_one_camera_under_two_addresses_counts_once(self):
+        ports = [self._port(["00-0E-53-AA-01-01"]), self._port(["00:0e:53:aa:01:01"])]
+        self.assertEqual(main._count_main_cameras(ports, {}), 1)
+
+    def test_each_source_seeing_a_different_camera_counts_both(self):
+        ports = [self._port(["00:0E:53:AA:01:01"])]
+        probes = {"00:0E:53:BB:02:01": {"mac": "00:0E:53:BB:02:01", "ip": "169.254.16.51",
+                                         "modelNumber": "Z4SF-5"}}
+        self.assertEqual(main._count_main_cameras(ports, probes), 2)  # max() said 1
+
+    def test_uplink_ocr_and_down_ports_never_count(self):
+        ports = [self._port(["00:0E:53:AA:01:01"], uplink=True),
+                 self._port(["00:D0:89:1B:03:01"], ocr=True),
+                 self._port(["00:0E:53:AA:01:02"], up=False)]
+        self.assertEqual(main._count_main_cameras(ports, {}), 0)
+
+    def test_main_camera_ports_name_where_each_camera_is(self):
+        ports = [
+            {**self._port(["00:0E:53:AA:01:01"]), "portLabel": "Port 1", "linkSpeedMbps": 1000},
+            {**self._port(["00:0E:53:BB:02:01"]), "portLabel": "Port 2", "linkSpeedMbps": 100, "isDegraded": True},
+            {**self._port(["00:D0:89:1B:03:01"], ocr=True), "portLabel": "Port 3"},
+            {**self._port(["00:0E:53:CC:03:01"], uplink=True), "portLabel": "Port 4"},
+        ]
+        self.assertEqual(main._main_camera_ports(ports), [
+            {"port": "Port 1", "speedMbps": 1000, "cameras": 1, "slow": False},
+            {"port": "Port 2", "speedMbps": 100, "cameras": 1, "slow": True},
+        ])
+
+    def test_scoreboard_state_only_when_configured_or_present(self):
+        self.assertIsNone(main._scoreboard_camera_state([self._port([])], {"cameras": []}))
+        live = {"isUp": True, "isOcr": True, "portLabel": "Port 3", "linkSpeedMbps": 100}
+        st = main._scoreboard_camera_state([live], None)
+        self.assertEqual((st["connected"], st["port"], st["speedMbps"]), (True, "Port 3", 100))
+        st = main._scoreboard_camera_state([], {"cameras": [{"role": "OCR"}]})
+        self.assertEqual((st["configured"], st["connected"]), (True, False))
+
 # ── LogMeIn service-log evidence (Get-LmiGatewayLog) ─────────────────
 # Fixture numbers are the real field log (2026-08-28): a VPU dark in LMI all
 # day - 201 handshakes killed with "SSL error: SSLv3/TLS write client hello"
@@ -1102,10 +1243,10 @@ class TestLmiGatewayLogFinding(unittest.TestCase):
              if x["code"] == "lmi-ssl-blocked"]
         self.assertEqual(len(f), 1)
         self.assertEqual(f[0]["severity"], "warning")
-        self.assertIn("201", f[0]["recommendation"])
+        self.assertIn("201", _finding_text(f[0]))
         # The fix has to name the gateway wildcard - an allowlist entry for
         # secure.logmein.com alone leaves control.lmi-app*.logmein.com dead.
-        self.assertIn("*.logmein.com", f[0]["recommendation"])
+        self.assertIn("*.logmein.com", _finding_text(f[0]))
 
     def test_recovered_block_stays_off_dashboard(self):
         # Failures followed by a successful login = venue lifted the block.
@@ -1159,6 +1300,10 @@ _CRITICAL_FINDING_CODES = {
     "sw-security",
     "temp-critical",
     "tz-non-us",
+    "uplink-on-camera-port",
+    # port-dns-blocked / port-required-blocked share one emit site.
+    "port-dns-blocked",
+    "port-required-blocked",
     # Built from a variable at emit time: the `{name}-down` service findings
     # and cam-none (critical when zero main cameras are present).
     "agent-down",

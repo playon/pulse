@@ -1087,10 +1087,8 @@ _CONCERNING_SOFTWARE = {
         "label": "Non-standard remote-access tool",
         "shortLabel": "Alt Remote",
         "reason": (
-            "LogMeIn is the approved Pixellot remote-access tool. Alternative "
-            "products run their own background telemetry and may compete with "
-            "LogMeIn for ports / system tray. Confirm with field operations "
-            "before relying on these."
+            "Only LogMeIn is approved for remote access, and other tools can "
+            "interfere with it. Check with field operations before using them."
         ),
         # VNC variants (TightVNC, RealVNC) are often standard on VPUs — left out
         # to avoid false positives.
@@ -1306,31 +1304,30 @@ def _camera_nic_uplink_finding(network_config):
         return "ok"
 
     mobo = [a for a in adapters if a.get("role") == "motherboard"]
-    mobo_note = ""
-    if mobo:
-        st = _mobo_state(mobo[0])
-        if st == "disabled":
-            mobo_note = " The motherboard network port is disabled. Enable it in Windows."
-        elif st == "unplugged":
-            mobo_note = " The motherboard network port has no cable connected."
-    else:
-        mobo_note = " No motherboard network port was detected. It may be disabled."
+    mobo_state = _mobo_state(mobo[0]) if mobo else "missing"
+    move = {
+        "disabled": "Move it to the motherboard network port, then enable that port in Windows (it's disabled).",
+        "missing": "Move it to the motherboard network port. Pulse can't see that port, so it may be disabled in Windows.",
+    }.get(mobo_state, "Move it to the motherboard network port.")
+    mobo_row = {
+        "disabled": "Motherboard network port: disabled",
+        "unplugged": "Motherboard network port: no cable connected",
+        "missing": "Motherboard network port: not detected",
+    }.get(mobo_state)
 
-    ports_txt = ", ".join(
-        f"{a.get('name') or a.get('interfaceDescription') or '?'} (gateway {gw})"
-        for a, gw in misplaced
-    )
     return {
+        "code": "uplink-on-camera-port",
         "severity": "critical",
         "category": "Network",
         "title": "Internet is plugged into a camera port, not the motherboard network port",
         "recommendation": (
-            f"The internet/venue connection is on a camera-NIC port ({ports_txt}), which can "
-            f"disrupt camera discovery and streaming. On a Pixellot VPU it must connect to the "
-            f"motherboard network port. The 4-port NIC is for cameras only.{mobo_note} Move the "
-            f"cable there and confirm the port is enabled. Leave the Wi-Fi card enabled, because "
-            f"the Pixellot Connect app needs it."
+            f"The internet cable is plugged into the camera card, so cameras may not be found "
+            f"and streaming can fail. {move} Leave Wi-Fi on; the Pixellot Connect app needs it."
         ),
+        "details": [
+            f"{a.get('name') or a.get('interfaceDescription') or '?'}: gateway {gw} (a camera port)"
+            for a, gw in misplaced
+        ] + ([mobo_row] if mobo_row else []),
     }
 
 
@@ -1357,18 +1354,19 @@ def _wifi_disabled_finding(network_config):
             disabled.append(a)
     if not disabled:
         return None
-    names = ", ".join(a.get("interfaceDescription") or a.get("name") or "Wi-Fi" for a in disabled)
     return {
+        "code": "wifi-disabled",
         "severity": "warning",
         "category": "Network",
         "title": "Wi-Fi card is disabled, so the Pixellot Connect app can't reach this VPU",
         "recommendation": (
-            f"The VPU's Wi-Fi adapter ({names}) is disabled. The Wi-Fi card is what the Pixellot "
-            f"Connect app uses to talk to the VPU, so Connect won't find this unit until it's "
-            f"turned back on. Enable it in Windows: Network Connections, right-click the Wi-Fi "
-            f"adapter, Enable. The internet uplink should stay on the motherboard Ethernet port; "
-            f"Wi-Fi is only for Connect."
+            "The VPU's Wi-Fi is turned off, so the Pixellot Connect app can't find this unit. "
+            "Turn it on in Windows: Network Connections, right-click the Wi-Fi adapter, Enable."
         ),
+        "details": [
+            f"{a.get('interfaceDescription') or a.get('name') or 'Wi-Fi'}: disabled"
+            for a in disabled
+        ],
     }
 
 
@@ -1402,16 +1400,123 @@ _BROADCAST_CRITICAL_TLS_DOMAINS = {
 }
 
 
-def _compute_findings(identity, performance, services, nics, hardware=None, installed_sw=None, network_config=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, probe_results=None, tls_inspection=None, lmi_log=None) -> list:
-    findings = []
 
-    # None vs {} matters for probe_results: None means the caller never
-    # probed (legacy ARP-only behavior applies); {} means probes ran and
-    # every camera failed to answer — which right after launch is the
-    # collection burst starving the probes, not an empty rig, and gates the
-    # startup-grace suppressions below. Capture before any rebinding.
-    probes_attempted = probe_results is not None
+# ─── Network findings: one source for Dashboard, ticket and Network card ────
+#
+# Every finding below is written to be read aloud. The fields:
+#   title           cause, so effect
+#   recommendation  the body: what is wrong and what it breaks, then the fix
+#                   and who does it. Three sentences at most, no protocol
+#                   names -- an agent should be able to say it to an AD.
+#   it              optional. The exact ports / domains / lists to send venue
+#                   IT. Protocol names live here and only here.
+#   evidence        optional. How Pulse knows. Engineers and escalations read
+#                   it; nobody has to say it on the phone.
+#   details         optional. One row per affected port / service / adapter.
+#
+# The Network card used to write its own copy of each of these in app.js,
+# and the two drifted (the Aug 27 copy sweep and the SSL fix both had to
+# touch two files). /api/network now returns these same records and the card
+# renders them, so a fix lands everywhere at once.
 
+# What breaks when each endpoint is blocked, keyed like the collectors emit
+# them. The network payload carries these on every row (`impact`), so the
+# port tiles, Service Reachability, the Secure Connections rows and these
+# findings all read one sentence per service.
+NET_PORT_IMPACT = {
+    "DNS": "The VPU can't look up any address, so it can't reach any service.",
+    "Pixellot": "System management and software updates are blocked, and the stream fails to broadcast.",
+    "Pixellot Echo": "Event scheduling, system management, remote support and video upload all stop. It carries no live video, but nothing on the unit works without it.",
+    "NFHS Network": "Event scheduling, broadcast watermarks, and viewer access are unavailable.",
+    "Singular Overlay": "On-screen graphics and scorebug overlays won't load.",
+    "LogMeIn": "The support team can't reach the VPU remotely.",
+    "NTP": "The clock drifts without a valid time server, and a drifting clock makes the VPU miss scheduled events.",
+    "Zixi Streaming": "The main live-video connection. If it's blocked, the stream moves to the backup path, then to the last resort.",
+    "Zixi Backup": "The backup live-video connection. This or the main path alone gives a full-quality stream; with both blocked the game drops to the last resort.",
+    "RTMP Fallback": "Last-resort streaming path, used only when both other paths are blocked. Games start about 4 minutes late on it. If this is blocked too, the game can't broadcast.",
+}
+# The RTMP probe targets a public RTMP host, so a pass proves the port, not
+# that pixellot.stream itself is allowed. Evidence, not something to say.
+# Plain names for each endpoint, for someone taking a call from an athletic
+# director. The `purpose` keys are the collector's engineering names; the
+# three streaming rungs are named as one chain (main / backup / last resort).
+NET_PORT_LABEL = {
+    "DNS": "Name lookup (DNS)",
+    "NTP": "Clock sync",
+    "Pixellot": "Pixellot updates",
+    "Pixellot Echo": "Pixellot cloud services",
+    "NFHS Network": "NFHS scheduling",
+    "Singular Overlay": "On-screen graphics",
+    "LogMeIn": "Remote support",
+    "Zixi Streaming": "Live video \u2013 main path",
+    "Zixi Backup": "Live video \u2013 backup path",
+    "RTMP Fallback": "Live video \u2013 last resort",
+}
+# The same endpoints as sentence nouns ("the venue network is blocking ...").
+NET_PORT_NOUN = {
+    "DNS": "name lookups (DNS)",
+    "NTP": "clock sync",
+    "Pixellot": "Pixellot updates",
+    "Pixellot Echo": "Pixellot cloud services",
+    "NFHS Network": "NFHS scheduling",
+    "Singular Overlay": "on-screen graphics",
+    "LogMeIn": "remote support",
+}
+NET_PORT_EVIDENCE = {
+    "RTMP Fallback": "Tested against a public RTMP server, so a pass proves TCP 1935 is open, not that pixellot.stream is allowed.",
+}
+NET_DOMAIN_IMPACT = {
+    "nfhsnetwork.com": "Event scheduling, broadcast watermarks, and viewer access are unavailable.",
+    "pixellot.tv": "System management and software updates are blocked, and the stream fails to broadcast.",
+    "software.pixellot.tv": "Software and firmware updates are blocked.",
+    "service.singular.live": "On-screen graphics and scorebug overlays won't load.",
+    "logmein.com": "The support team can't reach the VPU remotely.",
+}
+TLS_DOMAIN_IMPACT = {
+    "singular.live": "On-screen graphics and scorebug overlays won't load.",
+    "app.singular.live": "On-screen graphics and scorebug overlays won't load.",
+    "api.singular.live": "On-screen graphics and scorebug overlays won't load.",
+    "datastream.singular.live": "The live data feed behind the graphics can't connect, so overlays stay blank even though video streams.",
+    "service.singular.live": "On-screen graphics and scorebug overlays won't load.",
+    "pixellot.tv": "System management and software updates are blocked.",
+    "software.pixellot.tv": "Software and firmware updates are blocked.",
+    "nfhsnetwork.com": "Event scheduling, broadcast watermarks, and viewer access are unavailable.",
+    "secure.logmein.com": "The support team can't reach the VPU remotely.",
+    "www.python.org": "The Pulse installer can't download Python on this network.",
+}
+
+
+def _attach_impact(ports, domains, tls):
+    """Stamp each port / domain / TLS row with what breaks when it's blocked.
+    Mutates in place; tolerant of error payloads and missing sections."""
+    for r in ((ports or {}).get("results") or []) if isinstance(ports, dict) else []:
+        purpose = r.get("purpose") or ""
+        if purpose in NET_PORT_LABEL:
+            r["label"] = NET_PORT_LABEL[purpose]
+        if purpose in NET_PORT_IMPACT:
+            r["impact"] = NET_PORT_IMPACT[purpose]
+        if purpose in NET_PORT_EVIDENCE:
+            r["evidence"] = NET_PORT_EVIDENCE[purpose]
+    for r in ((domains or {}).get("results") or []) if isinstance(domains, dict) else []:
+        if r.get("domain") in NET_DOMAIN_IMPACT:
+            r["impact"] = NET_DOMAIN_IMPACT[r["domain"]]
+    for r in ((tls or {}).get("results") or []) if isinstance(tls, dict) else []:
+        if r.get("domain") in TLS_DOMAIN_IMPACT:
+            r["impact"] = TLS_DOMAIN_IMPACT[r["domain"]]
+
+
+# The finding codes the Network card renders from the server. Everything else
+# on that card (gateway, DNS, soft TLS signals, adapter counters) is computed
+# client-side from the raw rows and never reaches the Dashboard or the ticket.
+NET_CARD_FINDING_CODES = (
+    "wifi-uplink", "uplink-on-camera-port", "wifi-disabled",
+    "ssl-inspection", "tls-filtered", "tls-filtered-support", "lmi-ssl-blocked",
+    "stream-blocked", "stream-degraded-rtmp", "stream-resiliency-reduced",
+)
+
+
+def _uplink_findings(network_config, wifi) -> list:
+    out = []
     # ── Wi-Fi uplink detection (Canopy adoption) ─────────────
     # Pixellot VPUs are wired-only by design. We only warn when Wi-Fi is the
     # VPU's actual internet uplink (a real Wi-Fi NIC holds the default route
@@ -1423,21 +1528,22 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
             a for a in (wifi.get("adapters") or [])
             if a.get("isUp") and a.get("hasDefaultRoute") and not a.get("isVirtual")
         ]
-        names = ", ".join(a.get("interfaceDescription") or a.get("name") or "?" for a in uplink_wifi)
-        ssids = [a.get("ssid") for a in uplink_wifi if a.get("ssid")]
-        ssid_str = f" (SSID: {', '.join(ssids)})" if ssids else ""
-        findings.append(
+        out.append(
             {
                 "code": "wifi-uplink",
                 "severity": "warning",
                 "category": "Network",
                 "title": "VPU is using Wi-Fi for its internet connection. Switch to wired Ethernet",
                 "recommendation": (
-                    f"The VPU's active internet path is over Wi-Fi: {names}{ssid_str}. "
-                    f"The Wi-Fi card is meant for the Pixellot Connect app, not the internet "
-                    f"uplink. Connect the motherboard Ethernet port to the venue network "
-                    f"instead. Wi-Fi adds latency and packet loss that disrupt streaming."
+                    "The VPU is reaching the internet over Wi-Fi, which adds lag and dropouts "
+                    "during a stream. Plug the motherboard network port into the venue network. "
+                    "Wi-Fi is only for the Pixellot Connect app."
                 ),
+                "details": [
+                    (a.get("interfaceDescription") or a.get("name") or "Wi-Fi")
+                    + (f", SSID {a.get('ssid')}" if a.get("ssid") else "")
+                    for a in uplink_wifi
+                ],
             }
         )
 
@@ -1445,14 +1551,374 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
     # The internet uplink must land on the motherboard network port; the
     # dedicated 4-port NIC is cameras-only. Detected via PCI bus role (add-in
     # card = bus > 0) + a live default gateway on that port.
-    _cam_uplink = _camera_nic_uplink_finding(network_config)
-    if _cam_uplink:
-        findings.append(_cam_uplink)
+    cam_uplink = _camera_nic_uplink_finding(network_config)
+    if cam_uplink:
+        out.append(cam_uplink)
 
     # ── Wi-Fi card disabled (Pixellot Connect can't reach the VPU) ───────
-    _wifi_off = _wifi_disabled_finding(network_config)
-    if _wifi_off:
-        findings.append(_wifi_off)
+    wifi_off = _wifi_disabled_finding(network_config)
+    if wifi_off:
+        out.append(wifi_off)
+    return out
+
+
+# Streaming model (verified from VPU logs + packet capture, Olympic WA
+# 2026-08-18): the feeder walks a fixed failover chain — Zixi UDP/2088
+# (Zixi Streaming) → Zixi UDP/443 (Zixi Backup, same protocol on a
+# disguise port) → RTMP TCP/1935 (RTMP Fallback) → nothing. Either UDP
+# rung alone is a fully healthy stream. RTMP is a degraded last resort:
+# each dead rung burns ~60s of retries (~4 min of dead air when all
+# four Zixi attempts fail) and RTMP carries no FEC/ARQ. TCP/443
+# (Pixellot Echo) is the CONTROL PLANE — cloud API, remote support,
+# VOD upload — and carries no live video; it is handled by the generic
+# required-port loop, not here. Keep purposes in sync with
+# ZIXI_PURPOSES / RTMP_FALLBACK_PURPOSE in app.js and
+# Test-NetworkPorts.ps1.
+_ZIXI_PURPOSES = {"Zixi Streaming", "Zixi Backup"}
+_RTMP_FALLBACK_PURPOSE = "RTMP Fallback"
+_STREAM_RUNG_PURPOSES = _ZIXI_PURPOSES | {_RTMP_FALLBACK_PURPOSE}
+_PIXELLOT_STREAM_NOTE = (
+    "Filters that match by destination must also allow *.pixellot.stream, "
+    "because the streaming servers change for every event."
+)
+
+
+def _rung_it(rows):
+    """'UDP 2088 and UDP 443 to prod-echo.pixellot.tv, and TCP 1935' -- the
+    exact outbound rules for venue IT, from the rows that actually failed.
+    The RTMP probe hits a public test host, so its host isn't named."""
+    zixi = [r for r in rows if r.get("purpose") in _ZIXI_PURPOSES]
+    rtmp = [r for r in rows if r.get("purpose") == _RTMP_FALLBACK_PURPOSE]
+    parts = []
+    if zixi:
+        hosts = sorted({r.get("host") for r in zixi if r.get("host")})
+        ports = " and ".join(f"{(r.get('protocol') or 'UDP').upper()} {r.get('port')}" for r in zixi)
+        parts.append(ports + (f" to {', '.join(hosts)}" if hosts else ""))
+    if rtmp:
+        parts.append(" and ".join(f"{(r.get('protocol') or 'TCP').upper()} {r.get('port')}" for r in rtmp))
+    return "Outbound " + ", and ".join(parts) + "."
+
+
+def _stream_findings(port_tests) -> list:
+    if not port_tests or port_tests.get("error"):
+        return []
+    rungs = [
+        r for r in (port_tests.get("results") or [])
+        if r.get("purpose") in _STREAM_RUNG_PURPOSES and not r.get("optional")
+    ]
+    if not rungs:
+        return []
+    blocked = [r for r in rungs if r.get("status") == "fail"]
+    zixi_open = any(r.get("purpose") in _ZIXI_PURPOSES and r.get("status") == "pass" for r in rungs)
+    rtmp_open = any(r.get("purpose") == _RTMP_FALLBACK_PURPOSE and r.get("status") == "pass" for r in rungs)
+
+    if not zixi_open and not rtmp_open:
+        # Every rung of the failover chain is dead — the broadcast cannot
+        # go on air. The only tier that earns "can't broadcast".
+        return [{
+            "code": "stream-blocked",
+            "severity": "critical",
+            "category": "Network",
+            "title": "Streaming is blocked, so the VPU can't broadcast",
+            "recommendation": (
+                "The venue's network is blocking all three connections the VPU uses to send "
+                "live video, so the game can't broadcast. Ask venue IT to open at least one."
+            ),
+            "it": f"{_rung_it(blocked)} {_PIXELLOT_STREAM_NOTE}",
+        }]
+    if not zixi_open:
+        # Both Zixi/UDP rungs dead, RTMP reachable: games WILL air, but on
+        # the unprotected last resort — ~4 min of dead air at the start
+        # while the feeder walks the dead rungs, then RTMP with no loss
+        # protection. Urgent, but not "can't broadcast" — that wording burned
+        # a support case when a "blocked" venue streamed fine (Olympic WA).
+        zixi_blocked = [r for r in blocked if r.get("purpose") in _ZIXI_PURPOSES]
+        return [{
+            "code": "stream-degraded-rtmp",
+            "severity": "critical",
+            "category": "Network",
+            "title": "Streaming has dropped to its last-resort path, so games start about 4 minutes late",
+            "recommendation": (
+                "The venue's network blocks both normal streaming connections, so games use the "
+                "last-resort path: they start about 4 minutes late and have no protection "
+                "against network hiccups. Ask venue IT to open the two blocked connections."
+            ),
+            "it": f"{_rung_it(zixi_blocked)} {_PIXELLOT_STREAM_NOTE}",
+        }]
+    if blocked:
+        # Stream is healthy on Zixi, but one or more rungs of the chain are
+        # blocked — reduced resiliency, not an outage.
+        on_backup = not any(
+            r.get("purpose") == "Zixi Streaming" and r.get("status") == "pass" for r in rungs
+        )
+        return [{
+            "code": "stream-resiliency-reduced",
+            "severity": "warning",
+            "category": "Network",
+            "title": (
+                "Streaming is riding its backup connection"
+                if on_backup else "Streaming resiliency is reduced"
+            ),
+            "recommendation": (
+                "The main streaming connection is blocked, so the VPU is using its backup. "
+                "Tonight's stream is fine, but one more block would force the slower "
+                "last-resort path. Ask venue IT to open the blocked connection."
+                if on_backup else
+                "The stream is healthy, but part of its backup chain is blocked, so there is "
+                "less to fall back on if the main connection struggles during a game. "
+                f"Ask venue IT to open the blocked connection{'s' if len(blocked) != 1 else ''}."
+            ),
+            "it": _rung_it(blocked),
+        }]
+    return []
+
+
+def _port_findings(port_tests) -> list:
+    """Non-streaming required ports. Dashboard and ticket only: the Network
+    card groups these into one row of its own from the raw port results."""
+    if not port_tests or port_tests.get("error"):
+        return []
+    results = port_tests.get("results") or []
+    out = []
+    # Name resolution demonstrably working? Any required hostname-based port
+    # that passed proves it (you can't reach pixellot.tv:443 without resolving
+    # pixellot.tv) — so a failed UDP/53 probe must NOT be reported as DNS down
+    # (it can target a stale resolver off another adapter, or go unanswered).
+    name_resolution_ok = any(
+        r.get("status") != "fail" and not r.get("optional")
+        and (r.get("purpose") or "").upper() != "DNS"
+        and any(c.isalpha() for c in str(r.get("host") or ""))
+        for r in results
+    )
+    # Each blocked one is its own finding. The streaming failover rungs are
+    # handled by _stream_findings. TCP/443 (Pixellot Echo) lands here on
+    # purpose: it's the control plane, not a streaming rung.
+    for r in results:
+        if r.get("status") != "fail" or r.get("optional"):
+            continue
+        if r.get("purpose") in _STREAM_RUNG_PURPOSES:
+            continue
+        host = r.get("host", "?")
+        port = r.get("port", "?")
+        proto = (r.get("protocol") or "").upper()
+        purpose = r.get("purpose") or "service"
+        err = r.get("errorMessage") or "No response"
+        # DNS (port 53) blocked breaks name resolution for everything → a
+        # readiness blocker; every other required port is a readiness risk.
+        is_dns = purpose.upper() == "DNS" or str(port) == "53"
+        # …but don't cry "DNS blocked" when names are clearly resolving — the
+        # UDP/53 probe is unreliable and can hit the wrong resolver.
+        if is_dns and name_resolution_ok:
+            continue
+        impact = NET_PORT_IMPACT.get(purpose, "")
+        noun = NET_PORT_NOUN.get(purpose, purpose)
+        out.append(
+            {
+                "code": "port-dns-blocked" if is_dns else "port-required-blocked",
+                "severity": "critical",
+                "category": "Network",
+                "title": f"The venue network is blocking {noun}",
+                "recommendation": (
+                    f"The venue's network is blocking {noun}. "
+                    + (impact + " " if impact else "")
+                    + "Ask venue IT to open the connection."
+                ),
+                "it": f"Outbound {proto} {port} to {host}.",
+                "evidence": f"The test connection failed: {err}.",
+            }
+        )
+    return out
+
+
+def _tls_findings(tls_inspection) -> list:
+    if not tls_inspection or tls_inspection.get("error"):
+        return []
+    out = []
+    tls_rows = tls_inspection.get("results") or []
+
+    # ── SSL inspection (certificate substitution) ──────────────
+    # Test-TlsInspection completes a real handshake to each Pixellot-critical
+    # HTTPS service and validates the certificate actually presented. An
+    # "intercepted" row means a middlebox (school firewall doing SSL
+    # deep-packet inspection) substituted its own cert — the field signature
+    # is video streaming fine while Singular graphics never load, because the
+    # graphics client rightly rejects the firewall's cert. Port tests can't
+    # see this (TCP/443 connects fine), so this is its own finding. A refused
+    # handshake next to a confirmed substitution is the same device, so those
+    # rows join this finding instead of raising a vaguer one on the Network tab.
+    intercepted = [r for r in tls_rows if r.get("status") == "intercepted"]
+    if intercepted:
+        hs_fail = [r for r in tls_rows if r.get("status") == "handshake-fail"]
+        issuers = [i for i in (tls_inspection.get("interceptorIssuers") or []) if i]
+        # Issuer names carry their own brackets ("Securly Intermediate 2027
+        # (Securly, Inc)"), so set the name off with commas, not more brackets.
+        who = f", {', '.join(issuers)}," if issuers else ""
+        cert_from = sorted({r.get("issuerCn") or r.get("issuer") for r in intercepted
+                            if r.get("issuerCn") or r.get("issuer")})
+        out.append(
+            {
+                "code": "ssl-inspection",
+                "severity": "critical",
+                "category": "Network",
+                "title": "The venue firewall is intercepting secure connections (SSL inspection)",
+                "recommendation": (
+                    f"The venue's firewall{who} is replacing the VPU's security certificates, so "
+                    f"the VPU refuses the connections below. Port checks still pass because the "
+                    f"connection opens first. Ask venue IT to exempt these services from SSL "
+                    f"decryption."
+                ),
+                "it": (
+                    f"Add these to the SSL-decryption exemption list: "
+                    f"{_tls_exempt_list(intercepted + hs_fail)}. A URL allowlist entry alone "
+                    f"won't do it."
+                ),
+                "evidence": (
+                    "Pulse opened a secure connection to each service and checked the "
+                    "certificate it was given. "
+                    + (f"These were issued by {', '.join(cert_from)}" if cert_from
+                       else "These were issued by an untrusted authority")
+                    + " instead of a public certificate authority."
+                ),
+                "details": [
+                    f"{r.get('domain', '?')}: {TLS_DOMAIN_IMPACT.get(r.get('domain'), 'Connection refused.')}"
+                    for r in intercepted
+                ] + [
+                    f"{r.get('domain', '?')}: handshake refused, likely the same inspection."
+                    for r in hs_fail
+                ],
+            }
+        )
+
+    # ── Category / SNI filtering (no certificate substitution) ──
+    # A content filter reads the hostname from the unencrypted SNI field of
+    # the ClientHello and, if the domain sits in a blocked category, resets
+    # the connection outright. Nothing is decrypted, no cert is substituted,
+    # so `intercepted` never fires — the collector marks these rows
+    # `filtered`. Field: Linewize at an Ohio venue 2026-08-19 — eight
+    # Pixellot-critical hosts reset while readiness still read PASS.
+    #
+    # The distinction matters operationally: an SSL-decryption bypass
+    # does NOT fix a category block, and vice versa. Say which one it is.
+    filtered = [r for r in tls_rows if r.get("status") == "filtered"]
+    if filtered:
+        vendors = [v for v in (tls_inspection.get("filterVendors") or []) if v]
+        vendor_txt = " / ".join(vendors)
+        block_urls = [r.get("blockPageUrl") for r in filtered if r.get("blockPageUrl")]
+        broadcast_hit = [
+            r for r in filtered
+            if (r.get("domain") or "") in _BROADCAST_CRITICAL_TLS_DOMAINS
+        ]
+        # Dashboard findings show the title first, so the title has to carry
+        # what is blocking, and how much.
+        who = (
+            f"Venue web filter ({vendor_txt})" if vendor_txt
+            else "A web filter on the venue network"
+        )
+        who_lower = (
+            f"The venue's {vendor_txt} web filter" if vendor_txt
+            else "A web filter on the venue network"
+        )
+        it = (
+            f"Add a category exception in the web filter (a URL entry alone won't do it) for "
+            f"{_tls_exempt_list(filtered)}. Add the same domains to the SSL-decryption "
+            f"exemption list, so inspection can't take the block's place."
+        )
+        evidence = (
+            "Each connection was reset the moment the VPU named the site, and no certificate "
+            "was substituted, so this is a category block, not SSL inspection."
+            + (f" The filter's block page names the rule it applied: {block_urls[0]}"
+               if block_urls else "")
+        )
+        details = [
+            f"{r.get('domain', '?')}: {TLS_DOMAIN_IMPACT.get(r.get('domain'), 'Connection reset.')}"
+            for r in filtered
+        ]
+        n = len(filtered)
+        if broadcast_hit:
+            out.append(
+                {
+                    "code": "tls-filtered",
+                    "severity": "critical",
+                    "category": "Network",
+                    "title": f"{who} is blocking {n} Pixellot service{'s' if n != 1 else ''}",
+                    "recommendation": (
+                        f"{who_lower} is blocking the services below by category, so the VPU "
+                        f"can't reach them. Ask venue IT to add a category exception for them "
+                        f"in the web filter."
+                    ),
+                    "it": it, "evidence": evidence, "details": details,
+                }
+            )
+        else:
+            out.append(
+                {
+                    "code": "tls-filtered-support",
+                    "severity": "warning",
+                    "category": "Network",
+                    "title": f"{who} is blocking {n} support service{'s' if n != 1 else ''}",
+                    "recommendation": (
+                        f"{who_lower} is blocking the support services below. Tonight's "
+                        f"broadcast is unaffected, but remote support and installer downloads "
+                        f"will fail on this network. Ask venue IT to add a category exception "
+                        f"for them."
+                    ),
+                    "it": it, "evidence": evidence, "details": details,
+                }
+            )
+    return out
+
+
+def _lmi_findings(lmi_log) -> list:
+    # ── LogMeIn's own log confirms the block (historical evidence) ──
+    # Get-LmiGatewayLog reads LogMeIn's service log for the middlebox
+    # signature: "SSL error: SSLv3/TLS write client hello" on every gateway
+    # connect — the handshake killed the instant it starts, the same mechanism
+    # as the 'filtered' rows above. The live TLS probe only sees the network
+    # as it is right now; the log carries the timeline. Field origin: a VPU
+    # dark in LMI for 16 hours, 2026-08-28. Only a CURRENT block becomes a
+    # finding; a recovered one is history and stays on the Network tab.
+    if not lmi_log or lmi_log.get("error") or not lmi_log.get("blockedNow"):
+        return []
+    n = lmi_log.get("sslFailures") or 0
+    since = (lmi_log.get("firstSslFailure") or "")[:10]
+    last_ok = lmi_log.get("lastLogin")
+    return [{
+        "code": "lmi-ssl-blocked",
+        "severity": "warning",
+        "category": "Network",
+        "title": "Venue network is blocking LogMeIn, so remote support can't reach this VPU",
+        "recommendation": (
+            "The venue's firewall is cutting off LogMeIn, so our support team can't reach this "
+            "VPU remotely. Ask venue IT to exempt LogMeIn from SSL inspection and from their "
+            "web filter's blocked categories."
+        ),
+        "it": (
+            "*.logmein.com and logmein.com, on ports 443 and 80. Allowing only "
+            "secure.logmein.com is not enough; LogMeIn's gateways are control.lmi-app*.logmein.com."
+        ),
+        "evidence": (
+            f"LogMeIn's own log (C:\\ProgramData\\LogMeIn) shows {n} failed connections"
+            + (f" since {since}" if since else "")
+            + (f" and no successful login since {last_ok}." if last_ok
+               else " and no successful login in the log.")
+            + " Each one was cut off as it started, which is what a firewall doing inspection "
+            "or category blocking looks like."
+        ),
+    }]
+
+
+def _compute_findings(identity, performance, services, nics, hardware=None, installed_sw=None, network_config=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, probe_results=None, tls_inspection=None, lmi_log=None) -> list:
+    findings = []
+
+    # None vs {} matters for probe_results: None means the caller never
+    # probed (legacy ARP-only behavior applies); {} means probes ran and
+    # every camera failed to answer — which right after launch is the
+    # collection burst starving the probes, not an empty rig, and gates the
+    # startup-grace suppressions below. Capture before any rebinding.
+    probes_attempted = probe_results is not None
+
+    # ── Wi-Fi uplink, internet on a camera port, Wi-Fi card off ──
+    findings.extend(_uplink_findings(network_config, wifi))
 
     # ── NTP allowlist (PDF #9) ───────────────────────────────
     # School networks sometimes force VPUs onto an internal NTP server. If
@@ -1469,12 +1935,16 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                     "category": "Network",
                     "title": "VPU clock is syncing from the wrong time source",
                     "recommendation": (
-                        f"Point the VPU's clock at an approved Pixellot time server. "
-                        f"Current source: {ntp_src}. Approved: {approved_list}. To fix, run "
-                        f"`w32tm /config /manualpeerlist:\"0.us.pool.ntp.org 1.us.pool.ntp.org "
-                        f"2.us.pool.ntp.org 3.us.pool.ntp.org\" /syncfromflags:manual /update` and "
-                        f"restart the Windows Time service."
+                        f"The VPU is taking its time from {ntp_src} instead of an approved "
+                        f"time server. If that server's clock drifts, the VPU can miss scheduled "
+                        f"events. A remote tech can switch it back to the approved servers."
                     ),
+                    "details": [
+                        f"Approved servers: {approved_list}",
+                        "Remote fix: run `w32tm /config /manualpeerlist:\"0.us.pool.ntp.org "
+                        "1.us.pool.ntp.org 2.us.pool.ntp.org 3.us.pool.ntp.org\" "
+                        "/syncfromflags:manual /update`, then restart the Windows Time service.",
+                    ],
                 }
             )
 
@@ -1571,8 +2041,12 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                     "code": "tz-non-us",
                     "severity": "critical",
                     "category": "System",
-                    "title": "VPU clock is set to a non-US time zone",
-                    "recommendation": f"Set the VPU to a US time zone. Open Date & Time settings and choose Pacific, Mountain, Central, Eastern, Alaska, or Hawaii. Current zone: '{shown}'.",
+                    "title": "VPU clock is set to a non-US time zone, so games may go on or off air at the wrong time",
+                    "recommendation": (
+                        f"The VPU's clock is set to {shown}, not a US time zone, so it may go "
+                        f"on air or off air at the wrong time. Open Date & Time settings and "
+                        f"choose Pacific, Mountain, Central, Eastern, Alaska, or Hawaii."
+                    ),
                 }
             )
 
@@ -1636,10 +2110,10 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                               if days >= 0 else
                               "Windows mainstream support has ended, but this VPU is still covered"),
                     "recommendation": (
-                        f"{release} mainstream support {'ends' if days >= 0 else 'ended'} on {eos}. "
-                        f"That is expected and fine. VPUs run the IoT Enterprise release of Windows, "
-                        f"which keeps getting security updates until {eol_date} (end of servicing), "
-                        f"so there is {left} of coverage. No action is needed on this unit."
+                        f"No action needed. {release} mainstream support "
+                        f"{'ends' if days >= 0 else 'ended'} on {eos}, but VPUs run the IoT "
+                        f"Enterprise edition, which gets security updates until {eol_date}, so "
+                        f"this unit has {left} of coverage."
                     ),
                 })
 
@@ -1666,12 +2140,10 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                 "code": "gpu-none",
                 "severity": "critical",
                 "category": "Hardware",
-                "title": "No NVIDIA GPU detected",
+                "title": "No NVIDIA graphics card detected, so this VPU can't encode video",
                 "recommendation": (
-                    "Pixellot requires an NVIDIA GPU for video encoding. No NVIDIA graphics card "
-                    "was detected on this VPU. If a card is physically installed, check that its "
-                    "driver is installed and the card is seated; otherwise this VPU cannot run "
-                    "the encoder."
+                    "No NVIDIA graphics card was found, so this VPU can't encode video. If a card "
+                    "is fitted, check that it's seated and its driver is installed."
                 ),
             })
         elif compat["status"] == "anomaly":
@@ -1682,11 +2154,11 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                 "category": "Hardware",
                 "title": "Unrecognized graphics hardware",
                 "recommendation": (
-                    f"{compat['architecture']} GPU detected, which is not a known Pixellot "
-                    f"deployment configuration. Escalate to support, because this host may be "
-                    f"mis-imaged or the hardware roster may need review. "
-                    f"Installed Pixellot: {compat['installedVersion']}."
+                    f"This VPU has {compat['architecture']} graphics hardware, which isn't a "
+                    f"known Pixellot setup, so the unit may be mis-imaged or Pixellot's hardware "
+                    f"list may need updating. Escalate to Tier 3."
                 ),
+                "evidence": f"Installed Pixellot version: {compat['installedVersion']}.",
             })
 
     # ── Dedicated GPU presence (Canopy / Leaf / checkDedicatedGpu.ps1) ──
@@ -1709,10 +2181,9 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                     "category": "Hardware",
                     "title": "No dedicated graphics card, so this is the wrong hardware for a VPU",
                     "recommendation": (
-                        f"Only built-in graphics found ({vendor_str}). "
-                        f"Pixellot VPUs require a dedicated NVIDIA or AMD card for video "
-                        f"encoding, so this host is the wrong hardware platform for a VPU. "
-                        f"Check that the graphics card is seated, powered, and has a current driver."
+                        f"This VPU only has built-in graphics ({vendor_str}), so it's missing "
+                        f"the dedicated NVIDIA or AMD card a VPU needs to encode video. Check "
+                        f"that the graphics card is seated, powered, and has a current driver."
                     ),
                 })
 
@@ -1912,10 +2383,14 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                             "category": "Services",
                             "title": "Pixellot watchdog (KeepAgentUp) not running",
                             "recommendation": (
-                                "KeepAgentUp relaunches Agent and Coordinator if they crash. "
-                                "While it's down the VPU can't self-heal a process failure. "
-                                "Use 'Restart Agent + Coordinator' on the Services page "
-                                "(runs keepagentup.exe), or reboot the VPU."
+                                "The watchdog that restarts Pixellot's software after a crash "
+                                "isn't running, so a crash would stay down until someone "
+                                "restarts it. Click Restart Agent + Coordinator on the Services "
+                                "page, or reboot the VPU."
+                            ),
+                            "evidence": (
+                                "KeepAgentUp (keepagentup.exe) relaunches Agent and Coordinator "
+                                "when they exit; it isn't in the process list."
                             ),
                         }
                     )
@@ -2040,11 +2515,10 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                             "category": category,
                             "title": f"{'Camera' if has_cameras else 'Network'} port {idx + 1} is running slow at {speed} Mbps (should be 1 Gbps)",
                             "recommendation": (
-                                f"{label} ({port.get('name', 'unknown')}) negotiated to "
-                                f"{speed} Mbps instead of 1 Gbps. Camera streams on this port "
-                                f"will drop frames at reduced bandwidth. Check cable quality "
-                                f"(Cat5e+ required), reseat the connector, and confirm the "
-                                f"switch port is set to auto-negotiate."
+                                f"{label} ({port.get('name', 'unknown')}) is running at "
+                                f"{speed} Mbps instead of 1 Gbps, so video on this port drops "
+                                f"frames. Check the cable is Cat5e or better, reseat both ends, "
+                                f"and confirm the switch port auto-negotiates."
                             ),
                         }
                     )
@@ -2074,401 +2548,30 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
             }
         )
 
-    # ── Required port blocked ────────────────────────────────
-    # Test-NetworkPorts hits the cloud endpoints Pixellot needs to stream.
-    # A "required" (non-optional) port that fails is almost always a venue
-    # firewall blocking it — surfaces on the Dashboard so the tech sees it
-    # without drilling into the Network tab. Optional ports (RTMP, etc.)
-    # are intentionally skipped — they vary by venue configuration.
-    if port_tests and not port_tests.get("error"):
-        results = port_tests.get("results", [])
-        # Streaming model (verified from VPU logs + packet capture, Olympic WA
-        # 2026-08-18): the feeder walks a fixed failover chain — Zixi UDP/2088
-        # (Zixi Streaming) → Zixi UDP/443 (Zixi Backup, same protocol on a
-        # disguise port) → RTMP TCP/1935 (RTMP Fallback) → nothing. Either UDP
-        # rung alone is a fully healthy stream. RTMP is a degraded last resort:
-        # each dead rung burns ~60s of retries (~4 min of dead air when all
-        # four Zixi attempts fail) and RTMP carries no FEC/ARQ. TCP/443
-        # (Pixellot Echo) is the CONTROL PLANE — cloud API, remote support,
-        # VOD upload — and carries no live video; it is handled by the generic
-        # required-port loop below, not here. Keep purposes in sync with
-        # ZIXI_PURPOSES / RTMP_FALLBACK_PURPOSE in app.js and
-        # Test-NetworkPorts.ps1.
-        zixi_purposes = {"Zixi Streaming", "Zixi Backup"}
-        rtmp_fallback_purpose = "RTMP Fallback"
-        stream_rung_purposes = zixi_purposes | {rtmp_fallback_purpose}
-
-        def _lbl(rows):
-            return ", ".join(
-                f"{(r.get('protocol') or '').upper()}/{r.get('port')}" for r in rows
-            )
-
-        rungs = [
-            r for r in results
-            if r.get("purpose") in stream_rung_purposes and not r.get("optional")
-        ]
-        rungs_blocked = [r for r in rungs if r.get("status") == "fail"]
-        zixi_open = any(
-            r.get("purpose") in zixi_purposes and r.get("status") == "pass"
-            for r in rungs
-        )
-        rtmp_rows = [r for r in rungs if r.get("purpose") == rtmp_fallback_purpose]
-        rtmp_open = any(r.get("status") == "pass" for r in rtmp_rows)
-
-        if rungs and not zixi_open and not rtmp_open:
-            # Every rung of the failover chain is dead — the broadcast cannot
-            # go on air. The only tier that earns "can't broadcast".
-            findings.append({
-                "code": "stream-blocked",
-                "severity": "critical",
-                "category": "Network",
-                "title": "Streaming is blocked, so the VPU can't broadcast",
-                "recommendation": (
-                    "The venue's network is blocking every path the VPU can use to "
-                    "send live video: the primary and backup streaming connections "
-                    "and the last-resort fallback. The game can't broadcast until at "
-                    f"least one is unblocked. Ask the venue's IT team to open "
-                    f"{_lbl(rungs_blocked)} (UDP to prod-echo.pixellot.tv; the live "
-                    "stream itself goes to *.pixellot.stream, so domain-based rules "
-                    "are needed on filters that classify by destination)."
-                ),
-            })
-        elif rungs and not zixi_open:
-            # Both Zixi/UDP rungs dead, RTMP reachable: games WILL air, but on
-            # the unprotected last resort — ~4 min of dead air at the start
-            # while the feeder walks the dead rungs, then RTMP with no loss
-            # protection. Urgent, but not "can't broadcast".
-            findings.append({
-                "code": "stream-degraded-rtmp",
-                "severity": "critical",
-                "category": "Network",
-                "title": "Streaming is degraded and running on the emergency fallback",
-                "recommendation": (
-                    "The venue's network blocks both Zixi streaming connections "
-                    f"({_lbl([r for r in rungs_blocked if r.get('purpose') in zixi_purposes])}), "
-                    "so broadcasts fall back to RTMP over TCP/1935. Games start "
-                    "roughly 4 minutes late and stream with no packet-loss "
-                    "protection. Ask the venue's IT team to open UDP 2088 and "
-                    "UDP 443 outbound. On filters that classify by destination they "
-                    "need to allow the domain *.pixellot.stream, because broadcast "
-                    "servers rotate per event."
-                ),
-            })
-        elif rungs_blocked:
-            # Stream is healthy on Zixi, but one or more rungs of the chain are
-            # blocked — reduced resiliency, not an outage.
-            on_backup = not any(
-                r.get("purpose") == "Zixi Streaming" and r.get("status") == "pass"
-                for r in rungs
-            )
-            findings.append({
-                "code": "stream-resiliency-reduced",
-                "severity": "warning",
-                "category": "Network",
-                "title": (
-                    "Streaming is riding its backup connection"
-                    if on_backup else "Streaming resiliency is reduced"
-                ),
-                "recommendation": (
-                    ("The primary streaming connection (UDP/2088) is blocked, so the "
-                     "stream rides the UDP/443 backup. Quality is unaffected, but it "
-                     "is one step from the degraded RTMP fallback. "
-                     if on_backup else
-                     "The stream is healthy, but part of its failover chain is "
-                     "blocked, so there is less to fall back on if the main "
-                     "connection has trouble during a game. ")
-                    + f"Ask the venue's IT team to unblock {_lbl(rungs_blocked)}."
-                ),
-            })
-
-        # Name resolution demonstrably working? Any required hostname-based port
-        # that passed proves it (you can't reach pixellot.tv:443 without resolving
-        # pixellot.tv) — so a failed UDP/53 probe must NOT be reported as DNS down
-        # (it can target a stale resolver off another adapter, or go unanswered).
-        name_resolution_ok = any(
-            r.get("status") != "fail" and not r.get("optional")
-            and (r.get("purpose") or "").upper() != "DNS"
-            and any(c.isalpha() for c in str(r.get("host") or ""))
-            for r in results
-        )
-
-        # Non-streaming required ports — each blocked one is its own warning.
-        # The streaming failover rungs are handled above, so skip those. Note
-        # TCP/443 (Pixellot Echo) lands here on purpose: it's the control
-        # plane (cloud API, remote support, VOD upload), not a streaming rung.
-        for r in results:
-            if r.get("status") != "fail" or r.get("optional"):
-                continue
-            if r.get("purpose") in stream_rung_purposes:
-                continue
-            host = r.get("host", "?")
-            port = r.get("port", "?")
-            proto = (r.get("protocol") or "").upper()
-            purpose = r.get("purpose") or "service"
-            err = r.get("errorMessage") or "No response"
-            # DNS (port 53) blocked breaks name resolution for everything → a
-            # readiness blocker; every other required port is a readiness risk.
-            is_dns = purpose.upper() == "DNS" or str(port) == "53"
-            # …but don't cry "DNS blocked" when names are clearly resolving — the
-            # UDP/53 probe is unreliable and can hit the wrong resolver.
-            if is_dns and name_resolution_ok:
-                continue
-            findings.append(
-                {
-                    "code": "port-dns-blocked" if is_dns else "port-required-blocked",
-                    "severity": "warning",
-                    "category": "Network",
-                    "title": f"{purpose} is blocked ({proto}/{port})",
-                    "recommendation": (
-                        f"{proto} port {port} to {host} is unreachable ({err}). "
-                        f"This is a required Pixellot endpoint. Ask the venue's "
-                        f"IT team to open it in the firewall."
-                    ),
-                }
-            )
-
-    # ── SSL inspection (certificate substitution) ──────────────
-    # Test-TlsInspection completes a real handshake to each Pixellot-critical
-    # HTTPS service and validates the certificate actually presented. An
-    # "intercepted" row means a middlebox (school firewall doing SSL
-    # deep-packet inspection) substituted its own cert — the field signature
-    # is video streaming fine while Singular graphics never load, because the
-    # graphics client rightly rejects the firewall's cert. Port tests can't
-    # see this (TCP/443 connects fine), so this is its own finding. Only the
-    # confirmed substitution goes to the dashboard; softer TLS signals
-    # (handshake failures, clock-related cert errors) stay on the Network tab.
-    if tls_inspection and not tls_inspection.get("error"):
-        tls_rows = tls_inspection.get("results") or []
-        intercepted = [r for r in tls_rows if r.get("status") == "intercepted"]
-        if intercepted:
-            interceptors = ", ".join(tls_inspection.get("interceptorIssuers") or [])
-            hosts = ", ".join(r.get("domain", "?") for r in intercepted)
-            exempt = _tls_exempt_list(intercepted)
-            findings.append(
-                {
-                    "code": "ssl-inspection",
-                    "severity": "critical",
-                    "category": "Network",
-                    "title": "The venue firewall is intercepting secure connections (SSL inspection)",
-                    "recommendation": (
-                        f"The firewall{f' ({interceptors})' if interceptors else ''} is replacing "
-                        f"the VPU's certificates for {hosts}, so the VPU refuses those connections. "
-                        f"Ask venue IT to exempt these from SSL decryption (an allowlist entry "
-                        f"alone won't do it): {exempt}"
-                    ),
-                }
-            )
-
-        # ── Category / SNI filtering (no certificate substitution) ──
-        # The other half of the DPI story, and the half Pulse used to mumble
-        # about. A content filter reads the hostname from the unencrypted SNI
-        # field of the ClientHello and, if the domain sits in a blocked
-        # category, resets the connection outright. Nothing is decrypted, no
-        # cert is substituted, so `intercepted` never fires — the collector
-        # marks these rows `filtered`. Field: Linewize at an Ohio venue
-        # 2026-08-19 — eight Pixellot-critical hosts reset while readiness
-        # still read PASS, because the only signal was a soft "possible SSL
-        # inspection" note on the Network tab.
-        #
-        # The distinction matters operationally: an SSL-decryption bypass
-        # does NOT fix a category block, and vice versa. Say which one it is.
-        filtered = [r for r in tls_rows if r.get("status") == "filtered"]
-        if filtered:
-            vendors = [v for v in (tls_inspection.get("filterVendors") or []) if v]
-            vendor_txt = " / ".join(vendors)
-            block_urls = [r.get("blockPageUrl") for r in filtered if r.get("blockPageUrl")]
-            broadcast_hit = [
-                r for r in filtered
-                if (r.get("domain") or "") in _BROADCAST_CRITICAL_TLS_DOMAINS
-            ]
-            hosts = ", ".join(r.get("domain", "?") for r in filtered)
-            # Dashboard findings render as a title only, so the title has to
-            # be the whole statement: what is blocking, and how much.
-            who = (
-                f"Venue web filter ({vendor_txt})" if vendor_txt
-                else "A web filter on the venue network"
-            )
-            who_lower = (
-                f"The venue's {vendor_txt} web filter" if vendor_txt
-                else "A web filter on the venue network"
-            )
-            evidence = (
-                f" The filter's block page names the rule it applied: {block_urls[0]}"
-                if block_urls else ""
-            )
-            fix = (
-                f"Ask venue IT for a category exception (not just a URL entry) and an "
-                f"SSL-decryption exemption: {_tls_exempt_list(filtered)}"
-            )
-            if broadcast_hit:
-                findings.append(
-                    {
-                        "code": "tls-filtered",
-                        "severity": "critical",
-                        "category": "Network",
-                        "title": (
-                            f"{who} is blocking {len(filtered)} Pixellot service"
-                            f"{'s' if len(filtered) != 1 else ''}"
-                        ),
-                        "recommendation": (
-                            f"{who_lower} drops connections to {hosts} by category. Certificates "
-                            f"aren't touched, so an SSL-decryption bypass alone won't fix it. "
-                            f"{fix}{evidence}"
-                        ),
-                    }
-                )
-            else:
-                findings.append(
-                    {
-                        "code": "tls-filtered-support",
-                        "severity": "warning",
-                        "category": "Network",
-                        "title": (
-                            f"{who} is blocking {len(filtered)} support service"
-                            f"{'s' if len(filtered) != 1 else ''} ({hosts})"
-                        ),
-                        "recommendation": (
-                            f"Tonight's broadcast is unaffected, but remote support and installer "
-                            f"downloads will fail on this network. {fix}{evidence}"
-                        ),
-                    }
-                )
-
-    # ── LogMeIn's own log confirms the block (historical evidence) ──
-    # Get-LmiGatewayLog reads LogMeIn's service log for the middlebox
-    # signature: "SSL error: SSLv3/TLS write client hello" on every gateway
-    # connect — the handshake killed the instant it starts, the same mechanism
-    # as the 'filtered' rows above. The live TLS probe only sees the network
-    # as it is right now; the log carries the timeline (when the block
-    # started, and — after IT disables inspection — the exact minute the unit
-    # came back). Field origin: a VPU dark in LMI for 16 hours, 2026-08-28.
-    # Only a CURRENT block reaches the dashboard; a recovered one is history
-    # and stays on the Network tab.
-    if lmi_log and not lmi_log.get("error") and lmi_log.get("blockedNow"):
-        n = lmi_log.get("sslFailures") or 0
-        since = (lmi_log.get("firstSslFailure") or "")[:10]
-        last_ok = lmi_log.get("lastLogin")
-        findings.append(
-            {
-                "code": "lmi-ssl-blocked",
-                "severity": "warning",
-                "category": "Network",
-                "title": (
-                    "The venue network is killing LogMeIn's secure connection "
-                    "— remote support can't reach this VPU"
-                ),
-                "recommendation": (
-                    f"LogMeIn's own service log shows {n} failed secure handshakes"
-                    + (f" since {since}" if since else "")
-                    + (f", and no successful gateway login since {last_ok}"
-                       if last_ok else ", and no successful gateway login in the log")
-                    + ". Each attempt dies the instant LogMeIn starts its TLS "
-                    "handshake — the signature of a firewall inspecting or "
-                    "category-blocking the connection. Note LogMeIn connects to "
-                    "control.lmi-app*.logmein.com gateways and speaks TLS on port "
-                    "80 as well as 443, so ask the venue's IT team to exempt "
-                    "*.logmein.com AND logmein.com from both SSL inspection and "
-                    "the web filter's category policy — an allowlist entry for "
-                    "secure.logmein.com alone will not cover the gateways. "
-                    "The timeline in C:\\ProgramData\\LogMeIn is evidence you "
-                    "can hand them."
-                ),
-            }
-        )
+    # ── Streaming chain, required ports, SSL inspection / web filter, LogMeIn ──
+    # One source for the Dashboard, the ticket and the Network card; see
+    # _uplink_findings and friends above.
+    findings.extend(_stream_findings(port_tests))
+    findings.extend(_port_findings(port_tests))
+    findings.extend(_tls_findings(tls_inspection))
+    findings.extend(_lmi_findings(lmi_log))
 
     # ── Missing / under-count main cameras ─────────────────────
-    # Compare what the Coordinator says the VPU is configured for
-    # (`expectedMainCameras`, from Get-CameraExpectations) against what's
-    # actually present on the camera NIC. Only fires when we have an
-    # authoritative expected count — never guesses. OCR ports don't count
-    # toward the main total (the OCR camera is its own role).
-    if expectations and not expectations.get("error") and nics and not nics.get("error"):
-        expected_main = expectations.get("expectedMainCameras")
-        if isinstance(expected_main, int) and expected_main > 0:
-            # Enrich ports for accurate Main vs OCR classification (by ARP +
-            # default-OCR-IP convention; no CGI probe results required).
+    # One helper for the Dashboard, readiness, the ticket and Camera
+    # Connectivity; see _camera_count_findings.
+    if nics and not nics.get("error"):
+        expected_main = None
+        if expectations and not expectations.get("error"):
+            expected_main = expectations.get("expectedMainCameras")
+        # Without the Coordinator's count, a machine that isn't a VPU (the
+        # NIC collector also matches Realtek adapters) must not read as a
+        # camera-less VPU.
+        known = isinstance(expected_main, int) and expected_main > 0
+        if known or not (identity or {}).get("isNonVpuHost"):
             enriched_ports = _enrich_ports(nics, pixellot_config, None)
-            detected_main = 0
-            for p in enriched_ports:
-                if not p.get("isUp") or p.get("isOcr"):
-                    continue
-                for c in (p.get("camerasDetected") or []):
-                    if "OCR" not in (c.get("role") or ""):
-                        detected_main += 1
-
-            # ── ARP-independent count from CGI probes ──
-            # The ARP snapshot alone can read zero on a cold start: cameras
-            # that sat quiet age out of the Windows neighbor cache, so the
-            # count above sees nothing even though both mains are alive.
-            # The CGI probe always tries the default camera IPs regardless
-            # of ARP (same philosophy as the ARP-independent OCR guard on
-            # the slow-port finding), so a probe answer is positive proof a
-            # camera is present. probe_results is keyed by MAC — each
-            # camera counts once. Take the better of the two counts.
-            probe_main = 0
-            for r in (probe_results or {}).values():
-                role, _speed = _lookup_camera_model(r.get("modelNumber"))
-                if role is not None:
-                    probe_is_ocr = "OCR" in role
-                else:
-                    probe_is_ocr = (
-                        bool(r.get("is_ocr"))
-                        or (r.get("ip") or "").strip() in _DEFAULT_OCR_IPS
-                    )
-                if not probe_is_ocr:
-                    probe_main += 1
-            detected_main = max(detected_main, probe_main)
-
-            # Cold-start guard for the zero-count CRITICAL. If probes ran
-            # but nothing was seen by ARP *or* probe while a non-OCR port
-            # has live link, the link layer contradicts "no cameras" — a
-            # link doesn't come up without a powered device on the other
-            # end. During the startup grace that reading means the
-            # collection burst starved both caches, not that the rig is
-            # dark; skip once and let the next collection (warm caches)
-            # decide. Ports genuinely down still alarm immediately, even
-            # at startup.
-            suppress_cold_zero = (
-                detected_main == 0
-                and probes_attempted
-                and not (probe_results or {})
-                and _in_startup_grace()
-                and any(
-                    p.get("isUp") and not p.get("isOcr")
-                    for p in enriched_ports
-                )
-            )
-            if detected_main < expected_main and not suppress_cold_zero:
-                missing = expected_main - detected_main
-                if detected_main == 0:
-                    sev = "critical"
-                    title = f"No main cameras detected (expected {expected_main})"
-                    rec = (
-                        f"The VPU is configured for {expected_main} main camera"
-                        f"{'s' if expected_main != 1 else ''} but none are reporting "
-                        f"on the camera NIC. Check that the camera cables are seated, "
-                        f"the cameras have power, and the correct ports are in use. "
-                        f"See the Camera Connectivity tab for per-port detail."
-                    )
-                else:
-                    sev = "warning"
-                    title = (
-                        f"{detected_main} of {expected_main} main cameras detected "
-                        f"({missing} missing)"
-                    )
-                    rec = (
-                        f"{missing} main camera{'s are' if missing != 1 else ' is'} "
-                        f"expected but not detected. Inspect the missing port(s) on "
-                        f"the Camera Connectivity tab. It is usually a cable, a switch "
-                        f"port, or camera power."
-                    )
-                findings.append({
-                    "code": "cam-none" if detected_main == 0 else "cam-partial",
-                    "severity": sev,
-                    "category": "Camera",
-                    "title": title,
-                    "recommendation": rec,
-                })
+            _flag_uplink_ports(enriched_ports, network_config)
+            findings.extend(_camera_count_findings(
+                enriched_ports, expected_main, probe_results, probes_attempted))
 
     # Deduplicate by (category, title) — separate checks shouldn't produce
     # the same finding twice on the dashboard.
@@ -2530,8 +2633,17 @@ _READINESS_POLICY = {
     # F15a C: disk >90% is computed below from disk-health (not the
     # `disk-critical` finding — see _compute_readiness).
 
+    "port-required-blocked": "blocker",  # F23b NTP / Pixellot cloud / NFHS / Singular /
+                                         #     LogMeIn port blocked. Prerequisites, not
+                                         #     redundant paths (Ian, 2026-09-22: critical,
+                                         #     matching the Network card).
+    "tz-non-us":             "blocker",  # F25 non-US time zone (Ian, 2026-09-22: critical)
+
     # ── RISKS → WARN (will likely stream, but a human should eyeball) ──
     "cam-partial":           "risk",     # F6  k of N present (k>0)
+    "cam-count-pending":     "risk",     # zero cameras during the cold-start grace:
+                                         #     unconfirmed is not a pass. The Dashboard
+                                         #     re-checks when the grace window closes.
     "nic-slow":              "risk",     # F7  camera NIC below gigabit
     "stream-degraded-rtmp":  "risk",     # F1b both UDP rungs dead, RTMP open — games
                                          #     air ~4 min late, no loss protection.
@@ -2542,12 +2654,16 @@ _READINESS_POLICY = {
     "watchdog-down":         "risk",     # F9  KeepAgentUp down — no self-heal
     "pixellot-over-cap":     "risk",     # F10 build newer than GPU/OS supports
     "gpu-anomaly":           "risk",     # F12 Volta / roster anomaly
+    "uplink-on-camera-port": "risk",     # internet cable on the camera card. Had no
+                                         #     code until 2026-09-22, so it defaulted to
+                                         #     info and Copy for ticket pasted a critical
+                                         #     wiring fault under "Worth knowing". Ian's
+                                         #     call: risk.
     "install-incomplete":    "risk",     # F13 interrupted installer, agent up
     # F16 (`disk-low`, a volume at 80–90%) removed — disk fill is critical-only now.
     "disk-smart-prefail":    "risk",     # F16b drive SMART pre-fail / uncorrectable errors
     "ram-insufficient":      "risk",     # F21 <32 GB host
     "ntp-unapproved":        "risk",     # F22 drift can break signed-URL stream
-    "port-required-blocked": "risk",     # F23b NTP / Pixellot cloud / etc.
     "wifi-uplink":           "risk",     # F24 Wi-Fi uplink — latency/loss
     # F14 temp≥90, F15b D:>90, F17 CPU sustained, F19 mem sustained are computed
     # below (readiness-specific thresholds the dashboard findings don't surface).
@@ -2564,7 +2680,6 @@ _READINESS_POLICY = {
     "disk-critical":         "info",
     "disk-smart-wear":       "info",     # SSD ≥80% rated life — heads-up, won't stop tonight's game
     "temp-critical":         "info",     # 85°C snapshot — readiness gate is 90°C (F14)
-    "tz-non-us":             "info",     # F25
     "os-eos-reached":        "info",     # F26
     "os-eos-imminent":       "info",     # F27
     "os-eos-approaching":    "info",     # F28
@@ -2636,13 +2751,18 @@ def _compute_readiness(findings, performance=None, disk_health=None,
     """
     blockers, risks, info = [], [], []
 
-    def add(cls, code, title, recommendation, category=""):
+    def add(cls, code, title, recommendation, category="", source=None):
         entry = {
             "code": code,
             "title": title,
             "recommendation": recommendation,
             "category": category,
         }
+        # The venue-IT line, the evidence and the per-row detail ride along so
+        # Copy for ticket can paste the whole finding, not just its body.
+        for k in ("it", "evidence", "details"):
+            if source and source.get(k):
+                entry[k] = source[k]
         {"blocker": blockers, "risk": risks}.get(cls, info).append(entry)
 
     # (1) Finding-derived classes, straight from the policy table.
@@ -2654,7 +2774,7 @@ def _compute_readiness(findings, performance=None, disk_health=None,
         if f.get("supersededBy"):
             continue
         add(_readiness_class(code), code, f.get("title", ""),
-            f.get("recommendation", ""), f.get("category", ""))
+            f.get("recommendation", ""), f.get("category", ""), source=f)
 
     # (2) Readiness-specific computed checks (different metric/threshold than
     #     the dashboard finding — see docstring).
@@ -2706,15 +2826,15 @@ def _compute_readiness(findings, performance=None, disk_health=None,
     c_pct, d_pct = _disk_used_by_letter(disk_health, performance)
     if isinstance(c_pct, (int, float)) and c_pct > 90:
         add("blocker", "disk-c-critical", "System drive (C:) almost full",
-            f"C: is {c_pct:g}% full. The live stream is processed on C:. If it "
-            f"fills, the VPU can't process the broadcast. Free space on C: now.",
+            f"C: is {c_pct:g}% full. The live stream is processed on C:, so if it "
+            f"fills the VPU can't broadcast. Free up space on C: now.",
             "Storage")
     if isinstance(d_pct, (int, float)) and d_pct > 90:
         add("info", "disk-d-critical",
-            "Recording drive (D:) almost full — recordings may not save",
-            f"D: is {d_pct:g}% full. The post-event recording (VOD) is written to "
-            f"D:. If it fills during the game the recording may not save. Free "
-            f"space on D:.", "Storage")
+            "Recording drive (D:) almost full, so recordings may not save",
+            f"D: is {d_pct:g}% full. The game recording (VOD) is saved to D:, so if "
+            f"it fills during the game the recording may not save. Free up space "
+            f"on D:.", "Storage")
 
     status = "FAIL" if blockers else "WARN" if risks else "PASS"
     from datetime import datetime, timezone
@@ -3198,6 +3318,192 @@ def _flag_uplink_ports(ports: list, network_config) -> None:
             p["uplinkGateway"] = gw
 
 
+
+# Why the zero-camera finding used to miss: a unit whose only linked camera
+# port carried the venue's internet cable (North East (MD) Gym, 2026-09-22,
+# 2 mains expected, none connected) read PASS "Game-ready". Three things
+# stacked: the cold-start guard below treated that link as proof a camera
+# was there and skipped the alarm; the Dashboard never re-collects on its
+# own, so "skip once, let the next collection decide" never got a next
+# collection; and with no expected count from the Coordinator the check did
+# not run at all. Each is closed here.
+CAM_COUNT_PENDING = "cam-count-pending"
+
+
+def _count_main_cameras(ports, probe_results) -> int:
+    """Main cameras present on the camera card, counted once each by MAC
+    across both sources: the ports' neighbour tables (ARP) and the CGI
+    probes. Ports carrying the internet uplink are skipped; their link and
+    neighbours are the venue LAN, not cameras.
+
+    This used to take the larger of the two counts. That double-counted a
+    camera the neighbour table held under two addresses, and under-counted
+    when each source saw a different camera. The probe is ARP-independent
+    (it tries the default camera IPs), so it still rescues a cold start where
+    quiet cameras have aged out of the neighbour cache."""
+    def _norm(mac):
+        return str(mac or "").strip().upper().replace("-", ":")
+
+    macs = set()
+    for p in ports:
+        if p.get("hasInternetUplink") or not p.get("isUp") or p.get("isOcr"):
+            continue
+        for c in (p.get("camerasDetected") or []):
+            if "OCR" not in (c.get("role") or "") and c.get("mac"):
+                macs.add(_norm(c.get("mac")))
+    for key, r in (probe_results or {}).items():
+        role, _speed = _lookup_camera_model(r.get("modelNumber"))
+        if role is not None:
+            probe_is_ocr = "OCR" in role
+        else:
+            probe_is_ocr = (
+                bool(r.get("is_ocr"))
+                or (r.get("ip") or "").strip() in _DEFAULT_OCR_IPS
+            )
+        if not probe_is_ocr:
+            macs.add(_norm(r.get("mac") or key))
+    return len(macs)
+
+def _main_camera_ports(ports) -> list:
+    """Where the main cameras are plugged in, for the Cameras panel ("Port 1
+    at 1 Gbps"). Same filter as _count_main_cameras. A camera found only by
+    the CGI probe has no port to name, so it counts but isn't listed."""
+    out = []
+    for p in ports or []:
+        if p.get("hasInternetUplink") or not p.get("isUp") or p.get("isOcr"):
+            continue
+        n = sum(1 for c in (p.get("camerasDetected") or []) if "OCR" not in (c.get("role") or ""))
+        if n:
+            out.append({"port": p.get("portLabel"), "speedMbps": p.get("linkSpeedMbps"),
+                        "cameras": n, "slow": bool(p.get("isDegraded"))})
+    return out
+
+
+def _scoreboard_camera_state(ports, pixellot_config):
+    """For the Camera Connectivity reference panel: is a scoreboard (OCR)
+    camera configured, and is it connected? The OCR IP set always includes
+    Pixellot's default addresses, so "configured" comes from a cameras.cfg
+    entry whose role names OCR. None when neither is true: plenty of venues
+    have no scoreboard camera, and the panel shouldn't imply one is missing."""
+    cfg_cams = (pixellot_config or {}).get("cameras") or [] if isinstance(pixellot_config, dict) else []
+    configured = any("OCR" in str(c.get("role") or "").upper() for c in cfg_cams)
+    live = [p for p in ports or [] if p.get("isOcr") and p.get("isUp") and not p.get("hasInternetUplink")]
+    if not live and not configured:
+        return None
+    p = live[0] if live else None
+    return {
+        "configured": configured,
+        "connected": bool(p),
+        "port": p.get("portLabel") if p else None,
+        "speedMbps": p.get("linkSpeedMbps") if p else None,
+    }
+
+
+def _camera_count_findings(ports, expected_main, probe_results, probes_attempted) -> list:
+    """cam-none / cam-partial, or cam-count-pending while a cold start makes
+    zero ambiguous. `ports` are enriched and uplink-flagged. Returns a list
+    so both callers can extend with it."""
+    if not ports and not (isinstance(expected_main, int) and expected_main > 0):
+        # No camera card and no configured count: a non-VPU host, or a card
+        # that isn't on the bus (its own finding). Nothing to count against.
+        return []
+    known = isinstance(expected_main, int) and expected_main > 0
+    # Every VPU broadcasts from at least one main camera, so zero is a fault
+    # even when the Coordinator's expected count is unavailable.
+    expected = expected_main if known else 1
+
+    # A port carrying the venue's internet cable is not a camera port: its
+    # link proves nothing about cameras, and anything on it is the venue LAN.
+    cam_ports = [p for p in ports if not p.get("hasInternetUplink")]
+    uplinks = [p for p in ports if p.get("hasInternetUplink")]
+
+    detected_main = _count_main_cameras(ports, probe_results)
+    if detected_main >= expected:
+        return []
+
+    # Cold-start guard for the zero-count CRITICAL. If probes ran but nothing
+    # answered while a *camera* port has live link, the link layer contradicts
+    # "no cameras" (a link doesn't come up without a powered device on the
+    # other end). During the startup grace that means the collection burst
+    # starved both caches (false CRITICAL on VPU2, 2026-07-28). Say so as a
+    # pending check instead of a PASS, and the Dashboard re-checks once the
+    # grace ends. Ports genuinely down still alarm immediately.
+    if (
+        detected_main == 0
+        and probes_attempted
+        and not (probe_results or {})
+        and _in_startup_grace()
+        and any(p.get("isUp") and not p.get("isOcr") for p in cam_ports)
+    ):
+        return [{
+            "code": CAM_COUNT_PENDING,
+            "severity": "warning",
+            "category": "Camera",
+            "title": "Cameras not confirmed yet, so this verdict may change",
+            "recommendation": (
+                "Pulse just started and the cameras haven't answered yet. It checks again "
+                "in about a minute; nothing to do unless this stays."
+            ),
+        }]
+
+    details = []
+    for p in ports:
+        label = p.get("portLabel") or p.get("name") or "Port"
+        if p.get("hasInternetUplink"):
+            state = f"internet cable (gateway {p.get('uplinkGateway')}), not a camera"
+        elif not p.get("isUp"):
+            state = "no link"
+        elif p.get("isOcr"):
+            state = "scoreboard camera"
+        elif p.get("camerasDetected"):
+            state = "camera connected"
+        else:
+            state = "linked, but no camera answering"
+        details.append(f"{label}: {state}")
+    uplink_note = ""
+    if uplinks:
+        names = ", ".join(p.get("portLabel") or "a camera port" for p in uplinks)
+        uplink_note = (f" {names} {'is' if len(uplinks) == 1 else 'are'} carrying the "
+                       f"internet cable instead of a camera.")
+    evidence = (
+        "Pulse looked for Pixellot cameras in each camera-card port's network neighbours "
+        "and queried the default camera addresses directly."
+    )
+
+    if detected_main == 0:
+        s_ = "s" if expected != 1 else ""
+        return [{
+            "code": "cam-none",
+            "severity": "critical",
+            "category": "Camera",
+            "title": (f"No main cameras detected (expected {expected_main}), so there's nothing to broadcast"
+                      if known else "No main cameras detected, so there's nothing to broadcast"),
+            "recommendation": (
+                (f"The VPU expects {expected_main} main camera{s_} but can't see any on the camera card, "
+                 if known else "The VPU can't see any main cameras on the camera card, ")
+                + "so there's nothing to broadcast." + uplink_note
+                + " Check that the camera cables are seated in the camera card, the cameras have power, "
+                "and they're in the right ports."
+            ),
+            "details": details,
+            "evidence": evidence + " No main camera answered.",
+        }]
+    missing = expected - detected_main
+    return [{
+        "code": "cam-partial",
+        "severity": "warning",
+        "category": "Camera",
+        "title": f"{detected_main} of {expected} main cameras detected ({missing} missing)",
+        "recommendation": (
+            f"{missing} main camera{'s are' if missing != 1 else ' is'} expected but not "
+            f"connected." + uplink_note + " Check the missing port's cable, the camera's "
+            "power, and the switch port."
+        ),
+        "details": details,
+        "evidence": evidence,
+    }]
+
+
 def _compute_camera_findings(ports: list, poe=None) -> list:
     findings = []
 
@@ -3210,12 +3516,13 @@ def _compute_camera_findings(ports: list, poe=None) -> list:
         b = poe["budget"]
         findings.append({
             "severity": "warning",
-            "title": "PoE card power budget too low, Molex lead likely unplugged",
-            "body": f"The camera card reports a total PoE budget of {b.get('totalW')} W, "
-                    f"below the {b.get('healthyFloorW')} W a healthy card provides. Its "
-                    "supplementary Molex power lead is most likely disconnected, leaving it on "
-                    "slot power only. Power the VPU down and reseat the Molex lead on the camera "
-                    "card. VPU Manager reports this same fault as a failed POE Power Test.",
+            "title": "Camera card's Molex power lead looks unplugged, so it can't run a full set of cameras",
+            "body": "The camera card isn't getting its extra power, so it can't run a full set of "
+                    "cameras. Its Molex power lead is most likely unplugged. Power the VPU down, "
+                    "reseat that lead, then check again.",
+            "evidence": f"The card reports a {b.get('totalW')} W power budget; a healthy card "
+                        f"reports at least {b.get('healthyFloorW')} W. VPU Manager shows the same "
+                        "fault as a failed POE Power Test.",
         })
 
     # The venue/internet cable in a camera port disrupts camera discovery and
@@ -3384,6 +3691,13 @@ def _build_dashboard(identity, performance, services, nics, network_config=None,
         "readiness": _compute_readiness(findings, performance=performance, disk_health=disk_health, perf_sample=perf_sample),
         "networkConfig": net_cfg,
         "sourceErrors": source_errors,
+        # A camera count held back by the cold-start guard is re-checked by
+        # the page once the grace window closes, instead of standing as the
+        # verdict until someone clicks Refresh.
+        "recheckAfterSec": (
+            max(1, int(_STARTUP_GRACE_SECONDS - (time.monotonic() - _PROCESS_START_MONO)) + 2)
+            if any(f.get("code") == CAM_COUNT_PENDING for f in findings) else None
+        ),
     }
 
 
@@ -3409,12 +3723,22 @@ def _build_network(config, domains, ports, ntp, local=None, ntp_peers=None, dns_
     # the data to the frontend.
     dns_resolution = _annotate_dns_resolution(dns_resolution)
 
+    # What breaks per row, and the findings the Network card renders -- the
+    # same records the Dashboard and Copy for ticket use (see
+    # NET_CARD_FINDING_CODES). A collector that errored contributes nothing.
+    _attach_impact(ports, domains, tls)
+    net_findings = [
+        f for f in (_uplink_findings(config if config and not config.get("error") else None, wifi)
+                    + _tls_findings(tls) + _lmi_findings(lmi_log) + _stream_findings(ports))
+        if f.get("code") in NET_CARD_FINDING_CODES
+    ]
+
     # Pass local, ntpPeers, dnsResolution, wifi through even on error — let
     # the frontend surface whichever subsection failed.
     return {"config": net, "domains": domains, "ports": ports, "ntp": ntp,
             "local": local, "ntpPeers": ntp_peers,
             "dnsResolution": dns_resolution, "wifi": wifi, "tls": tls,
-            "lmiLog": lmi_log}
+            "lmiLog": lmi_log, "findings": net_findings}
 
 
 # ─── Routes ───────────────────────────────────────────────────
@@ -3890,12 +4214,24 @@ async def api_cameras(refresh: bool = False):
     probe_results = await _probe_all_cameras(raw_ports, ocr_ips, block=refresh)
     ports = _enrich_ports(nics, pix_config, probe_results, expected_main_cameras=expected_main)
     _flag_uplink_ports(ports, net_config)
+    # The camera tab renders `body`; the Dashboard's copy of this finding
+    # uses `recommendation`. Same record either way.
+    count_findings = [
+        {**f, "body": f["recommendation"]}
+        for f in _camera_count_findings(ports, expected_main, probe_results, True)
+        if f["code"] != CAM_COUNT_PENDING  # this tab re-polls every few seconds
+    ]
     return {
         "ports": ports,
         "pixellotConfig": pix_config,
-        "findings": _compute_camera_findings(ports, poe),
+        "findings": count_findings + _compute_camera_findings(ports, poe),
         "systemType": system_type,
         "expectedMainCameras": expected_main,
+        # The same count the camera-count finding uses, for the camera-head
+        # panel ("0 of 2 main cameras connected").
+        "detectedMainCameras": _count_main_cameras(ports, probe_results),
+        "mainCameraPorts": _main_camera_ports(ports),
+        "scoreboardCamera": _scoreboard_camera_state(ports, pix_config),
         # Whole collector payload, not just the readings — the frontend needs
         # supported/available/reason to tell "this NIC family can't measure
         # power" apart from "the driver isn't installed" apart from "measured,

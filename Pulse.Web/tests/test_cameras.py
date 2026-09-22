@@ -484,7 +484,7 @@ class TestPoeUnderPoweredFinding(unittest.TestCase):
 
     def _poe_findings(self, poe):
         return [f for f in main._compute_camera_findings([], poe)
-                if "PoE" in f["title"]]
+                if "Molex" in f["title"]]
 
     def test_molex_disconnected_value_from_vpu_manager_is_flagged(self):
         found = self._poe_findings(self._budget(20.0, True))
@@ -493,7 +493,8 @@ class TestPoeUnderPoweredFinding(unittest.TestCase):
         # Warning, not critical: a 1-2 camera venue runs fine on slot power, and
         # a critical would contradict the passing port checks next to it.
         self.assertEqual(found[0]["severity"], "warning")
-        self.assertIn("20.0", found[0]["body"])
+        # The measured budget is evidence, not something to read to a school.
+        self.assertIn("20.0", found[0]["evidence"])
 
     def test_healthy_production_reading_is_not_flagged(self):
         self.assertEqual(self._poe_findings(self._budget(63.4, False)), [])
