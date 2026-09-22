@@ -335,12 +335,13 @@ def _demo_cam(ip, mac, serial, *, ocr=False, gateway=None):
     }
 
 
+# A realistic S2 (expectedMainCameras 2 below): one main camera per port on
+# ports 1-2 and the scoreboard camera on port 3. It used to carry five mains
+# (three on port 1), which made the Camera Connectivity panel read "5 main
+# cameras connected, 2 expected" on the demo unit.
 _DEMO_CGI_PROBES = {
     "192.168.10.100": _demo_cam("192.168.10.100", "00:0E:53:AA:01:01", "MC1-7741A", gateway="192.168.10.1"),
-    "192.168.10.101": _demo_cam("192.168.10.101", "00:0E:53:AA:01:02", "PC2-7741B", gateway="192.168.10.1"),
-    "192.168.10.102": _demo_cam("192.168.10.102", "00:0E:53:AA:01:03", "TC3-7741C", gateway="192.168.10.1"),
     "192.168.11.100": _demo_cam("192.168.11.100", "00:0E:53:BB:02:01", "MC4-9920A", gateway="192.168.11.1"),
-    "192.168.11.101": _demo_cam("192.168.11.101", "00:0E:53:BB:02:02", "PC5-9920B", gateway="192.168.11.1"),
     "169.254.16.52":  _demo_cam("169.254.16.52",  "00:D0:89:1B:03:01", "DYN-OCR-3318", ocr=True),
 }
 
@@ -648,14 +649,14 @@ DEMO = {
         "ports": [
             {"name": "Ethernet 1", "interfaceDescription": "Intel(R) I210 Gigabit Network Connection", "status": "Up", "linkSpeedMbps": 1000, "fullDuplex": True, "mac": "A4:4C:C8:12:34:01",
              "rxBytes": 82749103726, "txBytes": 5283910234, "rxErrors": 0, "txErrors": 0, "rxPacketErrors": 0, "rxDiscards": 0, "txPacketErrors": 0, "txDiscards": 0,
-             "arpEntries": [{"ip": "192.168.10.100", "mac": "00:0E:53:AA:01:01"}, {"ip": "192.168.10.101", "mac": "00:0E:53:AA:01:02"}, {"ip": "192.168.10.102", "mac": "00:0E:53:AA:01:03"}]},
+             "arpEntries": [{"ip": "192.168.10.100", "mac": "00:0E:53:AA:01:01"}]},
             # Ethernet 2 deliberately negotiated to 100 Mbps with main-camera
             # MACs (00:0E:53 OUI). The new finding logic flags this as
             # degraded — the OCR-OUI heuristic only spares ports where every
             # Pixellot MAC is Dynacolor (00:D0:89).
             {"name": "Ethernet 2", "interfaceDescription": "Intel(R) I210 Gigabit Network Connection #2", "status": "Up", "linkSpeedMbps": 100, "fullDuplex": True, "mac": "A4:4C:C8:12:34:02",
              "rxBytes": 18238473625, "txBytes": 1283746281, "rxErrors": 0, "txErrors": 0, "rxPacketErrors": 0, "rxDiscards": 0, "txPacketErrors": 0, "txDiscards": 0,
-             "arpEntries": [{"ip": "192.168.11.100", "mac": "00:0E:53:BB:02:01"}, {"ip": "192.168.11.101", "mac": "00:0E:53:BB:02:02"}]},
+             "arpEntries": [{"ip": "192.168.11.100", "mac": "00:0E:53:BB:02:01"}]},
             # Ethernet 3 is the OCR / scoreboard camera. OCR cameras are
              # natively 100 Mbps, so this is HEALTHY (not degraded). Uses the
              # default-OCR link-local IP convention (169.254.16.52/53/60) so
@@ -1062,14 +1063,8 @@ DEMO = {
         "cameras": [
             {"section": "Camera1", "ip": "192.168.10.100", "mac": "00:0E:53:AA:01:01", "role": "Main",
              "firmwareVersion": "1.9.13", "tvMode": "ntsc_60", "serialNumber": "MC1-7741A", "model": "Pixellot SuperBowl"},
-            {"section": "Camera2", "ip": "192.168.10.101", "mac": "00:0E:53:AA:01:02", "role": "Panoramic",
-             "firmwareVersion": "1.9.13", "tvMode": "ntsc_60", "serialNumber": "PC2-7741B", "model": "Pixellot SuperBowl"},
-            {"section": "Camera3", "ip": "192.168.10.102", "mac": "00:0E:53:AA:01:03", "role": "Tactical",
-             "firmwareVersion": "1.9.13", "tvMode": "ntsc_60", "serialNumber": "TC3-7741C", "model": "Pixellot SuperBowl"},
-            {"section": "Camera4", "ip": "192.168.11.100", "mac": "00:0E:53:BB:02:01", "role": "Main",
+            {"section": "Camera2", "ip": "192.168.11.100", "mac": "00:0E:53:BB:02:01", "role": "Main",
              "firmwareVersion": "1.9.13", "tvMode": "ntsc_60", "serialNumber": "MC4-9920A", "model": "Pixellot SuperBowl"},
-            {"section": "Camera5", "ip": "192.168.11.101", "mac": "00:0E:53:BB:02:02", "role": "Panoramic",
-             "firmwareVersion": "1.9.13", "tvMode": "ntsc_60", "serialNumber": "PC5-9920B", "model": "Pixellot SuperBowl"},
             {"section": "OCR", "ip": "192.168.12.50", "mac": "00:D0:89:1B:03:01", "role": "OCR",
              "firmwareVersion": "DC-2.4.1", "tvMode": "ntsc_60", "serialNumber": "DYN-OCR-3318", "model": "Dynacolor MPC-IPC"},
         ],

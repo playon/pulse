@@ -1147,7 +1147,7 @@ function renderCloudEvents() {
   const localEv = (data.localEvents || {}).events || [];
   const header = pageHeader(
     "Event Streaming",
-    "This VPU's recent events as the NFHS cloud sees them. Did each one stream, and if not, why not? Cloud evidence reflects right now. Local recording facts are from the event itself.",
+    "This VPU's recent events as the NFHS cloud sees them, and whether each one streamed. Cloud status is as of now; recording details are from the event itself.",
     `<button class="btn-outline btn-ol-blue" onclick="dataCache['cloud-events']=null;renderCloudEvents()">${svgIcon("refresh", 14)} Refresh</button>`
   );
 
@@ -1156,7 +1156,7 @@ function renderCloudEvents() {
     $page().innerHTML = `${header}
       <div class="card">
         <div class="text-sm font-medium mb-1">No venue ID found on this box</div>
-        <div class="text-xs text-pulse-muted">Pulse reads the Pixellot venue ID from the Coordinator log (C:\\Pixellot\\Data\\Log). A fresh image, rotated logs, or a non-VPU host can leave it empty. Without it the cloud lookup can't identify this unit.</div>
+        <div class="text-xs text-pulse-muted">Pulse couldn't find this unit's Pixellot venue ID, so it can't look up its events in the cloud. This happens on a freshly imaged unit, after the logs rotate, or on a machine that isn't a VPU. (Pulse reads the ID from the Coordinator log in C:\\Pixellot\\Data\\Log.)</div>
       </div>`;
     return;
   }
@@ -1388,7 +1388,7 @@ function renderCameraHardware() {
 
     <div class="card">
       ${sectionTitle("camera", "Detected Cameras")}
-      <p class="text-xs text-pulse-muted mb-3">Probed live from each camera head over the Admin CGI (<span class="font-mono">Admin:1234</span> · <span class="font-mono">param.cgi</span>). It is the same probe the <strong>Camera Connectivity</strong> tab uses for identification. Cameras on a down port aren't probed.</p>
+      <p class="text-xs text-pulse-muted mb-3">Read live from each camera's admin interface, the same check the <strong>Camera Connectivity</strong> tab uses. Cameras on a down port aren't checked.</p>
       ${noCgiNote}
       ${entries.length ? `<div class="cam-hw-grid">${cards}</div>` : empty}
     </div>
@@ -1686,6 +1686,27 @@ function toggleFinding(i) {
 // Everything a ticket needs, as text: the unit, the verdict, and every finding
 // with what to do about it. Pulse could state a problem in five places and an
 // agent still had to retype it into the ticket by hand.
+// Everything under a finding's body: one row per affected port or service,
+// the exact thing to send venue IT, and how Pulse knows. The body is written
+// to be read aloud to a school; these three are for whoever acts on it.
+// Shared by the Dashboard, the Network card and Camera Connectivity, which all
+// render the same records main.py writes (see _uplink_findings there).
+function _findingExtrasHtml(f, listCls) {
+  var html = "";
+  if (f.details && f.details.length) {
+    html += '<ul class="' + (listCls || "finding-details") + '">' +
+      f.details.map(function(d) { return "<li>" + esc(d) + "</li>"; }).join("") + "</ul>";
+  }
+  if (f.it) {
+    html += '<p class="finding-it"><span class="finding-it-label">For venue IT:</span>' + esc(f.it) + "</p>";
+  }
+  if (f.evidence) {
+    html += '<details class="finding-evidence"><summary>How Pulse knows</summary><p>' +
+      esc(f.evidence) + "</p></details>";
+  }
+  return html;
+}
+
 function copyFindingsForTicket() {
   var txt = window.__pulseTicketText || "";
   var el = document.getElementById("finding-copy-btn");
@@ -1847,14 +1868,16 @@ function previewReadiness(state) {
 }
 function _demoVerdict(state) {
   var stamp = new Date().toISOString();
-  var nicRisk = { code: "nic-slow", category: "Camera", title: "NIC Port 2 at 100 Mbps (expected 1 Gbps)", recommendation: "Camera streams on this port drop frames at reduced bandwidth. Check the cable (Cat5e+), reseat the connector, and confirm the switch port auto-negotiates." };
+  var nicRisk = { code: "nic-slow", category: "Camera", title: "NIC Port 2 at 100 Mbps (expected 1 Gbps)", recommendation: "The port is running at 100 Mbps, so this camera drops frames. Check the cable is Cat5e or better, reseat both ends, and confirm the switch port auto-negotiates." };
   if (state === "PASS") return { status: "PASS", policyVersion: "v1", timestamp: stamp, blockers: [], risks: [], info: [] };
   if (state === "WARN") return { status: "WARN", policyVersion: "v1", timestamp: stamp, blockers: [], info: [], risks: [
     nicRisk,
-    { code: "disk-d-critical", category: "Storage", title: "Recording drive (D:) almost full", recommendation: "D: is 93% full. The post-event recording (VOD) is written to D:. If it fills during the game the recording may not save. Free space on D:." },
+    { code: "disk-d-critical", category: "Storage", title: "Recording drive (D:) almost full", recommendation: "D: is 93% full. The game recording is saved to D:, so if it fills during the game the recording may not save. Free up space on D:." },
   ] };
   return { status: "FAIL", policyVersion: "v1", timestamp: stamp, info: [], risks: [nicRisk], blockers: [
-    { code: "stream-blocked", category: "Network", title: "Streaming is blocked, so the VPU can't broadcast", recommendation: "The venue's network is blocking every streaming path (UDP/2088, UDP/443, and the TCP/1935 fallback), so the game can't broadcast until venue IT opens at least one." },
+    { code: "stream-blocked", category: "Network", title: "Streaming is blocked, so the VPU can't broadcast",
+      recommendation: "The venue's network is blocking all three connections the VPU uses to send live video, so the game can't broadcast. Ask venue IT to open at least one.",
+      it: "Outbound UDP 2088 and UDP 443 to prod-echo.pixellot.tv, and TCP 1935. Filters that match by destination must also allow *.pixellot.stream, because the streaming servers change for every event." },
   ] };
 }
 
@@ -2116,6 +2139,9 @@ function renderDashboard() {
         lines.push("[" + v.word + "] " + (e.title || ""));
         var rec = (e.recommendation || "").trim();
         if (rec) lines.push("    " + rec);
+        (e.details || []).forEach(function (d) { lines.push("      - " + d); });
+        if (e.it) lines.push("    For venue IT: " + e.it);
+        if (e.evidence) lines.push("    How Pulse knows: " + e.evidence);
         lines.push("");
       });
     }
@@ -2137,7 +2163,7 @@ function renderDashboard() {
   const _onVpu = !id.isNonVpuHost && uplinkName !== "—";
   let uplinkDisplay;
   if (_onVpu && _uplinkRole === "camera")
-    uplinkDisplay = `${esc(uplinkName)} <span class="dash-net-sub">(camera-NIC port, should be the motherboard port)</span>`;
+    uplinkDisplay = `${esc(uplinkName)} <span class="dash-net-sub">(camera card port; should be the motherboard port)</span>`;
   else if (_onVpu)
     uplinkDisplay = `Motherboard Network Port <span class="dash-net-sub">(${esc(uplinkName)})</span>`;
   else
@@ -2231,6 +2257,7 @@ function renderDashboard() {
           </button>
           <div class="finding-detail" id="finding-detail-${i}" hidden>
             ${rec ? `<p class="finding-rec">${esc(rec)}</p>` : `<p class="finding-rec finding-rec-none">No fix recorded for this finding yet. Open ${esc(_pageLabel(fp))} for the full detail.</p>`}
+            ${_findingExtrasHtml(f)}
             <a class="finding-open" href="#${esc(fp)}" onclick="event.preventDefault();findingJump('${esc(fp)}','${encTitle}')">Open ${esc(_pageLabel(fp))}${svgIcon("chevron", 13)}</a>
           </div>
         </div>`;
@@ -2371,6 +2398,15 @@ function renderDashboard() {
     </div>
   `;
 
+  // A camera count held back by the cold-start guard comes with a time to
+  // re-check. Without this the held-back reading stood as the verdict until
+  // someone clicked Refresh (North East (MD) Gym read PASS at 1:44 with no
+  // cameras connected, and was still PASS at 2:02).
+  if (dash.recheckAfterSec && !_dashRecheckTimer) {
+    _dashRecheckTimer = setTimeout(function() { _dashRecheckTimer = null; _dashRecheck(); },
+      dash.recheckAfterSec * 1000);
+  }
+
   // ── Live NIC refresh: poll /api/cameras every 3s and update NIC table ──
   // Uses an in-flight flag to skip ticks while a previous request is pending,
   // so slow PowerShell on the VPU can't pile up overlapping requests.
@@ -2385,9 +2421,36 @@ function renderDashboard() {
       dataCache.cameras = fresh;
       var el = document.getElementById("dash-nic-table");
       if (el) el.innerHTML = _renderNicRows(fresh.ports || []);
+      // The verdict is collected once; the ports are live. When a cable moves
+      // or a camera appears, re-collect the verdict so the card can't keep
+      // saying "Game-ready" about hardware that has changed under it.
+      var sig = _camLinkSignature(fresh.ports || []);
+      if (_dashLinkSig !== null && sig !== _dashLinkSig) _dashRecheck();
+      _dashLinkSig = sig;
     }).catch(function() { /* network blip — skip this tick */ })
       .then(function() { _nicPollBusy = false; });
   }, 3000);
+}
+
+var _dashRecheckTimer = null, _dashRecheckBusy = false, _dashLinkSig = null;
+// Link state, uplink placement and camera presence per port: the inputs to
+// the camera-count finding, and nothing that flickers on every poll.
+function _camLinkSignature(ports) {
+  return ports.map(function(p) {
+    return (p.isUp ? "U" : "D") + (p.hasInternetUplink ? "I" : "") + ((p.camerasDetected || []).length ? "C" : "");
+  }).join("|");
+}
+// Re-collect the Dashboard in the background and swap it in, without the
+// full-page loading state refreshSection() shows.
+function _dashRecheck() {
+  if (_dashRecheckBusy) return;
+  _dashRecheckBusy = true;
+  api("/api/dashboard").then(function(fresh) {
+    if (!fresh || fresh.error) return;
+    dataCache.dashboard = fresh;
+    if (currentPage === "dashboard") renderDashboard();
+  }).catch(function() { /* keep the current verdict; the next change retries */ })
+    .then(function() { _dashRecheckBusy = false; });
 }
 
 // ── Shared Page Helpers ─────────────────────────────────────
@@ -2904,7 +2967,9 @@ function _renderPingCards(local) {
   // cached network data so the DNS card can soften a blocked-ICMP ping.
   var _net = cached("network") || {};
   var _resolving = _dnsResolvingFrom((_net.domains && _net.domains.results) || [], (_net.ports && _net.ports.results) || []);
-  el.innerHTML = _pingCardHtml(gw, false) + _pingCardHtml(dns, _resolving);
+  var _cfg = _net.config || {};
+  el.innerHTML = _pingCardHtml(gw, _cfg.internetReachable === true, "traffic is getting through") +
+    _pingCardHtml(dns, _resolving);
 }
 
 function _fmtMs(v) {
@@ -2915,13 +2980,15 @@ function _fmtMs(v) {
   return Math.round(v) + " ms";
 }
 
-function _pingCardHtml(p, resolutionWorks) {
+function _pingCardHtml(p, pathWorks, workingNote) {
   if (!p || !p.target) return "";
-  // ICMP to the DNS server is routinely firewalled even when the resolver is
-  // perfectly healthy. When name resolution is demonstrably working but the
-  // ping got no reply, present the card as a neutral INFO ("ping blocked")
-  // rather than a red failure that reads as an outage.
-  var icmpBlocked = !!resolutionWorks && !p.reachable;
+  // ICMP to the gateway or the DNS server is routinely firewalled while the
+  // thing it tests is perfectly healthy. When the path is demonstrably working
+  // (name lookups resolve; the internet is reachable through the gateway) but
+  // the ping got no reply, present the card as a neutral INFO ("ping blocked")
+  // rather than a red failure. The gateway card used to stay red here, and the
+  // issues list had to spend a paragraph explaining the red away.
+  var icmpBlocked = !!pathWorks && !p.reachable;
   var sc, dot;
   if (icmpBlocked) {
     sc = "net-ping-info"; dot = "var(--c-accent-blue)";
@@ -2933,14 +3000,14 @@ function _pingCardHtml(p, resolutionWorks) {
   var loss = p.lossPercent != null ? p.lossPercent + "%" : "—";
   var range = (p.minMs != null && p.maxMs != null) ? _fmtMs(p.minMs).replace(" ms","") + " / " + _fmtMs(p.avgMs).replace(" ms","") + " / " + _fmtMs(p.maxMs).replace(" ms","") + " ms" : "—";
   var note = icmpBlocked
-    ? '<div class="net-ping-note">' + svgIcon("info", 12) + ' ICMP ping blocked by firewall, but name resolution is working' + '</div>'
+    ? '<div class="net-ping-note">' + svgIcon("info", 12) + ' Ping blocked by the network, but ' + esc(workingNote || "name lookups are working") + '</div>'
     : "";
   return '<div class="net-ping-card ' + sc + '">' +
     '<div class="net-ping-header">' +
       '<span class="net-ping-dot" style="background:' + dot + '"></span>' +
       '<span class="net-ping-label">' + esc(p.label) + '</span>' +
       '<span class="net-ping-target font-mono">' + esc(p.target) + '</span>' +
-      statusBadge(p.status) +
+      (icmpBlocked ? badge("Ping blocked", "info") : statusBadge(p.status)) +
     '</div>' +
     '<div class="net-ping-stats">' +
       '<div class="net-ping-stat"><span class="net-ping-stat-label">Latency</span><span class="net-ping-stat-value">' + esc(latency) + '</span></div>' +
@@ -3422,8 +3489,8 @@ function _renderCapture(el, d) {
           }).join("") +
           '</tbody></table>'
         : '<p class="net-cap-empty">' + (countersOnly
-            ? 'Not available on this VPU. Its version of Windows can count traffic but cannot record it, so there is no per-packet detail to list endpoints from. See the note above.'
-            : 'No endpoints were decoded from the capture. Windows recorded the packet totals above but did not write the per-packet detail this table needs, which it does intermittently on the VPU image. Run the capture again.')
+            ? 'Not available on this VPU: its Windows is too old to record individual packets. See the note above.'
+            : 'Windows didn\'t write the per-packet detail this table needs on this run (it happens now and then on the VPU image), so no connections are listed. Run the capture again.')
           + '</p>') +
     '</div>';
 }
@@ -3436,64 +3503,16 @@ function _prefixToMask(prefix) {
   return [24, 16, 8, 0].map(function(s) { return (mask >>> s) & 0xFF; }).join(".");
 }
 
-// "Impact if blocked" copy, sourced from the NFHS Network Firewall Setup doc
-// where the endpoint appears there, and authored from Pixellot service
-// knowledge for the few Pulse-only endpoints the doc doesn't list (Singular,
-// leaf-* buckets). Single editable home — revisit/expand later.
-// Ports are keyed by purpose; domains by hostname.
-const NET_PORT_IMPACT = {
-  "DNS": "The VPU can't resolve any hostname, so it can't reach any service.",
-  "Pixellot": "System management and software updates are blocked, and the stream fails to broadcast.",
-  // Streaming model (verified from VPU logs + packet capture, Olympic WA
-  // 2026-08-18): the live broadcast walks a fixed failover chain — Zixi
-  // UDP/2088 → Zixi UDP/443 (same protocol, disguise port) → RTMP TCP/1935 →
-  // nothing. Either UDP rung alone is a fully healthy stream; RTMP is a
-  // degraded last resort (~4 min late start, no loss protection). TCP/443 is
-  // the CONTROL PLANE and carries no live video. Wording is per-port "in
-  // isolation"; the live verdict is in the Port Connectivity finding.
-  "Pixellot Echo": "Pixellot cloud services over HTTPS (TCP/443): event scheduling, system management, remote support, video upload. It carries no live video, but nothing on the unit works without it.",
-  "NFHS Network": "Event scheduling, broadcast watermarks, and viewer access are unavailable.",
-  "Singular Overlay": "On-screen graphics and scorebug overlays won't load.",
-  "LogMeIn": "The support team can't diagnose the VPU remotely.",
-  "NTP": "The clock drifts without a valid time server, and a drifting clock makes the VPU miss scheduled events.",
-  "Zixi Backup": "Backup live-stream connection (Zixi over UDP/443, the same streaming protocol as UDP/2088, not HTTPS). Either Zixi port alone carries a fully healthy stream; with both blocked the broadcast degrades to the RTMP fallback.",
-  "Zixi Streaming": "The primary live-stream connection (Zixi over UDP/2088). If blocked, the stream fails over to Zixi UDP/443, then to the degraded RTMP fallback (TCP/1935).",
-  "RTMP Fallback": "Last-resort streaming path (RTMP over TCP/1935) used only when both Zixi/UDP connections are blocked: games start ~4 minutes late with no packet-loss protection. If this is blocked too, a venue with both UDP ports blocked can't broadcast at all. (Tested against a stable public RTMP host. That proves TCP/1935 is open by port, not that pixellot.stream itself is allowed.)",
-};
-// What each endpoint IS, in words a tier-1 agent can act on. The `purpose`
-// keys are the engineering names the collector emits; several are vendor or
-// protocol jargon ("Zixi Streaming", "RTMP Fallback", "NTP") that mean nothing
-// to someone taking a call from an athletic director. The tile leads with
-// these; the protocol/port stays underneath as the detail tier 2 needs.
-//
-// The three streaming rungs are deliberately named as one chain -- main /
-// backup / last resort -- because that is the single most useful thing the
-// Network tab can tell someone: which way the game is going out tonight.
-const NET_PORT_LABEL = {
-  "DNS":              "Name lookup (DNS)",
-  "NTP":              "Clock sync",
-  "Pixellot":         "Pixellot updates",
-  "Pixellot Echo":    "Pixellot cloud services",
-  "NFHS Network":     "NFHS scheduling",
-  "Singular Overlay": "On-screen graphics",
-  "LogMeIn":          "Remote support",
-  "Zixi Streaming":   "Live video – main path",
-  "Zixi Backup":      "Live video – backup path",
-  "RTMP Fallback":    "Live video – last resort",
-};
+// What breaks when each endpoint is blocked, and the plain name for it, live
+// in main.py (NET_PORT_IMPACT / NET_PORT_LABEL / NET_DOMAIN_IMPACT /
+// TLS_DOMAIN_IMPACT). /api/network stamps them on every row as `impact` and
+// `label` (plus `evidence` where Pulse's own test has a caveat), so the port
+// tiles, Service Reachability and the findings read one sentence per service.
 // A tile covering several services that share one port (the five TCP/443
-// endpoints). Naming them all would not fit; the pill carries N/M and the
-// tooltip points at Service Reachability for the breakdown.
+// endpoints) can't name them all; the pill carries N/M and the tooltip points
+// at Service Reachability for the breakdown.
 const NET_PORT_LABEL_SHARED = "Cloud services";
-
-const NET_DOMAIN_IMPACT = {
-  "nfhsnetwork.com": "Event scheduling, broadcast watermarks, and viewer access are unavailable.",
-  "pixellot.tv": "System management and software updates are blocked, and the stream fails to broadcast.",
-  "software.pixellot.tv": "Software and firmware updates are blocked.",
-  "service.singular.live": "On-screen graphics and scorebug overlays won't load.",
-  "logmein.com": "The support team can't diagnose the VPU remotely.",
-};
-function _netPortImpact(p) { return (p && NET_PORT_IMPACT[p.purpose]) || ""; }
+function _netPortImpact(p) { return (p && p.impact) || ""; }
 
 // Streaming failover chain (verified from VPU logs + packet capture, Olympic
 // WA 2026-08-18): Zixi UDP/2088 → Zixi UDP/443 → RTMP TCP/1935 → nothing.
@@ -3532,7 +3551,7 @@ function _isRedundantStreamBlock(p, health) {
     && STREAM_RUNG_PURPOSES.indexOf(p.purpose) !== -1
     && (p.status || "").toLowerCase() !== "pass";
 }
-function _netDomainImpact(d) { return (d && NET_DOMAIN_IMPACT[d.domain]) || ""; }
+function _netDomainImpact(d) { return (d && d.impact) || ""; }
 
 // Styled "impact if blocked" tooltip bubble (replaces native title= tooltips,
 // which are delayed, unstyled, and never show on keyboard focus or touch).
@@ -3540,26 +3559,14 @@ function _netDomainImpact(d) { return (d && NET_DOMAIN_IMPACT[d.domain]) || ""; 
 // :hover/:focus-within. The header line frames the impact sentence as a
 // hypothetical — without it, "X is unavailable" on a passing row reads like
 // a live failure. Callers outside the Network tab pass their own title.
-function _impactTipHtml(impact, title) {
+function _impactTipHtml(impact, title, evidence) {
   return `<span class="net-tip-bubble" role="tooltip">` +
     `<span class="net-tip-title">${esc(title || "If blocked on the school's network")}</span>` +
-    `${esc(impact)}</span>`;
+    `${esc(impact)}` +
+    (evidence ? `<span class="net-tip-evidence">${esc(evidence)}</span>` : "") +
+    `</span>`;
 }
 
-// Impact per TLS-checked domain — what breaks when a firewall intercepts it.
-// Keep the domains in sync with Test-TlsInspection.ps1.
-const TLS_DOMAIN_IMPACT = {
-  "singular.live": "On-screen graphics and scorebug overlays fail to load.",
-  "app.singular.live": "On-screen graphics and scorebug overlays fail to load.",
-  "api.singular.live": "On-screen graphics and scorebug overlays fail to load.",
-  "datastream.singular.live": "The realtime data feed that drives graphics can't connect, so overlays stay blank even though video streams.",
-  "service.singular.live": "On-screen graphics and scorebug overlays fail to load.",
-  "pixellot.tv": "System management and software updates are blocked.",
-  "software.pixellot.tv": "Software and firmware updates are blocked.",
-  "nfhsnetwork.com": "Event scheduling, broadcast watermarks, and viewer access are unavailable.",
-  "secure.logmein.com": "The support team can't diagnose the VPU remotely.",
-  "www.python.org": "The Pulse installer can't download Python on this network.",
-};
 
 // One-line LogMeIn service-log note under the Secure Connections table — the
 // historical half of the middlebox story. The live handshake rows above show
@@ -3690,7 +3697,7 @@ function _renderPortConnectivity(ports) {
     items.forEach(function(p) { if (p.purpose) purposes[p.purpose] = 1; });
     var distinct = Object.keys(purposes);
     var label = distinct.length === 1
-      ? (NET_PORT_LABEL[distinct[0]] || distinct[0])
+      ? (items[0].label || distinct[0])
       : NET_PORT_LABEL_SHARED;
     return { num: num, proto: proto, label: label, addr: proto + " " + num };
   }
@@ -3735,8 +3742,10 @@ function _renderPortConnectivity(ports) {
     // issues-panel finding with the same impact text, so the tile stays lean.
     var impact = items.length > 1
       ? "Several required services share this port. Service Reachability lists what each one does."
-      : (NET_PORT_IMPACT[p0.purpose] || "");
-    var tip = impact ? _impactTipHtml(impact) : "";
+      : _netPortImpact(p0);
+    // A caveat on Pulse's own test (the RTMP probe hits a public host, not
+    // pixellot.stream) rides under the impact as a second line.
+    var tip = impact ? _impactTipHtml(impact, null, p0.evidence) : "";
     var aria = impact ? ' aria-label="If blocked on the school\'s network: ' + esc(impact) + '"' : "";
     // Visible ? cue matching the Service Reachability rows, right of the port
     // number — the hover/tap target stays the whole tile, the icon just
@@ -3804,97 +3813,32 @@ function _netIssueRank(severity) {
   }
 }
 
-function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, lmiLog) {
+// Server-written findings the Network card renders as-is (main.py's
+// NET_CARD_FINDING_CODES). The wiring ones lead the card; the rest wait until
+// after the no-internet check, which short-circuits everything below it.
+var NET_TOP_FINDING_CODES = ["wifi-uplink", "uplink-on-camera-port", "wifi-disabled"];
+function _srvIssue(f) {
+  return { code: f.code, severity: f.severity, title: f.title, body: f.recommendation || "",
+           it: f.it, evidence: f.evidence, details: f.details };
+}
+
+function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, lmiLog, srvFindings) {
   var issues = [];
+  var srv = (srvFindings || []).map(_srvIssue);
+  var srvTop = srv.filter(function(i) { return NET_TOP_FINDING_CODES.indexOf(i.code) !== -1; });
+  var srvRest = srv.filter(function(i) { return NET_TOP_FINDING_CODES.indexOf(i.code) === -1; });
   var gw = (local || {}).gateway;
   var dns = (local || {}).dns;
 
-  // ── Wi-Fi is the internet uplink (Canopy reportWifiConnection) ──
-  // Only warn when Wi-Fi is actually carrying the VPU's internet traffic —
-  // a real Wi-Fi NIC holds the default route and no wired adapter does.
-  // Wi-Fi Direct / hosted-network virtual adapters always show "connected"
-  // and must NOT trip this (they aren't the uplink).
-  if (wifi && !wifi.error && wifi.uplinkIsWifi) {
-    var wifiUplink = (wifi.adapters || []).filter(function(a) {
-      return a.isUp && a.hasDefaultRoute && !a.isVirtual;
-    });
-    issues.push({
-      severity: "warning",
-      title: "VPU is using Wi-Fi for its internet connection. Switch to wired Ethernet",
-      body: "The Wi-Fi card is meant for the Pixellot Connect app, not the internet uplink. Connect the motherboard Ethernet port to the venue network instead. Wi-Fi adds latency and packet loss that disrupt streaming.",
-      details: wifiUplink.map(function(a) {
-        var label = a.interfaceDescription || a.name || "Wi-Fi";
-        var ssidPart = a.ssid ? ", SSID " + a.ssid : "";
-        return label + ssidPart;
-      }),
-    });
-  }
-
-  // ── Critical: internet plugged into a camera port (not the motherboard) ──
-  // Backend tags each adapter's role by PCI bus (motherboard = onboard LOM on
-  // bus 0; camera = a port on the multi-port NIC card). A camera port flags
-  // only when it's link-Up AND carrying a real gateway — a disconnected port
-  // can hold a stale gateway in the route table, so link state is the gate.
-  if (cfg && cfg.adapters) {
-    var _ipByIdx = {};
-    (cfg.ipConfig || cfg.ipConfigurations || []).forEach(function(ipc) { _ipByIdx[ipc.interfaceIndex] = ipc; });
-    function _camGw(a) {
-      var ipc = _ipByIdx[a.interfaceIndex] || {};
-      // PowerShell unwraps a single-element array to a scalar, so a one-gateway
-      // adapter arrives as a bare string, not an array — normalize before use.
-      var raw = ipc.ipv4DefaultGateway;
-      var gws = Array.isArray(raw) ? raw : (raw ? [raw] : []);
-      for (var i = 0; i < gws.length; i++) {
-        if (gws[i] && String(gws[i]).indexOf("169.254.") !== 0) return gws[i];
-      }
-      return null;
-    }
-    var _misplaced = (cfg.adapters || []).filter(function(a) {
-      return a.role === "camera" && String(a.status || "").toLowerCase() === "up" && _camGw(a);
-    });
-    if (_misplaced.length) {
-      var _mobo = (cfg.adapters || []).filter(function(a) { return a.role === "motherboard"; });
-      var _moboNote = "";
-      if (_mobo.length) {
-        var _m = _mobo[0];
-        var _admin = String(_m.adminStatus || "").toLowerCase(), _st = String(_m.status || "").toLowerCase();
-        if (_admin === "down" || _st === "disabled") _moboNote = " The motherboard network port is disabled. Enable it in Windows.";
-        else if (_st === "disconnected" || _st === "not present" || _st === "down") _moboNote = " The motherboard network port has no cable connected.";
-      } else {
-        _moboNote = " No motherboard network port was detected. It may be disabled.";
-      }
-      issues.push({
-        severity: "critical",
-        title: "Internet is plugged into a camera port, not the motherboard network port",
-        body: "The internet/venue connection is on a camera-NIC port, which can disrupt camera discovery and streaming. On a Pixellot VPU it has to connect to the motherboard network port. The 4-port NIC is for cameras only." + _moboNote + " Move the cable there and confirm the port is enabled. Leave the Wi-Fi card enabled, because the Pixellot Connect app needs it.",
-        details: _misplaced.map(function(a) { return (a.name || a.interfaceDescription || "?") + ": gateway " + _camGw(a) + " (a camera port)"; }),
-      });
-    }
-
-    // ── Warning: Wi-Fi card disabled (Pixellot Connect can't reach the VPU) ──
-    // A disabled Wi-Fi NIC reports status "Disabled" / adminStatus "Down"; an
-    // absent card doesn't appear at all. Skip Wi-Fi Direct / virtual adapters.
-    var _wifiOff = (cfg.adapters || []).filter(function(a) {
-      if (a.role !== "wifi") return false;
-      var d = a.interfaceDescription || "";
-      if (d.indexOf("Direct") !== -1 || d.indexOf("Virtual") !== -1) return false;
-      return String(a.status || "").toLowerCase() === "disabled" || String(a.adminStatus || "").toLowerCase() === "down";
-    });
-    if (_wifiOff.length) {
-      issues.push({
-        severity: "warning",
-        title: "Wi-Fi card is disabled, so the Pixellot Connect app can't reach this VPU",
-        body: "The Wi-Fi card is what the Pixellot Connect app uses to talk to the VPU, so Connect won't find this unit until it's turned back on. Enable it in Windows: Network Connections, right-click the Wi-Fi adapter, Enable. The internet uplink should stay on the motherboard Ethernet port; Wi-Fi is only for Connect.",
-        details: _wifiOff.map(function(a) { return (a.interfaceDescription || a.name || "Wi-Fi") + ": disabled"; }),
-      });
-    }
-  }
+  // Wi-Fi uplink, internet on a camera port, Wi-Fi card off: written once in
+  // main.py (_uplink_findings) for the Dashboard, the ticket and this card.
+  issues.push.apply(issues, srvTop);
 
   // ── Gateway ──────────────────────────────────────────────
   if (gw && !gw.reachable) {
     if (!gw.target)
       issues.push({ severity: "critical", title: "VPU has no route to the network",
-        body: "The internet adapter has no IPv4 default gateway. Set one, by DHCP or a static address. The VPU can't reach the internet without it." });
+        body: "The internet adapter has no default gateway, so the VPU can't reach the internet. Set one, by DHCP or a static address." });
     else if (cfg && cfg.internetReachable)
       // The gateway answers no ICMP, but the VPU is reaching the internet through
       // it — lots of routers/firewalls (and managed venue networks) silently drop
@@ -3903,10 +3847,10 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
       // filtering, not a fault — explain the red gateway test instead of falsely
       // calling the uplink dead and sending a tech to chase a cable.
       issues.push({ severity: "info", title: "Gateway doesn't answer ping, but traffic is routing normally (" + gw.target + ")",
-        body: "The gateway isn't replying to ping (ICMP), so the gateway test above shows red, but the VPU is reaching the internet through it. Many routers and firewalls are set to ignore pings to themselves while still forwarding traffic, so this is expected and needs no action." });
+        body: "No action needed. The gateway ignores ping, as many routers do, but traffic is getting through it." });
     else
       issues.push({ severity: "critical", title: "VPU can't reach its gateway (" + gw.target + ")",
-        body: "Verify the uplink Ethernet cable is seated, the switch port is active, and the VLAN is correct. No traffic will leave the VPU until this is resolved." });
+        body: "Nothing can leave the VPU until this is fixed. Check that the uplink cable is seated, the switch port is active, and the VLAN is correct." });
   }
   // Packet loss to the first hop is the real instability signal. First-hop
   // latency varies with switch load/Wi-Fi and is harmless up to ~30 ms, so
@@ -3928,7 +3872,7 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
   // resolved either.
   if (dns && !dns.reachable && _dnsResolving)
     issues.push({ severity: "info", title: "DNS server " + dns.target + " isn't answering pings, but name resolution is working",
-      body: "The VPU is resolving domains normally. The DNS server just isn't replying to ICMP ping, which many venue firewalls block. No action needed." });
+      body: "No action needed. Name lookups are working; the DNS server just ignores ping, which many venue firewalls do." });
   else if (dns && !dns.reachable)
     issues.push({ severity: "warning", title: "Name lookups are failing (DNS server " + dns.target + " unreachable)",
       body: "Nothing will resolve until this is fixed. Check the DNS server address in the adapter settings, or try a public DNS (8.8.8.8, 1.1.1.1)." });
@@ -3970,69 +3914,14 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
   var tlsRows = (tls && !tls.error && tls.results) || [];
   var tlsIntercepted = tlsRows.filter(function(r) { return r.status === "intercepted"; });
   var tlsHsFail = tlsRows.filter(function(r) { return r.status === "handshake-fail"; });
-  var tlsFiltered = tlsRows.filter(function(r) { return r.status === "filtered"; });
   var tlsCertTime = tlsRows.filter(function(r) { return r.status === "cert-time"; });
   var tlsBlocked = tlsRows.filter(function(r) { return r.status === "blocked"; });
-  if (tlsIntercepted.length) {
-    var interceptorNames = ((tls && tls.interceptorIssuers) || []).join(", ");
-    issues.push({
-      severity: "critical",
-      title: "The venue firewall is intercepting secure connections (SSL inspection)",
-      body: "The venue's network is decrypting the VPU's secure traffic and substituting its own certificate"
-        + (interceptorNames ? '. The intercepting device identifies itself as "' + interceptorNames + '"' : "")
-        + ". The VPU rejects the substituted certificate, so every service listed below is cut off. Each "
-        + "line shows what that breaks. Don't expect a clean broadcast until this is fixed, and it can only "
-        + "be fixed on the venue's network. Ask the venue's IT team to add these domains "
-        + "to the firewall's SSL decryption bypass/exemption list, using a wildcard that covers every "
-        + "subdomain plus the bare domain (e.g. *.singular.live AND singular.live). A URL allowlist alone "
-        + "will not do it. The traffic has to be exempt from decryption.",
-      details: tlsIntercepted.map(function(r) {
-        var impact = TLS_DOMAIN_IMPACT[r.domain] || "";
-        return r.domain + ': certificate issued by "' + (r.issuerCn || r.issuer || "an untrusted authority")
-          + '" instead of a public certificate authority' + (impact ? ". " + impact : "");
-      }).concat(tlsHsFail.map(function(r) {
-        return r.domain + ": the secure handshake was refused (consistent with the same inspection)";
-      })),
-    });
-  }
-  if (tlsFiltered.length) {
-    // Category / SNI blocking: the filter reads the hostname from the
-    // unencrypted ClientHello, decides the domain is in a blocked category
-    // and resets the connection. NO certificate is substituted, which is why
-    // this used to fall through to a vague "possible SSL inspection" warning
-    // that told a tech nothing actionable (Linewize, Ohio venue 2026-08-19 —
-    // eight critical hosts dead, readiness still green). Say the actual
-    // thing: the venue's content filter has these domains on a blocklist,
-    // and an SSL-decryption bypass will not lift it.
-    var vendorNames = ((tls && tls.filterVendors) || []).filter(Boolean).join(" / ");
-    var blockUrlRow = tlsFiltered.filter(function(r) { return r.blockPageUrl; })[0];
-    issues.push({
-      severity: "critical",
-      title: (vendorNames ? "Venue web filter (" + vendorNames + ")" : "A web filter on the venue network")
-        + " is blocking " + tlsFiltered.length + " Pixellot service"
-        + (tlsFiltered.length === 1 ? "" : "s") + " by category",
-      body: (vendorNames ? "The venue runs a " + vendorNames + " web filter. " : "")
-        + "Each connection below reaches the server and is then dropped the instant the VPU says which site it wants. "
-        + "That is a content filter matching the hostname against a blocked category. It is not certificate "
-        + "inspection. The certificates are untouched, so an SSL-decryption bypass on its own will not fix it"
-        + (blockUrlRow ? ", and a browser on this network is sent to the filter's own block page instead ("
-            + blockUrlRow.blockPageHost + ")" : "")
-        + ". Ask the venue's IT team to allow these domains in the web filter's category/URL policy, using a wildcard "
-        + "plus the bare domain (e.g. *.singular.live AND singular.live). It has to be a category exception, not only a URL entry. "
-        + "While they are in the console, have them exempt the same domains from SSL decryption so the other failure "
-        + "mode can't take its place. It can only be fixed on the venue's network.",
-      // Per-service impact first, then the block page URL ONCE at the end:
-      // it's the single most useful line to paste to venue IT (it carries the
-      // rule and category the filter applied), and repeating a 200-character
-      // URL on every row buries the impacts it sits next to.
-      details: tlsFiltered.map(function(r) {
-        var impact = TLS_DOMAIN_IMPACT[r.domain] || "";
-        return r.domain + ": connection reset during the secure handshake"
-          + (impact ? ". " + impact : "");
-      }).concat(blockUrlRow ? ["Evidence to send venue IT. Browsing to "
-        + blockUrlRow.domain + " on this network lands here: " + blockUrlRow.blockPageUrl] : []),
-    });
-  }
+  // SSL inspection, the web filter, LogMeIn blocked and the streaming chain
+  // are written once in main.py (_tls_findings, _lmi_findings,
+  // _stream_findings). A refused handshake next to a confirmed interception
+  // joins that finding server-side, so only the unexplained case is raised here.
+  issues.push.apply(issues, srvRest);
+
   if (tlsHsFail.length && !tlsIntercepted.length) {
     // What's left after the reset case is split out: a handshake that died
     // for some other reason — protocol tampering, a downgrade proxy, or an
@@ -4040,10 +3929,10 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
     issues.push({
       severity: "warning",
       title: tlsHsFail.length + " secure service" + (tlsHsFail.length === 1 ? "" : "s") + " failed the TLS handshake",
-      body: "The connection reached the server but the secure handshake was refused, and the reason isn't a blocked category or a substituted certificate (Pulse checks for both). A proxy that rewrites or downgrades TLS is the usual cause. If graphics or uploads are failing while video works, ask the venue's IT team what sits between this VPU and the internet on port 443, and have these domains exempted from it.",
+      body: "Something between the VPU and the internet is breaking its secure connections to the services below. If graphics or uploads fail while video streams, this is why. Ask venue IT what sits in that path on port 443 and have these domains exempted from it.",
+      evidence: "Pulse tests separately for a blocked category and for a substituted certificate; this is neither. A proxy that rewrites or downgrades TLS is the usual cause.",
       details: tlsHsFail.map(function(r) {
-        var impact = TLS_DOMAIN_IMPACT[r.domain] || "";
-        return r.domain + (r.detail ? ": " + r.detail : "") + (impact ? ". " + impact : "");
+        return r.domain + ": " + (r.impact || r.detail || "handshake refused.");
       }),
     });
   }
@@ -4053,7 +3942,7 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
     issues.push({
       severity: "warning",
       title: tlsCertTime.length + " secure service" + (tlsCertTime.length === 1 ? "" : "s") + " presented a certificate with invalid dates",
-      body: "Certificate validity dates don't match this VPU's clock. Check the Time Sync section first. A wrong system clock makes every secure connection fail. If the clock is right, the service's certificate has expired.",
+      body: "The certificate dates don't match this VPU's clock, so secure connections to these services fail. Check Time Sync first: a wrong clock breaks every secure connection. If the clock is right, the service's certificate has expired.",
       details: tlsCertTime.map(function(r) { return r.domain + ": valid until " + (r.notAfter || "unknown"); }),
     });
   }
@@ -4064,10 +3953,9 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
     issues.push({
       severity: "warning",
       title: tlsBlocked.length + " secure service" + (tlsBlocked.length === 1 ? "" : "s") + " couldn't be reached for the certificate check",
-      body: "These services didn't answer on port 443, so their certificates couldn't be verified. If they stay unreachable, ask the venue's IT team to allow them through the firewall.",
+      body: "These services didn't answer, so Pulse couldn't check their certificates. If they stay unreachable, ask venue IT to allow them through the firewall.",
       details: tlsBlocked.map(function(r) {
-        var impact = TLS_DOMAIN_IMPACT[r.domain] || "";
-        return r.domain + (impact ? ": " + impact : "");
+        return r.domain + (r.impact ? ": " + r.impact : "");
       }),
     });
   }
@@ -4083,28 +3971,17 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
   // 2026-08-28 — the log showed 201 killed handshakes, then recovery the
   // minute the district disabled packet inspection.
   if (lmiLog && !lmiLog.error && lmiLog.sslFailures > 0) {
-    var _lmiSpan = (lmiLog.firstSslFailure || "?") + " to " + (lmiLog.lastSslFailure || "?");
-    if (lmiLog.blockedNow) {
-      issues.push({
-        severity: "warning",
-        title: "LogMeIn's own log shows the venue killing its secure connection — remote support can't reach this VPU",
-        body: "LogMeIn's service log records " + lmiLog.sslFailures + " failed secure handshakes (" + _lmiSpan + ") and no successful gateway login since"
-          + (lmiLog.lastLogin ? " " + lmiLog.lastLogin : " the failures began")
-          + ". Every attempt dies the moment LogMeIn starts its TLS handshake — the signature of a firewall inspecting or category-blocking the connection. "
-          + "LogMeIn connects to control.lmi-app*.logmein.com gateways and uses TLS on port 80 as well as 443, so ask the venue's IT team to exempt *.logmein.com AND logmein.com from both SSL inspection and the web filter's category policy. An allowlist entry for secure.logmein.com alone will not cover the gateways. "
-          + "The timeline in C:\\ProgramData\\LogMeIn is evidence you can hand them.",
-        details: [
-          lmiLog.sslFailures + " secure handshakes killed across " + (lmiLog.attempts || 0) + " gateway connection attempts (last " + (lmiLog.windowDays || 7) + " days)",
-          "Last successful gateway login: " + (lmiLog.lastLogin || "none in the log"),
-        ],
-      });
-    } else {
+    // A current block is main.py's lmi-ssl-blocked finding (rendered above).
+    if (!lmiLog.blockedNow) {
       issues.push({
         severity: "info",
         title: "LogMeIn was being blocked on this network until " + (lmiLog.recoveredAt || lmiLog.lastLogin || "recently"),
-        body: "LogMeIn's service log records " + lmiLog.sslFailures + " killed secure handshakes (" + _lmiSpan + ") followed by a successful gateway login"
+        body: "LogMeIn was blocked here, then connected"
           + (lmiLog.recoveredAt ? " at " + lmiLog.recoveredAt : "")
-          + " — consistent with the venue disabling packet inspection or adding an exemption for logmein.com. Remote support works now, but if this VPU goes dark in LogMeIn again, the venue's web filter or SSL inspection policy is the first place to look.",
+          + ", so the venue likely changed its filter. Remote support works now. If this VPU drops out of LogMeIn again, check the venue's web filter first.",
+        evidence: "LogMeIn's own log shows " + lmiLog.sslFailures + " connections cut off between "
+          + (lmiLog.firstSslFailure || "?") + " and " + (lmiLog.lastSslFailure || "?")
+          + ", then a successful login.",
       });
     }
   }
@@ -4117,67 +3994,8 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
   function _portDetail(p) {
     var proto = (p.protocol || "TCP").toUpperCase();
     var impact = _netPortImpact(p);
-    return proto + "/" + p.port + " (" + (p.purpose || "") + ") to " + (p.host || "remote")
-      + (impact ? ". " + impact : "");
-  }
-
-  // Streaming verdict — three tiers off the failover chain (Zixi UDP/2088 →
-  // Zixi UDP/443 → RTMP TCP/1935). Keep the copy in sync with the findings
-  // main.py emits (stream-blocked / stream-degraded-rtmp /
-  // stream-resiliency-reduced).
-  var stream = _streamingHealth(ports);
-  function _rungDetail(p) {
-    var role = p.purpose === "Zixi Streaming" ? "the primary streaming connection"
-      : p.purpose === "Zixi Backup" ? "the backup streaming connection"
-      : "the last-resort RTMP fallback";
-    return (p.protocol || "UDP").toUpperCase() + " port " + p.port
-      + " to " + (p.host || "the streaming server") + ": " + role;
-  }
-  if (stream.dark) {
-    // (1) Every rung dead — the only tier that earns "can't broadcast".
-    issues.push({
-      severity: "critical",
-      title: "Streaming is blocked, so the VPU can't broadcast",
-      body: "The venue's network is blocking every path the VPU can use to send live video: the primary and "
-        + "backup streaming connections and the last-resort fallback. The game can't broadcast until at least "
-        + "one is unblocked. Ask the venue's IT or network team to open the connections below. On filters that "
-        + "classify traffic by destination, they need to allow the domain *.pixellot.stream, because broadcast "
-        + "servers rotate per event.",
-      details: stream.blocked.map(_rungDetail),
-    });
-  } else if (stream.degraded) {
-    // (2) Both Zixi/UDP rungs dead, RTMP reachable: games WILL air, but ~4 min
-    // late on the unprotected last resort. Urgent, but not "can't broadcast" —
-    // that wording burned a support case when a "blocked" venue streamed fine
-    // (Olympic WA, 2026-08-18).
-    issues.push({
-      severity: "critical",
-      title: "Streaming is degraded and running on the emergency fallback",
-      body: "The venue's network blocks both Zixi streaming connections, so broadcasts fall back to RTMP over "
-        + "TCP/1935. Games start roughly 4 minutes late and stream with no packet-loss protection. Ask the "
-        + "venue's IT or network team to open UDP 2088 and UDP 443 outbound. On filters that classify traffic "
-        + "by destination, they need to allow the domain *.pixellot.stream, because broadcast servers rotate per event.",
-      details: stream.blocked.map(_rungDetail),
-    });
-  } else if (stream.blocked.length > 0) {
-    // (3) Stream healthy on Zixi, but part of the chain is blocked — reduced
-    // resiliency, not an outage. Call out when the stream is already riding
-    // the backup (primary blocked): one rung from degraded.
-    var onBackup = !stream.rungs.some(function(p) {
-      return p.purpose === "Zixi Streaming" && (p.status || "").toLowerCase() === "pass";
-    });
-    issues.push({
-      severity: "warning",
-      title: onBackup ? "Streaming is riding its backup connection" : "Streaming resiliency is reduced",
-      body: (onBackup
-        ? "The primary streaming connection (UDP/2088) is blocked, so the stream rides the UDP/443 backup. "
-          + "Quality is unaffected, but it is one step from the degraded RTMP fallback. "
-        : "The stream is healthy, but part of its failover chain is blocked, so there is less to fall back on "
-          + "if the main connection runs into trouble during a game. ")
-        + "Ask the venue's IT or network team to unblock the connection"
-        + (stream.blocked.length === 1 ? "" : "s") + " below.",
-      details: stream.blocked.map(_rungDetail),
-    });
+    return (p.label || p.purpose || "Service") + " (" + proto + " " + p.port + " to " + (p.host || "remote") + ")"
+      + (impact ? ": " + impact : "");
   }
 
   // `_dnsResolving` (hoisted above with the DNS-server ping check) also gates
@@ -4199,7 +4017,7 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
   if (reqFailed.length > 0) {
     issues.push({ severity: "critical",
       title: reqFailed.length + " required service" + (reqFailed.length === 1 ? "" : "s") + " blocked",
-      body: "Ask the venue's IT team to allow these ports through the firewall and the VLAN policy.",
+      body: "The venue's network is blocking the services below. Ask venue IT to allow them through the firewall and the VLAN policy.",
       details: reqFailed.map(_portDetail) });
   }
 
@@ -4212,8 +4030,8 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
     if (sysBlocked.length) {
       issues.push({
         severity: "critical",
-        title: sysBlocked.length + " domain(s) blocked by configured DNS but reachable via Google DNS (8.8.8.8)",
-        body: "The local DNS resolver is filtering or failing on Pixellot infrastructure. Change the VPU's DNS servers to 8.8.8.8 / 8.8.4.4, or ask the venue's network admin to whitelist these hostnames.",
+        title: sysBlocked.length + (sysBlocked.length === 1 ? " domain" : " domains") + " blocked by configured DNS but reachable via Google DNS (8.8.8.8)",
+        body: "The venue's DNS can't look up these Pixellot addresses, though Google's can, so the VPU can't reach them. Switch the VPU's DNS to 8.8.8.8 and 8.8.4.4, or ask venue IT to allow these hostnames in their DNS filter.",
         details: sysBlocked.map(function(r) {
           return r.host + ": system says " + (r.system.error || "no answer") + "; Google says " + (r.google.resolvedTo || "nothing");
         }),
@@ -4227,8 +4045,8 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
     if (redirects.length) {
       issues.push({
         severity: "warning",
-        title: redirects.length + " domain(s) redirected by the local DNS to an internal IP",
-        body: "The configured resolver returned a private/internal address where Google DNS returned a public one. That usually means a captive portal or an SSL-inspection proxy, and Pixellot traffic may be intercepted. Have the venue bypass inspection for these hosts.",
+        title: redirects.length + (redirects.length === 1 ? " domain" : " domains") + " redirected by the local DNS to an internal IP",
+        body: "The venue's DNS is sending these Pixellot addresses to an internal server, which usually means a login page or an inspection proxy is in the way. Ask venue IT to bypass inspection for these hosts.",
         details: redirects.map(function(r) {
           return r.host + ": system says " + r.system.resolvedTo + " (internal); Google says " + r.google.resolvedTo;
         }),
@@ -4247,10 +4065,10 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
   if (domFailed.length > 0) {
     var domDetails = domFailed.map(function(d) {
       var impact = _netDomainImpact(d);
-      return d.domain + (impact ? ": " + impact : ": allow it through the firewall, the DNS allow-list, and the SSL inspection bypass");
+      return d.domain + (impact ? ": " + impact : ": allow it through the firewall, the DNS allow-list, and the SSL-decryption exemption list");
     });
     issues.push({ severity: "warning", title: domFailed.length + " of " + domTotal + " domains failed DNS resolution",
-      body: "Check DNS server settings on this adapter.",
+      body: "The VPU can't look up the addresses below, so it can't reach those services. Check the DNS server settings on the uplink adapter.",
       details: domDetails });
   }
 
@@ -4258,7 +4076,7 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
   var slowDns = (domains || []).filter(function(d) { return d.resolutionMs != null && d.resolutionMs > 500 && (d.status || "").toLowerCase() === "pass"; });
   if (slowDns.length > 0) {
     var slowDetails = slowDns.map(function(d) { return d.domain + ": " + d.resolutionMs + " ms"; });
-    issues.push({ severity: "info", title: slowDns.length + " domain(s) resolved slowly (>500 ms)",
+    issues.push({ severity: "info", title: slowDns.length + (slowDns.length === 1 ? " domain" : " domains") + " resolved slowly (over 500 ms)",
       body: "Slow DNS delays every connection. Switch to a faster DNS server.",
       details: slowDetails });
   }
@@ -4267,15 +4085,15 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
   var uStats = cfg.uplinkStats || {};
   if (uStats.fullDuplex === false)
     issues.push({ severity: "warning", title: "Uplink adapter running in half-duplex",
-      body: "Set both the VPU NIC and the switch port to auto-negotiate, or hard-set both to 1 Gbps full-duplex." });
+      body: "The uplink is running half-duplex, which slows every connection. Set both the VPU's network port and the switch port to auto-negotiate, or hard-set both to 1 Gbps full duplex." });
 
   // ── Adapter: interface errors ────────────────────────────
   var ifaceErrors = (uStats.rxErrors || 0) + (uStats.txErrors || 0);
   if (ifaceErrors > 0)
-    issues.push({ severity: "warning", title: ifaceErrors + " interface error(s) on uplink adapter",
-      body: "RX errors: " + (uStats.rxPacketErrors || 0) + ", RX discards: " + (uStats.rxDiscards || 0) +
-            ", TX errors: " + (uStats.txPacketErrors || 0) + ", TX discards: " + (uStats.txDiscards || 0) +
-            ". Try replacing the cable, switching ports, or updating the NIC driver." });
+    issues.push({ severity: "warning", title: ifaceErrors + (ifaceErrors === 1 ? " interface error" : " interface errors") + " on the uplink adapter",
+      body: "The uplink is dropping or damaging packets, which usually means a bad cable, switch port or driver. Try a new cable, a different switch port, or an updated network driver.",
+      evidence: "RX errors: " + (uStats.rxPacketErrors || 0) + ", RX discards: " + (uStats.rxDiscards || 0) +
+            ", TX errors: " + (uStats.txPacketErrors || 0) + ", TX discards: " + (uStats.txDiscards || 0) + "." });
 
   // Sort by severity: critical → warning → info
   issues.sort(function(a, b) { return _netIssueRank(a.severity) - _netIssueRank(b.severity); });
@@ -4449,7 +4267,7 @@ function renderNetwork() {
   const lmiLog = (data.lmiLog && !data.lmiLog.error) ? data.lmiLog : null;
   const ipConfigs = cfg.ipConfig || cfg.ipConfigurations || [];
 
-  const issues = _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, lmiLog);
+  const issues = _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, lmiLog, data.findings);
 
   const hasCrit = issues.some(function(f) { return f.severity === "critical"; });
   const hasWarn = issues.some(function(f) { return f.severity === "warning"; });
@@ -4504,7 +4322,7 @@ function renderNetwork() {
         <th>Port</th><th>Link</th><th>Speed</th><th>RX Err</th><th>TX Err</th>
       </tr></thead><tbody>
       ${wiredPorts.map(function(a) {
-        var roleLabel = a.role === "motherboard" ? "Motherboard (uplink)" : a.role === "camera" ? "Camera NIC" : "Wired";
+        var roleLabel = a.role === "motherboard" ? "Motherboard (uplink)" : a.role === "camera" ? "Camera card" : "Wired";
         var up = String(a.status || "").toLowerCase() === "up";
         var rxe = a.rxErrors || 0, txe = a.txErrors || 0;
         var rxNull = a.rxErrors == null, txNull = a.txErrors == null;
@@ -4530,18 +4348,12 @@ function renderNetwork() {
         ${issues.map(function(item) {
           var sc = item.severity === "critical" ? "sev-chip-crit" : item.severity === "warning" ? "sev-chip-warn" : item.severity === "info" ? "sev-chip-info" : "sev-chip-ok";
           var borderCls = item.severity === "critical" ? "net-issue-critical" : item.severity === "warning" ? "net-issue-warn" : "net-issue-info";
-          var detailsHtml = "";
-          if (item.details && item.details.length) {
-            detailsHtml = '<ul class="net-issue-details">' +
-              item.details.map(function(d) { return '<li>' + esc(d) + '</li>'; }).join("") +
-            '</ul>';
-          }
           return '<div class="net-issue-row ' + borderCls + '">' +
             '<span class="sev-chip ' + sc + '">' + esc(item.severity.toUpperCase()) + '</span>' +
             '<div class="net-issue-text">' +
               '<div class="net-issue-title">' + esc(item.title) + '</div>' +
               '<div class="net-issue-body">' + esc(item.body) + '</div>' +
-              detailsHtml +
+              _findingExtrasHtml(item, "net-issue-details") +
             '</div>' +
           '</div>';
         }).join("")}
@@ -4623,7 +4435,7 @@ function renderNetwork() {
         ${local && local.error
           ? '<p class="text-sm status-fail">Local network test failed: ' + esc(local.message || 'unknown error') + '</p>'
           : (local.gateway || local.dns)
-            ? _pingCardHtml(local.gateway, false) + _pingCardHtml(local.dns, _dnsResolvingFrom(domains, ports))
+            ? _pingCardHtml(local.gateway, cfg.internetReachable === true, "traffic is getting through") + _pingCardHtml(local.dns, _dnsResolvingFrom(domains, ports))
             : '<p class="text-pulse-muted text-sm mt-2">Select a ping count above to test local network health.</p>'}
       </div>
     </div>
@@ -4754,10 +4566,10 @@ function renderNetwork() {
            to say which one, or IT checks the wrong console. -->
       <div class="card">
         ${sectionTitle("shield", "Secure Connections (Filtering & SSL Inspection)")}
-        <p class="text-pulse-muted text-xs mb-3">What happens when the VPU opens each service's HTTPS connection. Port tests pass in both failure cases below, which is why they need their own check.<br>
-        <strong>Blocked by filter.</strong> The connection is reset as soon as the VPU names the site, which means a content filter has the domain on a blocked category list. Venue IT has to allow the domain in the web filter's category/URL policy. An SSL bypass will not do it.<br>
-        <strong>Intercepted.</strong> The firewall substituted its own certificate and is decrypting the traffic. Venue IT has to exempt the domain from SSL decryption, which is a bypass list, not an allowlist entry.<br>
-        Either way, use a wildcard <em>and</em> the bare domain (e.g. *.singular.live AND singular.live).</p>
+        <p class="text-pulse-muted text-xs mb-3">What happens when the VPU opens each service's secure connection. Port tests pass in both failure cases below, so they need their own check.<br>
+        <strong>Blocked by filter.</strong> A content filter cuts the connection the moment the VPU names the site. Venue IT has to add a category exception; an SSL-decryption exemption alone won't do it.<br>
+        <strong>Intercepted.</strong> The firewall is replacing the certificate and decrypting the traffic. Venue IT has to add the domain to the SSL-decryption exemption list; a URL allowlist entry alone won't do it.<br>
+        Either way, send IT the exact list in the finding above: it names a wildcard and the bare domain for each affected site.</p>
         ${(tls && tls.results && tls.results.length) ? `
           <table class="data-table"><thead><tr>
             <th>Service</th><th>Certificate issued by / why it failed</th><th>Status</th>
@@ -5000,7 +4812,7 @@ function _camDownGuidanceHtml(p, ctx) {
     var othersUp = ctx && ctx.total > 1 && ctx.upCount >= 1;
     var allDown = ctx && ctx.total > 1 && ctx.upCount === 0;
     if (allDown) {
-      msg = "No signal, and every camera port is down. That points to the network card, its driver, or power to the camera bank, not to one cable.";
+      msg = "No signal, and every camera port is down. That points to the camera card, its driver, or its power, not to one cable.";
     } else if (othersUp) {
       msg = "Check this cable (both ends) and the camera's power, then run Camera Connection Troubleshooting. The other ports are linked, so the problem is probably this cable, camera, or port, not the whole card.";
     } else {
@@ -5021,6 +4833,7 @@ function _camFindingsHtml(findings) {
           <span class="font-semibold text-sm">${esc(f.title)}</span>
         </div>
         <div class="cam-finding-body">${esc(f.body)}</div>
+        ${_findingExtrasHtml(f)}
       </div>`).join("")}
   </div>`;
 }
@@ -5115,14 +4928,9 @@ function _camNicDiagramHtml(ports, showLiveBadge, sysInfo) {
   if (nicDesc) headerLabel = svgIcon("cpu", 16) + ' ' + esc(nicDesc) + ' · ' + count + ' ports';
   else if (hasRealPorts) headerLabel = count + ' ports';
   else headerLabel = svgIcon("cpu", 16) + ' No NIC ports detected';
-  // System-type chip (S1/S2/S2S) + expected main-camera count, when known.
-  var sysChip = "";
-  if (sysInfo && sysInfo.expectedMainCameras) {
-    var sysName = sysInfo.systemType ? esc(sysInfo.systemType) + " · " : "";
-    var n = sysInfo.expectedMainCameras;
-    sysChip = '<span class="nic-sys-chip">' + sysName + n +
-      ' main camera' + (n === 1 ? '' : 's') + ' expected</span>';
-  }
+  // The system type and expected camera count used to ride here as a chip
+  // ("S2 · 2 main cameras expected"). The Cameras panel below shows both,
+  // with the picture, so the header stays the card's name.
   // Toggle to flip the LED row between upright (horizontal) and on-its-side
   // (vertical) so it matches however the VPU is physically mounted.
   var layoutToggle = hasRealPorts
@@ -5132,7 +4940,7 @@ function _camNicDiagramHtml(ports, showLiveBadge, sysInfo) {
         svgIcon("refresh", 12) + ' Flip layout</button>'
     : '';
   var nicHeader = '<div class="nic-diagram-header">' +
-    headerLabel + sysChip + layoutToggle +
+    headerLabel + layoutToggle +
     (showLiveBadge ? '<span id="cam-live-badge" class="cam-live-badge" aria-live="polite">Auto-Refresh</span>' : '') +
   '</div>';
   // Only show the physical-order note when we actually have NIC data;
@@ -5143,8 +4951,101 @@ function _camNicDiagramHtml(ports, showLiveBadge, sysInfo) {
   return nicHeader + '<div class="nic-diagram-wrap">' +
     '<div class="nic-diagram-ports' + (_camNicLayout === "v" ? " is-vertical" : "") + '">' + portIcons + '</div>' +
     '<div class="nic-diagram-legend' + (_camNicLayout === "v" ? " is-vertical" : "") + '">' + legend + '</div>' +
-    _camOrientationPanelHtml() +
+    // The two reference panels travel together: side by side when there is
+    // room, and wrapping as one unit under the port row when there isn't.
+    '<div class="nic-ref-panels">' + _camHeadPanelHtml(sysInfo) + _camOrientationPanelHtml() + '</div>' +
   '</div>' + note;
+}
+
+// What is on the other end of the camera cables, for someone on the phone
+// with a venue: the head on the pole, by system type. Get-CameraExpectations
+// infers the type from the Coordinator's camera count (4 = S1, 2 = S2,
+// 1 = S2S). Images are Pixellot's product renders, sized down for LogMeIn.
+var CAMERA_HEADS = {
+  S1:  { img: "/static/img/cameras/pixellot-s1.png",  w: 240, h: 360, what: "Four cameras in one head",
+         alt: "Pixellot S1 camera head: a tall white cylinder with four lenses" },
+  S2:  { img: "/static/img/cameras/pixellot-s2.png",  w: 360, h: 240, what: "Two cameras in one head",
+         alt: "Pixellot S2 camera head: a wide white housing with two lenses, one above the other" },
+  S2S: { img: "/static/img/cameras/pixellot-s2s.png", w: 360, h: 300, what: "One camera, with a junction box on the mount",
+         alt: "Pixellot S2S camera: a single white bullet camera on a wall mount with a junction box" },
+};
+
+// The scoreboard (OCR) camera looks the same at 100 Mbps and 1 Gbps.
+var SCOREBOARD_CAMERA = { img: "/static/img/cameras/pixellot-ocr.png", w: 360, h: 240,
+  alt: "Scoreboard camera: a white box camera with a single zoom lens" };
+
+function _camFigHtml(img, w, h, alt) {
+  return '<div class="cam-head-fig"><img src="' + img + '" width="' + w + '" height="' + h +
+    '" alt="' + esc(alt) + '" loading="lazy" decoding="async"></div>';
+}
+
+// "Expected" / "Connected" rows under each camera. The connected value takes
+// the status colour; the word carries the meaning on its own. `portsHtml`
+// lists where the cameras are plugged in, one line per port.
+function _camFactsHtml(expected, connectedText, tone, portsHtml) {
+  return '<dl class="cam-head-facts">' +
+    '<dt>Expected</dt><dd>' + esc(expected) + '</dd>' +
+    '<dt>Connected</dt><dd class="' + tone + '">' + esc(connectedText) + '</dd>' +
+    (portsHtml ? '<dt class="sr-only">Ports</dt><dd class="cam-head-ports">' + portsHtml + '</dd>' : '') +
+  '</dl>';
+}
+
+// "Port 1 at 1 Gbps", one line per port. A slow link says "Slow", the word
+// the port cards and the legend use for the same state.
+function _camPortLinesHtml(list) {
+  return (list || []).map(function(p) {
+    var line = esc(p.port || "A camera port") + (p.speedMbps ? " at " + esc(fmtSpeed(p.speedMbps)) : "") +
+      (p.cameras > 1 ? " (" + p.cameras + " cameras)" : "");
+    return p.slow
+      ? '<span class="status-warn">' + line + ' (Slow)</span>'
+      : '<span class="status-pass">' + line + '</span>';
+  }).join("");
+}
+
+function _camHeadPanelHtml(sysInfo) {
+  sysInfo = sysInfo || {};
+  var head = CAMERA_HEADS[sysInfo.systemType];
+  var sb = sysInfo.scoreboardCamera;
+  var n = sysInfo.expectedMainCameras, got = sysInfo.detectedMainCameras;
+  var known = typeof n === "number" && n > 0;
+  if (!head && !known && !sb) return "";
+  var cams = function(k) { return k + " main camera" + (k === 1 ? "" : "s"); };
+  var items = "";
+  if (head || known) {
+    var facts = "";
+    if (known) {
+      var tone = typeof got !== "number" ? "text-pulse-muted"
+        : got > n ? "text-pulse-muted"          // more than configured: not a pass Pulse can call
+        : got === n ? "status-pass" : got === 0 ? "status-fail" : "status-warn";
+      var conn = typeof got !== "number" ? "Checking"
+        : got > n ? cams(got) + ", more than configured"
+        : got === 0 ? "None" : got + " of " + n;
+      facts = _camFactsHtml(cams(n), conn, tone, _camPortLinesHtml(sysInfo.mainCameraPorts));
+    }
+    items += '<div class="cam-head-item">' +
+      (head ? _camFigHtml(head.img, head.w, head.h, head.alt) : "") +
+      '<div class="cam-head-name">' + (head ? "Pixellot " + esc(sysInfo.systemType) : "Main cameras") + '</div>' +
+      (head ? '<div class="orient-caption">' + esc(head.what) + '</div>' : "") +
+      facts + '</div>';
+  }
+  if (sb) {
+    // Only shown when a scoreboard camera is configured or present: many
+    // venues have none, and the panel must not imply one is missing.
+    var sbConn = sb.connected
+      ? (sb.port || "Connected") + (sb.speedMbps ? " at " + fmtSpeed(sb.speedMbps) : "")
+      : "Not connected";
+    items += '<div class="cam-head-item">' +
+      _camFigHtml(SCOREBOARD_CAMERA.img, SCOREBOARD_CAMERA.w, SCOREBOARD_CAMERA.h, SCOREBOARD_CAMERA.alt) +
+      '<div class="cam-head-name">Scoreboard camera</div>' +
+      '<div class="orient-caption">Reads the scoreboard for the on-screen score</div>' +
+      _camFactsHtml(sb.configured ? "1 scoreboard camera" : "Not set up",
+                    sbConn, sb.connected ? "status-pass" : "status-warn") +
+      '</div>';
+  }
+  return '<div class="nic-orient-panel cam-head-panel">' +
+    '<div class="nic-orient-title">Cameras</div>' +
+    '<div class="cam-head-items">' + items + '</div>' +
+  '</div>';
 }
 
 // Supplemental "which way is the VPU sitting?" reference, shown beside the
@@ -5501,7 +5402,7 @@ function _camPoeCardHtml(poe, ports) {
   if (!poe.supported) {
     return hdr +
       '<div class="cam-poe-note cam-poe-note-info">' +
-        '<div class="cam-poe-note-title">Not measurable on this camera NIC</div>' +
+        '<div class="cam-poe-note-title">Not measurable on this camera card</div>' +
         '<div class="cam-poe-note-body">' + esc(poe.reason || "") + "</div>" +
         (poe.cardLabel ? '<div class="cam-poe-note-meta font-mono">' + esc(poe.cardLabel) + "</div>" : "") +
       "</div>";
@@ -5526,12 +5427,12 @@ function _camPoeCardHtml(poe, ports) {
   var lowBanner = b.underPowered
     ? '<div class="cam-poe-note cam-poe-note-warn cam-poe-low">' +
         '<div class="cam-poe-note-title">PoE Molex disconnected or insufficient power</div>' +
-        '<div class="cam-poe-note-body">The card reports a total budget of ' + _camPoeW(b.totalW) +
-          ', below the ' + _camPoeW(b.healthyFloorW) + ' a healthy card provides. The supplementary ' +
-          'Molex power lead on the PoE card is most likely unplugged, so the card is running on slot ' +
-          'power alone and cannot power a full set of cameras. Power the VPU down, reseat the Molex ' +
-          'lead on the camera card, and re-check. VPU Manager reports this same fault as a failed ' +
-          'POE Power Test.</div>' +
+        '<div class="cam-poe-note-body">The camera card isn\'t getting its extra power, so it can\'t ' +
+          'run a full set of cameras. Its Molex power lead is most likely unplugged. Power the VPU ' +
+          'down, reseat that lead, then check again.</div>' +
+        '<div class="cam-poe-note-evidence">The card reports a ' + _camPoeW(b.totalW) + ' power budget; ' +
+          'a healthy card reports at least ' + _camPoeW(b.healthyFloorW) + '. VPU Manager shows the same ' +
+          'fault as a failed POE Power Test.</div>' +
       "</div>"
     : "";
 
@@ -5691,7 +5592,7 @@ function renderCameras() {
 
       <div id="cam-s1-wrap"></div>
 
-      <div class="card" id="cam-nic-diagram">${_camNicDiagramHtml(ports, true, {systemType: data.systemType, expectedMainCameras: data.expectedMainCameras})}</div>
+      <div class="card" id="cam-nic-diagram">${_camNicDiagramHtml(ports, true, {systemType: data.systemType, expectedMainCameras: data.expectedMainCameras, detectedMainCameras: data.detectedMainCameras, mainCameraPorts: data.mainCameraPorts, scoreboardCamera: data.scoreboardCamera})}</div>
 
       <div class="cam-port-grid" id="cam-port-grid">
         ${_camPortGridHtml(ports)}
@@ -5763,7 +5664,7 @@ function renderCameras() {
           });
         }
         var diag = document.getElementById("cam-nic-diagram");
-        if (diag) diag.innerHTML = _camNicDiagramHtml(freshPorts, true, {systemType: fresh.systemType, expectedMainCameras: fresh.expectedMainCameras});
+        if (diag) diag.innerHTML = _camNicDiagramHtml(freshPorts, true, {systemType: fresh.systemType, expectedMainCameras: fresh.expectedMainCameras, detectedMainCameras: fresh.detectedMainCameras, mainCameraPorts: fresh.mainCameraPorts, scoreboardCamera: fresh.scoreboardCamera});
         var fw = document.getElementById("cam-findings-wrap");
         if (fw) fw.innerHTML = _camFindingsHtml(fresh.findings || []);
       }

@@ -20,6 +20,24 @@ flow shows testers when a new build is available.
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 `Pulse.Web/VERSION`.
 
+## [1.3.1] - 2026-09-22
+
+### Added
+- Camera Connectivity shows a picture of the unit's camera head (S1, S2 or S2S) and of the scoreboard camera, with what the unit expects and what's actually connected, so you can match it to what's on the pole when talking someone through it.
+
+### Changed
+- A non-US time zone now says why it matters: the VPU may go on air or off air at the wrong time.
+- Stream Readiness now fails a unit that is set to a non-US time zone, or that has a required Pixellot service blocked (cloud services, NFHS scheduling, on-screen graphics, clock sync, remote support). Internet plugged into a camera port is now a risk for tonight; it was being reported as "Worth knowing".
+- Findings are now written to be read to the school over the phone: what's wrong and what it breaks, then what to do and who does it. The exact ports and domains sit on their own **For venue IT** line, and the evidence behind the verdict is under a collapsed **How Pulse knows**. Copy for ticket pastes all three, labelled, so the IT line can go straight into an email.
+- The Network Test card and the Dashboard now show the same wording for each network finding. They used to be written separately and had drifted apart.
+- The SSL-inspection and web-filter findings on Network Test are now three short sentences, and end with the exact domains to send venue IT (for example *.pixellot.tv, pixellot.tv) instead of a singular.live example that often wasn't the broken site.
+
+### Fixed
+- Stream Readiness no longer says **Game-ready** when no cameras are connected. A camera port carrying the internet cable no longer counts as a camera, the check runs even when the Coordinator doesn't say how many cameras to expect, and Camera Connectivity now shows the same **No main cameras detected** finding as the Dashboard.
+- The Dashboard verdict now updates on its own. It re-checks the cameras about a minute after Pulse starts, and again whenever a camera cable is plugged in, moved or unplugged, instead of keeping the first reading until someone clicks Refresh.
+- The gateway ping card no longer shows red when the gateway simply ignores ping but traffic is getting through, and the DNS card no longer shows FAIL in the same situation. Both now read **Ping blocked**.
+- The camera details note no longer shows the camera admin login on screen.
+
 ## [1.3.0] - 2026-09-22
 
 ### Fixed
