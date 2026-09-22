@@ -1847,6 +1847,23 @@ html.dark .channel-moved-banner {
 .orient-acpin { fill: var(--c-muted); }
 .orient-caption { font-size: 0.66rem; line-height: 1.5; color: var(--c-muted); }
 .orient-caption strong { color: var(--c-text); font-weight: 600; }
+/* Camera-head reference panel: the head on the pole for this system type.
+   Pixellot's renders are white on transparent, so they sit on the recessed
+   surface; on a plain white card they would vanish in the light theme. */
+.nic-ref-panels { display: flex; gap: 16px; align-items: stretch; flex-wrap: wrap; justify-content: center; }
+.nic-ref-panels > .nic-orient-panel { margin-left: 0; }
+.cam-head-panel { width: 200px; display: flex; flex-direction: column; }
+.cam-head-fig {
+    height: 132px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--c-surface-2);
+    border-radius: 6px;
+    padding: 8px;
+    margin-bottom: 8px;
+}
+.cam-head-fig img { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; }
+.cam-head-name { font-size: 0.8rem; font-weight: 600; color: var(--c-text); margin-bottom: 2px; }
+.cam-head-count { font-size: 0.72rem; font-weight: 600; margin-top: 6px; }
 .nic-diagram-ports {
     display: flex;
     gap: 48px;

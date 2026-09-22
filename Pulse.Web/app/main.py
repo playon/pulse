@@ -3330,27 +3330,13 @@ def _flag_uplink_ports(ports: list, network_config) -> None:
 CAM_COUNT_PENDING = "cam-count-pending"
 
 
-def _camera_count_findings(ports, expected_main, probe_results, probes_attempted) -> list:
-    """cam-none / cam-partial, or cam-count-pending while a cold start makes
-    zero ambiguous. `ports` are enriched and uplink-flagged. Returns a list
-    so both callers can extend with it."""
-    if not ports and not (isinstance(expected_main, int) and expected_main > 0):
-        # No camera card and no configured count: a non-VPU host, or a card
-        # that isn't on the bus (its own finding). Nothing to count against.
-        return []
-    known = isinstance(expected_main, int) and expected_main > 0
-    # Every VPU broadcasts from at least one main camera, so zero is a fault
-    # even when the Coordinator's expected count is unavailable.
-    expected = expected_main if known else 1
-
-    # A port carrying the venue's internet cable is not a camera port: its
-    # link proves nothing about cameras, and anything on it is the venue LAN.
-    cam_ports = [p for p in ports if not p.get("hasInternetUplink")]
-    uplinks = [p for p in ports if p.get("hasInternetUplink")]
-
+def _count_main_cameras(ports, probe_results) -> int:
+    """Main cameras present on the camera card: the better of the ARP count
+    and the CGI probe count. Ports carrying the internet uplink are skipped;
+    their link and neighbours are the venue LAN, not cameras."""
     detected_main = 0
-    for p in cam_ports:
-        if not p.get("isUp") or p.get("isOcr"):
+    for p in ports:
+        if p.get("hasInternetUplink") or not p.get("isUp") or p.get("isOcr"):
             continue
         for c in (p.get("camerasDetected") or []):
             if "OCR" not in (c.get("role") or ""):
@@ -3374,7 +3360,28 @@ def _camera_count_findings(ports, expected_main, probe_results, probes_attempted
             )
         if not probe_is_ocr:
             probe_main += 1
-    detected_main = max(detected_main, probe_main)
+    return max(detected_main, probe_main)
+
+
+def _camera_count_findings(ports, expected_main, probe_results, probes_attempted) -> list:
+    """cam-none / cam-partial, or cam-count-pending while a cold start makes
+    zero ambiguous. `ports` are enriched and uplink-flagged. Returns a list
+    so both callers can extend with it."""
+    if not ports and not (isinstance(expected_main, int) and expected_main > 0):
+        # No camera card and no configured count: a non-VPU host, or a card
+        # that isn't on the bus (its own finding). Nothing to count against.
+        return []
+    known = isinstance(expected_main, int) and expected_main > 0
+    # Every VPU broadcasts from at least one main camera, so zero is a fault
+    # even when the Coordinator's expected count is unavailable.
+    expected = expected_main if known else 1
+
+    # A port carrying the venue's internet cable is not a camera port: its
+    # link proves nothing about cameras, and anything on it is the venue LAN.
+    cam_ports = [p for p in ports if not p.get("hasInternetUplink")]
+    uplinks = [p for p in ports if p.get("hasInternetUplink")]
+
+    detected_main = _count_main_cameras(ports, probe_results)
     if detected_main >= expected:
         return []
 
@@ -4184,6 +4191,9 @@ async def api_cameras(refresh: bool = False):
         "findings": count_findings + _compute_camera_findings(ports, poe),
         "systemType": system_type,
         "expectedMainCameras": expected_main,
+        # The same count the camera-count finding uses, for the camera-head
+        # panel ("0 of 2 main cameras connected").
+        "detectedMainCameras": _count_main_cameras(ports, probe_results),
         # Whole collector payload, not just the readings — the frontend needs
         # supported/available/reason to tell "this NIC family can't measure
         # power" apart from "the driver isn't installed" apart from "measured,

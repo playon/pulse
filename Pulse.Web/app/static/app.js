@@ -4956,8 +4956,49 @@ function _camNicDiagramHtml(ports, showLiveBadge, sysInfo) {
   return nicHeader + '<div class="nic-diagram-wrap">' +
     '<div class="nic-diagram-ports' + (_camNicLayout === "v" ? " is-vertical" : "") + '">' + portIcons + '</div>' +
     '<div class="nic-diagram-legend' + (_camNicLayout === "v" ? " is-vertical" : "") + '">' + legend + '</div>' +
-    _camOrientationPanelHtml() +
+    // The two reference panels travel together: side by side when there is
+    // room, and wrapping as one unit under the port row when there isn't.
+    '<div class="nic-ref-panels">' + _camHeadPanelHtml(sysInfo) + _camOrientationPanelHtml() + '</div>' +
   '</div>' + note;
+}
+
+// What is on the other end of the camera cables, for someone on the phone
+// with a venue: the head on the pole, by system type. Get-CameraExpectations
+// infers the type from the Coordinator's camera count (4 = S1, 2 = S2,
+// 1 = S2S). Images are Pixellot's product renders, sized down for LogMeIn.
+var CAMERA_HEADS = {
+  S1:  { img: "/static/img/cameras/pixellot-s1.png",  w: 240, h: 360, what: "Four cameras in one head",
+         alt: "Pixellot S1 camera head: a tall white cylinder with four lenses" },
+  S2:  { img: "/static/img/cameras/pixellot-s2.png",  w: 360, h: 240, what: "Two cameras in one head",
+         alt: "Pixellot S2 camera head: a wide white housing with two lenses, one above the other" },
+  S2S: { img: "/static/img/cameras/pixellot-s2s.png", w: 360, h: 300, what: "One camera, with a junction box on the mount",
+         alt: "Pixellot S2S camera: a single white bullet camera on a wall mount with a junction box" },
+};
+
+function _camHeadPanelHtml(sysInfo) {
+  var head = sysInfo && CAMERA_HEADS[sysInfo.systemType];
+  if (!head) return "";
+  var n = sysInfo.expectedMainCameras, got = sysInfo.detectedMainCameras;
+  var count = "";
+  if (typeof n === "number" && n > 0 && typeof got === "number") {
+    var cams = function(k) { return k + " main camera" + (k === 1 ? "" : "s"); };
+    // More than configured isn't a pass or a fault Pulse can call: say it
+    // plainly in neutral text rather than a green "5 of 2".
+    if (got > n) {
+      count = '<div class="cam-head-count text-pulse-muted">' + cams(got) + " connected, " + n + " expected</div>";
+    } else {
+      var tone = got === n ? "status-pass" : got === 0 ? "status-fail" : "status-warn";
+      count = '<div class="cam-head-count ' + tone + '">' + got + " of " + cams(n) + " connected</div>";
+    }
+  }
+  return '<div class="nic-orient-panel cam-head-panel">' +
+    '<div class="nic-orient-title">Camera head</div>' +
+    '<div class="cam-head-fig"><img src="' + head.img + '" width="' + head.w + '" height="' + head.h +
+      '" alt="' + esc(head.alt) + '" loading="lazy" decoding="async"></div>' +
+    '<div class="cam-head-name">Pixellot ' + esc(sysInfo.systemType) + '</div>' +
+    '<div class="orient-caption">' + esc(head.what) + '</div>' +
+    count +
+  '</div>';
 }
 
 // Supplemental "which way is the VPU sitting?" reference, shown beside the
@@ -5504,7 +5545,7 @@ function renderCameras() {
 
       <div id="cam-s1-wrap"></div>
 
-      <div class="card" id="cam-nic-diagram">${_camNicDiagramHtml(ports, true, {systemType: data.systemType, expectedMainCameras: data.expectedMainCameras})}</div>
+      <div class="card" id="cam-nic-diagram">${_camNicDiagramHtml(ports, true, {systemType: data.systemType, expectedMainCameras: data.expectedMainCameras, detectedMainCameras: data.detectedMainCameras})}</div>
 
       <div class="cam-port-grid" id="cam-port-grid">
         ${_camPortGridHtml(ports)}
@@ -5576,7 +5617,7 @@ function renderCameras() {
           });
         }
         var diag = document.getElementById("cam-nic-diagram");
-        if (diag) diag.innerHTML = _camNicDiagramHtml(freshPorts, true, {systemType: fresh.systemType, expectedMainCameras: fresh.expectedMainCameras});
+        if (diag) diag.innerHTML = _camNicDiagramHtml(freshPorts, true, {systemType: fresh.systemType, expectedMainCameras: fresh.expectedMainCameras, detectedMainCameras: fresh.detectedMainCameras});
         var fw = document.getElementById("cam-findings-wrap");
         if (fw) fw.innerHTML = _camFindingsHtml(fresh.findings || []);
       }
