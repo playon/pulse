@@ -17,9 +17,9 @@ try {
     #  - prod-echo.pixellot.tv covers TCP 443 + UDP 123/443/2088 per the CSV;
     #    we hit those specific subdomain entries in addition to the wider
     #    pixellot.tv apex test (some venues filter on FQDN, not IP).
-    #  - scorebot.sportzcast.net binds to TCP 1400-1405 for ScoreConnect; the
-    #    range is venue-dependent so every port is marked optional. Not all
-    #    schools have ScoreConnect.
+    #  - scorebot.sportzcast.net (TCP 1400-1405) is NOT tested. It was, as
+    #    optional rows, until the range was dropped -- see the note in the
+    #    port list below.
     # Discover the VPU's configured DNS server so the DNS check tests the
     # resolver the box actually uses -- not a hardcoded public IP like 8.8.8.8,
     # which locked-down venue networks block by design (the VPU resolves names
@@ -83,13 +83,16 @@ try {
         # destination-aware filter could still block pixellot.stream while
         # allowing this. Revisit if Pixellot ever adds 1935 to prod-echo.
         @{ protocol = 'TCP'; port = 1935; host = 'a.rtmp.youtube.com';     purpose = 'RTMP Fallback';     optional = $false }
-        # Optional -- Sportzcast Scorebot range (ScoreConnect deployments only)
-        @{ protocol = 'TCP'; port = 1400; host = 'scorebot.sportzcast.net'; purpose = 'Scorebot';         optional = $true }
-        @{ protocol = 'TCP'; port = 1401; host = 'scorebot.sportzcast.net'; purpose = 'Scorebot';         optional = $true }
-        @{ protocol = 'TCP'; port = 1402; host = 'scorebot.sportzcast.net'; purpose = 'Scorebot';         optional = $true }
-        @{ protocol = 'TCP'; port = 1403; host = 'scorebot.sportzcast.net'; purpose = 'Scorebot';         optional = $true }
-        @{ protocol = 'TCP'; port = 1404; host = 'scorebot.sportzcast.net'; purpose = 'Scorebot';         optional = $true }
-        @{ protocol = 'TCP'; port = 1405; host = 'scorebot.sportzcast.net'; purpose = 'Scorebot';         optional = $true }
+        # The Sportzcast Scorebot range (TCP/1400-1405) used to be probed here
+        # as six optional rows. Removed: nothing on the VPU requires it, so
+        # six tiles that can never fail readiness were six-sevenths of the
+        # Optional section and read to a tier-1 agent as more ports to
+        # understand. Scoreboard health is covered properly by the
+        # ScoreConnect tab, which tests the thing that actually matters (the
+        # bot connection and the live feed) rather than egress to a port
+        # range. sportzcast.net has since been dropped from the
+        # domain-reachability list too, so Pulse no longer probes Sportzcast
+        # at all.
     )
 
     # DNS reachability against the *configured* resolver (prepended so it
@@ -105,9 +108,11 @@ try {
     # against one shared deadline when the loop reaches each row. Probing
     # sequentially made the script's runtime scale with the number of DEAD
     # targets (~3s each): when Sportzcast's six Scorebot/RTMP endpoints went
-    # dark in July 2026, the port sweep ballooned to ~20s and froze the
-    # splash checklist, which gates on the dashboard. Concurrent probes cap
-    # the whole TCP set at the single budget below no matter how many die.
+    # dark in July 2026 the port sweep ballooned to ~20s and froze the splash
+    # checklist, which gates on the dashboard. Those six rows are gone now,
+    # but the design stands -- any dead target costs the same, and concurrent
+    # probes cap the whole TCP set at the single budget below no matter how
+    # many die.
     $tcpBudgetMs = 4000
 
     # Pre-warm the .NET thread pool before racing the connects. Each

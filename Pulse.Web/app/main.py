@@ -1790,23 +1790,43 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
         label = f"{letter}: ({role})" if role else (
             letter if len(letter) > 1 else f"{letter}:")
         name = f"Drive {letter}:" if len(letter) == 1 else "Disk"
+        # D: is classed info (see F15b), so its title has to carry the
+        # consequence — "Worth knowing" next to a bare "Drive D: almost full"
+        # reads as ignorable, and losing the school's recording is not. This
+        # is a suffix on the finished title, not on `name`: `name` is
+        # interpolated as f"{name} almost full" below.
+        title_tail = " — recordings may not save" if letter == "D" else ""
         if pct > 90:
             # At >90% on D: the Disks page shows the Storage Cleanup card —
             # point the tech straight at it instead of a vague "clear VODs".
             cleanup_hint = (
                 "The Disks page can clear space for you: open Disks and use "
                 "Storage Cleanup." if letter == "D" else None)
+            # Readiness gates C: and D: through its own per-drive checks
+            # (F15a/F15b below), because a blocker on C: and a risk on D: is
+            # not the same call. That left one full drive described by two
+            # records: this finding, and readiness' own entry. The policy
+            # table classed this one `info` to stop it double-counting in the
+            # rollup, and the dashboard then rendered a full recording drive
+            # as "Worth knowing" while the same card counted it as a risk one
+            # line above.
+            #
+            # Say which record wins, in the data, instead of leaving each
+            # layer to infer it: readiness drops the superseded copy from its
+            # audit record, and the UI takes the tone of the entry named here.
+            superseded_by = {"C": "disk-c-critical", "D": "disk-d-critical"}.get(letter)
             findings.append(
                 {
                     "code": "disk-critical",
                     "severity": "critical",
                     "category": "Storage",
-                    "title": f"{name} almost full",
+                    "title": f"{name} almost full{title_tail}",
                     "recommendation": " ".join(filter(None, [
                         f"Free up space now. {label} is {pct:g}% full.",
                         consequence,
                         cleanup_hint,
                     ])),
+                    **({"supersededBy": superseded_by} if superseded_by else {}),
                 }
             )
         # No warning tier below 90% — disk fill alerts are critical-only.
@@ -2537,7 +2557,11 @@ _READINESS_POLICY = {
     "mem-elevated":          "info",     # F20 80–90% snapshot
     "cpu-critical":          "info",     # snapshot >90% — readiness uses the average (F17)
     "mem-critical":          "info",     # snapshot >90% — readiness uses the average (F19)
-    "disk-critical":         "info",     # a volume >90% — readiness gates via its own F15a/b
+    # Kept classified so test_every_critical_finding_code_is_classified holds,
+    # but for C:/D: the finding carries supersededBy and never reaches here --
+    # F15a/F15b report those drives at their own class. This entry is the
+    # fallback for any OTHER volume >90%.
+    "disk-critical":         "info",
     "disk-smart-wear":       "info",     # SSD ≥80% rated life — heads-up, won't stop tonight's game
     "temp-critical":         "info",     # 85°C snapshot — readiness gate is 90°C (F14)
     "tz-non-us":             "info",     # F25
@@ -2624,6 +2648,11 @@ def _compute_readiness(findings, performance=None, disk_health=None,
     # (1) Finding-derived classes, straight from the policy table.
     for f in (findings or []):
         code = f.get("code") or ""
+        # A finding that names its successor is the same condition a
+        # readiness-specific check below reports at the right class. Adding it
+        # too would put one full drive in the record twice, once as `info`.
+        if f.get("supersededBy"):
+            continue
         add(_readiness_class(code), code, f.get("title", ""),
             f.get("recommendation", ""), f.get("category", ""))
 
@@ -2657,9 +2686,23 @@ def _compute_readiness(findings, performance=None, disk_health=None,
                 f"Temperature at {temp:g}°C. Sustained heat throttles the encoder "
                 f"and risks frame drops. Check airflow and fans.", "Hardware")
 
-    # F15a/b — C:/D: by drive letter (C: is stream-processing → blocker;
-    # D: is post-event VOD storage → risk). Critical-only: the old 80–90%
+    # F15a/b — C:/D: by drive letter. Critical-only: the old 80–90%
     # `disk-c-low` risk band was removed along with the disk-low finding.
+    #
+    # C: is a blocker and D: is INFO, and the asymmetry is the whole point.
+    # Readiness answers one question — can this VPU stream tonight's game —
+    # and the live stream is processed on C: (see drive_roles above), so a
+    # full C: can stop capture. Nothing in the broadcast path touches D:; it
+    # holds the post-event VOD. A 91%-full D: cannot stop or degrade a
+    # broadcast, so calling it a risk overstated it, and calling it a blocker
+    # (which the display briefly did) was simply wrong.
+    #
+    # It is not nothing, though: a full D: means the school loses its
+    # recording. That consequence rides in the title rather than in the
+    # severity, so "Worth knowing" cannot be read as "ignore this", and the
+    # Disks tab still renders any volume over 90% as Critical on its own
+    # (app.js ~6115) — so a tech working storage sees the urgency there,
+    # where the fix is.
     c_pct, d_pct = _disk_used_by_letter(disk_health, performance)
     if isinstance(c_pct, (int, float)) and c_pct > 90:
         add("blocker", "disk-c-critical", "System drive (C:) almost full",
@@ -2667,7 +2710,8 @@ def _compute_readiness(findings, performance=None, disk_health=None,
             f"fills, the VPU can't process the broadcast. Free space on C: now.",
             "Storage")
     if isinstance(d_pct, (int, float)) and d_pct > 90:
-        add("risk", "disk-d-critical", "Recording drive (D:) almost full",
+        add("info", "disk-d-critical",
+            "Recording drive (D:) almost full — recordings may not save",
             f"D: is {d_pct:g}% full. The post-event recording (VOD) is written to "
             f"D:. If it fills during the game the recording may not save. Free "
             f"space on D:.", "Storage")

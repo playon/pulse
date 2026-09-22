@@ -53,6 +53,8 @@ function svgIcon(name, size) {
     "id-card": '<path d="M16 10h2"/><path d="M16 14h2"/><path d="M6.17 15a3 3 0 0 1 5.66 0"/><circle cx="9" cy="11" r="2"/><rect x="2" y="5" width="20" height="14" rx="2"/>',
     package: '<path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="M3.3 7 12 12l8.7-5"/><path d="M12 22V12"/>',
     power: '<path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/>',
+    square: '<rect x="4" y="4" width="16" height="16" rx="2"/>',
+    "arrow-left": '<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>',
   };
   return `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${p[name] || ""}</svg>`;
 }
@@ -181,12 +183,20 @@ function updateNavHealth() {
     const h = health[el.dataset.page];
     if (h === "Critical" || h === "Warning") {
       slot.className = "nav-status " + (h === "Critical" ? "nav-status-crit" : "nav-status-warn");
-      slot.innerHTML = svgIcon("triangle", 14);
-      slot.title = h;
+      // The glyph is identical for both levels; only its colour differs. Give
+      // the marker a real accessible name so the level does not rest on
+      // colour alone, and match the Dashboard's wording.
+      var word = h === "Critical" ? "Stops tonight's game" : "Risk tonight";
+      slot.innerHTML = svgIcon("triangle", 14) + '<span class="sr-only">' + word + '</span>';
+      slot.setAttribute("role", "img");
+      slot.setAttribute("aria-label", word);
+      slot.title = word;
     } else {
       slot.className = "nav-status";
       slot.innerHTML = "";
       slot.removeAttribute("title");
+      slot.removeAttribute("role");
+      slot.removeAttribute("aria-label");
     }
   });
 }
@@ -309,17 +319,94 @@ function badge(text, type) {
   return `<span class="inline-block px-2 py-0.5 rounded text-xs font-medium badge-${esc(type)}">${esc(text)}</span>`;
 }
 
+// Link speed in the unit a tech says out loud. There was no shared formatter:
+// _renderNicRows inlined this ternary and the fault isolator has its own copy
+// nested inside another function, so it was not reachable from here.
+// "OCR" -> the words a tech uses, at the DISPLAY layer only.
+//
+// The data value must not change. `role` comes from Pixellot's cameras.cfg on
+// a real unit and the backend pattern-matches the substring to identify the
+// scoreboard camera at all (main.py:1991, 2390, 2406, and the model table at
+// 445 maps R2SD-G/S5SD-G/E8NC-G to "OCR / Scoreboard"). Renaming it would
+// break camera identification app-wide. So translate on the way out.
+//
+// The variants carry real meaning and are preserved:
+//   OCR        the 100 Mbps scoreboard camera
+//   OCR-1G     the E8NC-G 1 Gbps variant -- a 100 Mbps link on THIS one is
+//              genuinely degraded, which is why the suffix exists
+//   OCR 2      a second scoreboard camera, index kept
+function camRoleLabel(v) {
+  var s = String(v == null ? "" : v);
+  if (!s || s.indexOf("OCR") === -1) return s;
+  var suffix = s.replace(/^.*?OCR(-1G)?/, "").trim();   // "", "2", "/ Scoreboard"
+  var base = /OCR-1G/.test(s) ? "Scoreboard (1 Gbps)" : "Scoreboard";
+  // "OCR / Scoreboard" from the model table already says scoreboard; drop the
+  // redundant tail rather than printing "Scoreboard / Scoreboard".
+  if (/^\/?\s*Scoreboard$/i.test(suffix)) suffix = "";
+  return suffix ? base + " " + suffix : base;
+}
+
+function fmtSpeed(mbps) {
+  if (!mbps) return "\u2014";
+  return mbps >= 1000 ? (mbps / 1000) + " Gbps" : mbps + " Mbps";
+}
+
 function statusBadge(status) {
   const s = (status || "").toLowerCase();
   const cap = (status || "").charAt(0).toUpperCase() + (status || "").slice(1);
   if (s === "running" || s === "up" || s === "pass" || s === "ok" || s === "healthy")
     return badge(cap, "pass");
-  if (s === "stopped" || s === "down" || s === "fail" || s === "critical")
+  // "error" belongs here: Get-DiskHealth.ps1:94 emits Critical|Error|Warning
+  // and app.js renders statusBadge(e.level), so without this case a disk
+  // ERROR event fell through to muted -- grey, and calmer on screen than the
+  // amber WARNING next to it. severityChip has always mapped error to red.
+  // "unhealthy": Get-DiskHealth.ps1:54 passes MSFT_PhysicalDisk.HealthStatus
+  // through verbatim (Healthy|Warning|Unhealthy|Unknown). Without this case a
+  // failing SMART drive showed a grey pill in the Disks table while
+  // main.py:1830 was already raising it as a CRITICAL dashboard finding --
+  // two screens, opposite verdicts on the same drive.
+  if (s === "stopped" || s === "down" || s === "fail" || s === "critical" ||
+      s === "error" || s === "unhealthy")
     return badge(cap, "fail");
-  if (s === "warning" || s === "warn" || s === "degraded")
+  // "paused": Get-Services.ps1:111 emits $svc.Status.ToString() verbatim, so
+  // a paused Pixellot service is neither running nor stopped.
+  if (s === "warning" || s === "warn" || s === "degraded" || s === "paused")
     return badge(cap, "warn");
   if (s === "notfound") return badge("Not Found", "muted");
   return badge(cap || "Unknown", "muted");
+}
+
+// -- The severity vocabulary -----------------------------------------
+// ONE set of words for "how bad is this", framed the way a tier-1 agent
+// has to think about it: is tonight's game in danger, yes or no.
+//
+// The product used to carry two unreconciled severity vocabularies on one
+// screen. The readiness card spoke blockers/risks (its policy language,
+// _compute_readiness in main.py) while the findings list beside it spoke
+// CRITICAL/WARNING (the collector language), so a dashboard could read
+// "0 blockers - 2 risks" directly above "[CRITICAL] Streaming is degraded".
+// Both were correct in their own terms and the pair was unreadable: the
+// first thing an agent sees gave two answers to "is this unit OK".
+//
+// The codes stay exactly as they are on the wire and in the audit record
+// (main.py:4840 exports blockers/risks by code). Only the display collapses.
+var VERDICT = {
+  critical: { word: "Stops tonight's game", tone: "critical" },
+  warning:  { word: "Risk tonight",         tone: "warning"  },
+  info:     { word: "Worth knowing",        tone: "info"     },
+};
+// Collector synonyms. main.py emits "warning" 25 times and "warn" once
+// (main.py:3961); before this map that single finding rendered with no
+// colour at all -- .finding-cat-warn and .finding-dot-warn have no rule,
+// so the chip fell back to grey and the dot to no background.
+var _VERDICT_ALIAS = { warn: "warning", critical: "critical", fail: "critical", error: "critical", info: "info" };
+
+// Severity code -> the one display record. Anything unmapped degrades to
+// neutral and SAYS so, rather than borrowing a colour it did not earn.
+function verdictFor(severity) {
+  var s = (severity || "").toLowerCase();
+  s = _VERDICT_ALIAS[s] || s;
+  return VERDICT[s] || { word: "Unknown - report this", tone: "info" };
 }
 
 function loading() {
@@ -364,6 +451,14 @@ function gauge(label, value, unit, color, opts) {
       : raw > warnAt
         ? "var(--c-accent-amber)"
         : color || "var(--c-accent-blue)";
+  // The ring has always coloured itself against these thresholds, and that was
+  // the only thing saying whether a number was OK. A tier-1 agent looking at
+  // "64%" cannot tell good from bad, and a blue ring reads as "fine" by
+  // default -- so the gauges were six identical-looking dials carrying no
+  // verdict. Say it in a word, which also means the state no longer rests on
+  // colour alone.
+  const state = raw > critAt ? "crit" : raw > warnAt ? "warn" : "ok";
+  const stateWord = state === "crit" ? "Too high" : state === "warn" ? "Running high" : "Normal";
   return `<div class="flex flex-col items-center gap-2">
     <div class="relative" style="width:7rem;height:7rem">
       <svg viewBox="0 0 100 100" class="w-full h-full">
@@ -377,6 +472,7 @@ function gauge(label, value, unit, color, opts) {
       </div>
     </div>
     <span class="text-xs text-pulse-muted font-medium">${esc(label)}</span>
+    ${value != null ? `<span class="gauge-verdict gauge-verdict-${state}">${esc(stateWord)}</span>` : ""}
   </div>`;
 }
 
@@ -1287,7 +1383,7 @@ function renderCameraHardware() {
 
   $page().innerHTML = `
     ${pageHeader("Camera Hardware",
-      "Full CGI probe of every camera head on an active port: identity, firmware, network, stream, and sensor settings.",
+      "Everything each camera reports about itself: identity, firmware, network, stream, and sensor settings.",
       `<button class="btn-outline btn-ol-blue" onclick="_camHwRefresh()">${svgIcon("refresh", 14)} Refresh</button>`)}
 
     <div class="card">
@@ -1319,10 +1415,33 @@ function _camHardwareCard(c, port) {
   var sensor = c.sensor || {};
   var portLabel = port ? (port.portLabel || port.name) : null;
 
+  // A one-line headline per camera. These cards are ~30 fields each and six
+  // of them differ only in the last octet of an IP, so scanning them at 11pm
+  // meant reading everything to learn nothing.
+  //
+  // It states WHAT WAS CHECKED, not a health verdict. Pulse observes exactly
+  // two things here -- whether the camera answers its HTTP admin probe, and
+  // whether the port negotiated the speed this model expects. A camera can
+  // fail the admin probe and still stream fine over RTSP, so the copy must
+  // not promote either signal into "this camera is broken"/"this camera is
+  // healthy".
+  var headline, headlineCls;
+  if (port && port.isUp === false) {
+    headline = "No link on this port"; headlineCls = "cam-hl-bad";
+  } else if (!hasCgi) {
+    headline = "Not answering admin requests"; headlineCls = "cam-hl-warn";
+  } else if (port && port.linkSpeedMbps && c.expectedSpeedMbps
+             && port.linkSpeedMbps < c.expectedSpeedMbps) {
+    headline = "Link is slow: " + fmtSpeed(port.linkSpeedMbps)
+      + ", expected " + fmtSpeed(c.expectedSpeedMbps); headlineCls = "cam-hl-warn";
+  } else {
+    headline = "Answering, link at full speed"; headlineCls = "cam-hl-ok";
+  }
+
   var deviceRows =
     _camDetailKv("IP", c.ip) +
     _camDetailKv("MAC", c.cgiMac || c.mac) +
-    _camDetailKv("Role", c.role) +
+    _camDetailKv("Role", camRoleLabel(c.role)) +
     _camDetailKv("Identity", c.identitySource);
   if (hasCgi) {
     deviceRows +=
@@ -1340,8 +1459,13 @@ function _camHardwareCard(c, port) {
       svgIcon("camera", 14) + ' ' + esc(c.ip) +
       (c.modelNumber ? ' <span class="cam-model-label">' + esc(c.modelNumber) + '</span>' : '') +
       (portLabel ? ' <span class="cam-hw-port">' + esc(portLabel) + '</span>' : '') +
-      (hasCgi ? ' <span class="cam-cgi-badge" title="Camera answered Pulse&#39;s admin probe (CGI)">CGI</span>' : ' <span class="cam-cgi-badge cam-cgi-none" title="Camera did not answer Pulse&#39;s admin probe (CGI). It may be offline or unreachable">No CGI</span>') +
+      // Was "CGI" / "No CGI" -- the name of the HTTP admin interface Pulse
+      // probes, which tells a tech nothing about the camera. What they need
+      // is whether it answered. (See also project note: a camera can pass
+      // RTSP and still fail this channel, which is its own fault signature.)
+      (hasCgi ? ' <span class="cam-cgi-badge" title="The camera answered Pulse\'s admin probe over HTTP (CGI).">Answering</span>' : ' <span class="cam-cgi-badge cam-cgi-none" title="The camera did not answer Pulse\'s admin probe over HTTP (CGI). It may be offline, unreachable, or refusing admin requests while streaming fine.">Not answering</span>') +
     '</div>' +
+    '<div class="cam-hl ' + headlineCls + '">' + esc(headline) + '</div>' +
 
     // Device identity
     '<div class="cam-detail-group">' +
@@ -1422,7 +1546,7 @@ function renderCalibrations() {
     : `<div class="info-chip">No sports calibrated. The main camera's multisport calibration is empty.</div>`;
 
   $page().innerHTML = `
-    ${pageHeader("Camera Calibrations", "Main-camera multisport stitch and OCR / scoreboard calibration status.",
+    ${pageHeader("Camera Calibrations", "Main-camera multisport stitch and scoreboard-camera calibration status.",
       `<button class="btn-outline btn-ol-blue" onclick="dataCache['pixellot-config']=null;renderCalibrations()">${svgIcon("refresh", 14)} Refresh</button>`)}
 
     <div class="card">
@@ -1433,11 +1557,14 @@ function renderCalibrations() {
           ${sportsBlock}
         </div>
         <div class="flex-1" style="min-width:260px">
-          <div class="flex items-center gap-2 mb-2"><span class="font-semibold">OCR / scoreboard</span>${ocr.calibrated ? badge("Calibrated", "pass") : badge("Not calibrated", "warn")}</div>
+          <div class="flex items-center gap-2 mb-2"><span class="font-semibold">Scoreboard camera</span>${ocr.calibrated ? badge("Calibrated", "pass") : badge("Not calibrated", "warn")}</div>
           <div class="kv-grid">
             ${kvRowHtml("Last calibrated", ocr.lastCalibrated ? _pcFmtDate(ocr.lastCalibrated) : "—")}
-            ${kvRowHtml("enhanced_pip.txt", ocr.hasEnhancedPip ? badge("present", "pass") : badge("missing", "warn"))}
-            ${kvRowHtml("innerobjects.txt", ocr.hasInnerObjects ? badge("present", "pass") : badge("missing", "warn"))}
+            <!-- Was "enhanced_pip.txt" / "innerobjects.txt": the filenames Pulse
+                 checks for, used as the labels a tech reads. Say what they are.
+                 Badge casing also differed from every other Present pill. -->
+            ${kvRowHtml("Picture-in-picture layout", ocr.hasEnhancedPip ? badge("Set up", "pass") : badge("Missing", "warn"))}
+            ${kvRowHtml("Scoreboard regions", ocr.hasInnerObjects ? badge("Set up", "pass") : badge("Missing", "warn"))}
           </div>
         </div>
       </div>
@@ -1468,9 +1595,12 @@ function _subsystemHealth(findings) {
   // its health from the cached event log: any recent Error-level entry
   // turns it amber. (Falls back to Healthy when events aren't loaded.)
   const evEntries = (cached("events") || {}).entries || [];
-  const evErrorCount = evEntries.filter(
-    (e) => (e.level || "").toLowerCase() === "error"
-  ).length;
+  const evErrorCount = evEntries.filter((e) => {
+    // Critical counts too. Filtering on "error" alone meant a box whose only
+    // recent entries were Windows Level 1 (Critical) showed a clean sidebar.
+    const l = (e.level || "").toLowerCase();
+    return l === "error" || l === "critical";
+  }).length;
 
   // ids are nav page ids — updateNavHealth() lights the matching sidebar link.
   // Re-keyed for the 6-group IA: the old `system` panel split into hardware /
@@ -1526,6 +1656,74 @@ function _findingPageFor(cat) {
   return map[(cat || "").toLowerCase()] || "dashboard";
 }
 
+// Page id -> the label the sidebar uses for it, so a "what to do" panel can
+// name the tab that owns the fix in the same words the nav does.
+function _pageLabel(pageId) {
+  for (var s = 0; s < NAV_SECTIONS.length; s++) {
+    var pages = NAV_SECTIONS[s].pages || [];
+    for (var i = 0; i < pages.length; i++) {
+      if (pages[i].id === pageId) return pages[i].label;
+    }
+  }
+  return pageId;
+}
+
+// Expand a finding in place. The recommendation text -- written in main.py and
+// the best copy in the product -- used to render ONLY inside the owning tab's
+// issues panel, so the dashboard showed a title and a chevron and the answer
+// was a tab switch away. Most agents never made the trip. The jump is still
+// here, as a named link inside the panel, but reading what to do no longer
+// costs you your place.
+function toggleFinding(i) {
+  var btn = document.getElementById("finding-btn-" + i);
+  var panel = document.getElementById("finding-detail-" + i);
+  if (!btn || !panel) return;
+  var open = btn.getAttribute("aria-expanded") === "true";
+  btn.setAttribute("aria-expanded", open ? "false" : "true");
+  panel.hidden = open;
+}
+
+// Everything a ticket needs, as text: the unit, the verdict, and every finding
+// with what to do about it. Pulse could state a problem in five places and an
+// agent still had to retype it into the ticket by hand.
+function copyFindingsForTicket() {
+  var txt = window.__pulseTicketText || "";
+  var el = document.getElementById("finding-copy-btn");
+  function say(msg) {
+    if (!el) return;
+    if (!el.dataset.label) el.dataset.label = el.textContent;
+    el.textContent = msg;
+    setTimeout(function () { el.textContent = el.dataset.label; }, 2000);
+  }
+  if (!txt) { say("Nothing to copy"); return; }
+
+  // navigator.clipboard exists only in a secure context. http://localhost is
+  // one; http://<vpu-ip>:8765 is NOT, and app/peer.py makes that a real way to
+  // reach Pulse. Both failure paths used to `return` silently and the button
+  // looked broken, so fall back to a hidden textarea + execCommand, which works
+  // on an insecure origin, and say so when even that fails.
+  function fallback() {
+    try {
+      var ta = document.createElement("textarea");
+      ta.value = txt;
+      ta.setAttribute("readonly", "");
+      ta.style.cssText = "position:fixed;top:0;left:-9999px;opacity:0";
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      say(ok ? "Copied" : "Copy failed");
+    } catch (e) {
+      say("Copy failed");
+    }
+  }
+
+  if (!navigator.clipboard) { fallback(); return; }
+  navigator.clipboard.writeText(txt)
+    .then(function () { say("Copied"); })
+    .catch(fallback);   // rejected when the document is not focused, or denied
+}
+
 var _dashNicRefreshTimer = null;
 
 function _renderNicRows(ports) {
@@ -1537,7 +1735,9 @@ function _renderNicRows(ports) {
   for (let i = 0; i < count; i++) {
     if (i < ports.length) {
       const p = ports[i];
-      if (p.isOcr) roles.push("OCR");
+      // "OCR" was never expanded in visible text anywhere in Pulse -- the
+      // only explanation lived in a hover tooltip. Say what the camera is for.
+      if (p.isOcr) roles.push("Scoreboard");
       else if (p.isUp && (p.camerasDetected || []).length > 0) roles.push("Camera " + (++camNum));
       else roles.push(null);
     } else {
@@ -1546,35 +1746,38 @@ function _renderNicRows(ports) {
   }
   // Tooltips on each badge so the colored chips have plain-English meaning
   // for techs glancing at the dashboard — was previously no legend at all.
+  // The badge word IS the meaning now; the tooltip only adds detail. "Error"
+  // used to sit here on a port that was up and passing traffic at 100 Mbps --
+  // the word said the card had failed, its own tooltip said "up but
+  // degraded", and only the tooltip was right. The same condition was also
+  // called DEGRADED on Camera Connectivity and "running slow" in Findings.
   const statusTip = {
-    Linked: "Link up at the expected speed",
-    Error:  "Link is up but degraded (e.g. 100 Mbps on a Gigabit port)",
-    Down:   "No physical link detected on this port",
+    Linked: "Link is up at the expected speed.",
+    Slow:   "The port works, but it negotiated a slower speed than it should -- usually a cable or switch-port problem, not the camera.",
+    Down:   "No cable link detected on this port.",
   };
   for (let i = 0; i < count; i++) {
     if (i < ports.length) {
       const p = ports[i];
-      const speed = p.linkSpeedMbps
-        ? p.linkSpeedMbps >= 1000 ? (p.linkSpeedMbps / 1000) + " Gbps" : p.linkSpeedMbps + " Mbps"
-        : "—";
+      const speed = fmtSpeed(p.linkSpeedMbps);
       let status, cls;
       if (!p.isUp) { status = "Down"; cls = "muted"; }
-      else if (p.isDegraded) { status = "Error"; cls = "warn"; }
+      else if (p.isDegraded) { status = "Slow"; cls = "warn"; }
       else { status = "Linked"; cls = "pass"; }
       const role = roles[i];
-      const roleTip = role === "OCR"
-        ? "OCR (scoreboard overlay) camera port"
+      const roleTip = role === "Scoreboard"
+        ? "The OCR camera. It reads the scoreboard for the on-screen score overlay."
         : role
           ? "Pixellot camera detected on this port"
           : "";
       const roleBadge = role
-        ? ` <span class="badge-ol badge-ol-info" title="${esc(roleTip)}">${esc(role)}</span>`
+        ? ` <span class="badge-ol badge-ol-info" title="${esc(roleTip)}" aria-label="${esc(roleTip || role)}">${esc(role)}</span>`
         : "";
       rows.push(`<div class="dash-nic-row">
         <span class="dash-nic-port">Port ${i + 1}</span>
-        <span class="dash-nic-name">${esc(p.name)}</span>
+        <span class="dash-nic-name" title="${esc(p.name)}">${esc(p.name)}</span>
         <span class="dash-nic-speed">${p.isUp ? esc(speed) : "—"}</span>
-        <span class="dash-nic-badges"><span class="badge-ol badge-ol-${cls}" title="${esc(statusTip[status] || "")}">${esc(status)}</span>${roleBadge}</span>
+        <span class="dash-nic-badges"><span class="badge-ol badge-ol-${cls}" title="${esc(statusTip[status] || "")}" aria-label="Port ${i + 1}: ${esc(statusTip[status] || status)}">${esc(status)}</span>${roleBadge}</span>
       </div>`);
     } else {
       rows.push(`<div class="dash-nic-row">
@@ -1630,9 +1833,9 @@ function _renderVolumes(volumes) {
 // The policy table + rollup live server-side (_compute_readiness in main.py);
 // this just renders the verdict record that rides on dash.readiness.
 var _RDY_META = {
-  PASS: { word: "PASS", icon: "check", tone: "pass", tag: "Game-ready. No blockers, no risks." },
-  WARN: { word: "WARNING", icon: "alert", tone: "warn", tag: "Should stream, but fix the issues below before game time." },
-  FAIL: { word: "FAIL", icon: "x",     tone: "fail", tag: "Don't expect a clean broadcast tonight. Fix this before the game." },
+  PASS: { word: "PASS", icon: "check", tone: "pass", tag: "Game-ready. Nothing found that puts a game's stream at risk." },
+  WARN: { word: "WARNING", icon: "alert", tone: "warn", tag: "Streaming is possible, but may not be reliable. Fix the issues below before the stream goes on air." },
+  FAIL: { word: "FAIL", icon: "x",     tone: "fail", tag: "Stream-blocker(s) present. Fix this before the game." },
 };
 
 // Demo-only: flip the card through all three states live (e.g. in a meeting).
@@ -1655,10 +1858,23 @@ function _demoVerdict(state) {
   ] };
 }
 
-function readinessCard(verdict, freshness) {
+// The verdict every surface on this card must agree on. The demo swap used to
+// live inside readinessCard and rewrite its local parameter, so the card showed
+// one verdict while the findings list, the counts and the ticket text read
+// dash.readiness and showed another. With the FAIL chip active the card said
+// "FAIL - 1 thing is stopping tonight's game" and the clipboard said
+// "WARNING - Nothing is stopping tonight's game, 3 risks tonight".
+//
+// Resolve it here, once, and hand the SAME object to everything.
+function resolveReadiness(raw) {
   var isDemo = (typeof window !== "undefined" && window.__PULSE_DEMO_MODE);
-  if (isDemo && _readinessDemoState) verdict = _demoVerdict(_readinessDemoState);
+  if (isDemo && _readinessDemoState) return _demoVerdict(_readinessDemoState);
+  return raw || null;
+}
+
+function readinessCard(verdict, freshness) {
   if (!verdict || !verdict.status) return "";
+  var isDemo = (typeof window !== "undefined" && window.__PULSE_DEMO_MODE);
   var meta = _RDY_META[verdict.status] || _RDY_META.WARN;
   var blockers = verdict.blockers || [];
   var risks = verdict.risks || [];
@@ -1684,8 +1900,12 @@ function readinessCard(verdict, freshness) {
     +   '</div>'
     + '</div>'
     + '<div class="rdy-foot">'
-    +   '<span>' + blockers.length + ' blocker' + (blockers.length === 1 ? '' : 's') + ' · ' + risks.length + ' risk' + (risks.length === 1 ? '' : 's') + '</span>'
-    +   '<span class="rdy-policy">policy ' + esc(verdict.policyVersion || "v1") + '</span>'
+    +   '<span>' + (blockers.length
+          ? blockers.length + (blockers.length === 1 ? ' thing is' : ' things are') + " stopping tonight's game"
+          : "Nothing is stopping tonight's game") + '</span>'
+    +   '<span>' + (risks.length
+          ? risks.length + (risks.length === 1 ? ' risk' : ' risks') + ' tonight'
+          : 'No risks tonight') + '</span>'
     + '</div>'
     + demoBar
     + '</div>';
@@ -1715,37 +1935,88 @@ function renderDashboard() {
   const disk = _systemDiskPct(perf);
   const temp = perf.temperature?.celsius;
 
-  const warnCount = findings.filter((f) => f.severity === "warning").length;
-  const critCount = findings.filter((f) => f.severity === "critical").length;
-  const totalFindings = findings.length;
-  const sevColor = critCount > 0 ? "critical" : warnCount > 0 ? "warn" : "ok";
+  // -- One source of truth for "how bad is this" ----------------------
+  // A finding's own `severity` is the collector's opinion. The readiness
+  // policy table (_readiness_class in main.py) is what actually decides
+  // whether tonight's game is at risk, and it already drives the big verdict
+  // word at the top of this card. When the two disagreed the dashboard
+  // printed both, 100px apart: "0 blockers - 2 risks" directly above
+  // "[CRITICAL] Streaming is degraded". Two answers to "is this unit OK",
+  // and the agent reading it has no way to tell which one to believe.
+  //
+  // The policy wins. Severity stays on the wire untouched for the audit
+  // record and for every other tab; only this card's display defers.
+  const rdyVerdict = resolveReadiness(dash.readiness);
+  // Finding tones are built from the REAL readiness record, not from a
+  // previewed one. The demo chips substitute a verdict whose codes do not
+  // match the findings actually on the box, so every finding it does not
+  // mention lost its policy class and fell through to the collector severity:
+  // on the PASS chip the card read "Nothing is stopping tonight's game" above
+  // two rows reading "Stops tonight's game". The card previews a state; the
+  // findings describe the unit, and they stay true in every preview.
+  const _rdy = dash.readiness || {};
+  const _toneByCode = {};
+  (_rdy.blockers || []).forEach((b) => { if (b.code) _toneByCode[b.code] = "critical"; });
+  (_rdy.risks    || []).forEach((r) => { if (r.code) _toneByCode[r.code] = "warning";  });
+  (_rdy.info     || []).forEach((n) => { if (n.code) _toneByCode[n.code] = "info";     });
+  // The policy may ESCALATE a finding -- deciding what stops tonight's game is
+  // exactly its job -- but it must never silently DEMOTE one to an FYI.
+  //
+  // Demotion is the dangerous direction, and it happens for a legitimate
+  // reason: main.py:2540 classes `disk-critical` as info *because* readiness
+  // gates the same volume through its own per-drive F15a/F15b checks. One
+  // full drive, two records. Letting the info class win printed "Worth
+  // knowing" on a drive the same card was counting as a risk one line above.
+  //
+  // So: a blocker is critical, a risk is a risk, and anything the collector
+  // called a problem stays at least a risk even where the policy has no
+  // opinion or is deferring to a check it already counted.
+  const toneOf = (f) => {
+    const own = verdictFor(f.severity).tone;
+    // A finding can name the readiness entry that supersedes it (main.py sets
+    // supersededBy where one condition is reported by two records -- a full
+    // C:/D: drive). Take that entry's class: it is the one the policy actually
+    // weighed, and the one the counts on this card are built from.
+    const superseded = f.supersededBy ? _toneByCode[f.supersededBy] : null;
+    if (superseded) return superseded;
+    const policy = _toneByCode[f.code];
+    if (!policy) {
+      // No policy class for this finding. Two ways to get here on a live
+      // unit: no readiness record rode along at all (an older payload, or a
+      // bundle shared in from another unit via peer.py), or the finding named
+      // a superseding entry whose own check did not fire -- `disk-critical`
+      // declares supersededBy: "disk-d-critical", and _compute_readiness
+      // skips it, so if F15b does not fire the finding has no class anywhere.
+      //
+      // Fall back to the collector's severity but CAP IT AT "risk". A
+      // collector severity of "critical" means "serious finding"; it does NOT
+      // mean "stops tonight's game". Those are different scales and only the
+      // policy decides the second one. Reading `own` unguarded is what put
+      // "Stops tonight's game" on a 91%-full recording drive, which does not
+      // stop an event.
+      return own === "info" ? "info" : "warning";
+    }
+    // The policy may ESCALATE -- deciding what stops tonight's game is its
+    // job -- but it must never silently DEMOTE a finding to an FYI.
+    if (policy === "info" && own !== "info") return "warning";
+    return policy;
+  };
 
-  // Show BOTH counts (e.g. "2 Critical · 5 Warnings"), not just the highest.
-  const _critTxt = critCount > 0 ? `${critCount} Critical` : "";
-  const _warnTxt = warnCount > 0 ? `${warnCount} Warning${warnCount === 1 ? "" : "s"}` : "";
-  const sevLabel = (critCount || warnCount)
-    ? [_critTxt, _warnTxt].filter(Boolean).join(" · ")
-    : "All Clear";
-  // Two-tone version for the big Command Center heading — critical in red,
-  // warnings in amber, so the split reads at a glance.
-  const sevHtml = (critCount || warnCount)
-    ? [
-        critCount > 0 ? `<span class="cc-sev-crit">${critCount} Critical</span>` : "",
-        warnCount > 0 ? `<span class="cc-sev-warn">${warnCount} Warning${warnCount === 1 ? "" : "s"}</span>` : "",
-      ].filter(Boolean).join(`<span class="cc-sev-sep">·</span>`)
-    : `<span class="cc-sev-ok">All Clear</span>`;
+  const warnCount = findings.filter((f) => toneOf(f) === "warning").length;
+  const critCount = findings.filter((f) => toneOf(f) === "critical").length;
+  const totalFindings = findings.length;
 
   // Findings are shown in a single consolidated list, grouped by severity
   // (critical first, then warning, then info) — the natural triage order.
   // The sort is stable, so each group keeps its original ordering.
   // Cap at 10 to keep the panel from sprawling; surface a "+N more" hint
   // when there are more.
-  const _SEV_RANK = { critical: 0, error: 0, warning: 1, warn: 1, info: 2 };
+  const _TONE_RANK = { critical: 0, warning: 1, info: 2 };
   const sortedFindings = findings
     .map((f, i) => [f, i])  // decorate with index for a stable sort
     .sort((a, b) => {
-      const ra = _SEV_RANK[(a[0].severity || "").toLowerCase()] ?? 3;
-      const rb = _SEV_RANK[(b[0].severity || "").toLowerCase()] ?? 3;
+      const ra = _TONE_RANK[toneOf(a[0])] ?? 3;
+      const rb = _TONE_RANK[toneOf(b[0])] ?? 3;
       return ra !== rb ? ra - rb : a[1] - b[1];
     })
     .map((pair) => pair[0]);
@@ -1755,7 +2026,101 @@ function renderDashboard() {
   const subsystems = _subsystemHealth(findings);
   const now = new Date();
   const timeStr = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  const baselineStr = subsystems.length + " panel" + (subsystems.length === 1 ? "" : "s") + " checked";
+  const baselineStr = "Checked " + subsystems.length + " area" + (subsystems.length === 1 ? "" : "s");
+
+  // Ticket text, assembled from what is already on screen -- unit, verdict,
+  // and every finding with its recommendation. Built here rather than in the
+  // click handler so it always matches the render the agent is looking at.
+  // Nothing is authored: this is the same copy the panels show, laid out so it
+  // can be pasted whole.
+  (function buildTicketText() {
+    var rdy = rdyVerdict || {};
+    var meta = _RDY_META[rdy.status] || null;
+    var isDemo = (typeof window !== "undefined" && window.__PULSE_DEMO_MODE);
+    var lines = [];
+
+    // Demo data is synthetic down to the venue name and the serial. The screen
+    // says DEMO DATA in the header; the clipboard said nothing, so a paste
+    // landed fabricated findings in a real ticket looking exactly like a real
+    // reading.
+    if (isDemo) {
+      lines.push("*** DEMO DATA - not a real VPU. Do not paste into a ticket. ***");
+      lines.push("");
+    }
+    // A previewed verdict is a card state someone clicked, not this unit's
+    // reading. Say so rather than exporting it silently.
+    if (_readinessDemoState) {
+      lines.push("*** READINESS PREVIEW (" + _readinessDemoState + ") - not this unit's real verdict. ***");
+      lines.push("");
+    }
+
+    lines.push("Pulse - " + (id.vpuName || id.hostname || "VPU"));
+    if (id.hostname && id.vpuName) lines.push("Host: " + id.hostname);
+    // The serial is what an RMA needs, and it was on screen but not in here.
+    if (id.serialNumber) lines.push("Serial: " + id.serialNumber);
+
+    // Was `new Date()` -- the moment the dashboard rendered, which asserts a
+    // freshness the data does not have. Leave Pulse open twenty minutes and it
+    // claimed a check made just now. The card renders rdy.timestamp ("as of
+    // 09:46 AM") while the ticket said 09:53:20: seven minutes apart, same
+    // screen, same data. Use the collection time, and name it.
+    if (rdy.timestamp) {
+      lines.push("Data collected: " + new Date(rdy.timestamp)
+        .toLocaleString([], { timeZoneName: "short" }));
+    } else {
+      lines.push("Data collected: unknown (copied " + new Date()
+        .toLocaleString([], { timeZoneName: "short" }) + ")");
+    }
+    lines.push("");
+
+    if (meta) {
+      lines.push("Stream readiness: " + meta.word + " - " + meta.tag);
+      var nb = (rdy.blockers || []).length, nr = (rdy.risks || []).length;
+      lines.push(nb
+        ? nb + (nb === 1 ? " thing is" : " things are") + " stopping tonight's game, " + nr + " risk" + (nr === 1 ? "" : "s") + " tonight"
+        : "Nothing is stopping tonight's game, " + nr + " risk" + (nr === 1 ? "" : "s") + " tonight");
+      lines.push("");
+    }
+
+    // Itemise from the READINESS RECORD, not from `findings`.
+    //
+    // The header counted rdy.blockers/risks while the body listed findings, and
+    // those are not the same set: _compute_readiness computes cpu-sustained,
+    // mem-sustained, temp-90, disk-c-critical and disk-d-critical itself, and
+    // none of them exists as a dashboard finding. Verified against the real
+    // function -- a pegged CPU, exhausted memory and a 93C unit produced
+    // "4 risks tonight" over a single camera-cable line, with the three severe
+    // ones named nowhere. The ticket was least complete exactly when the unit
+    // was in the worst shape.
+    //
+    // The record is already the reconciled set: one entry per condition (see
+    // supersededBy), each carrying title and recommendation, and its bucket IS
+    // the policy's class. Unclassified codes land in `info`, so nothing from
+    // `findings` is lost.
+    var items = [];
+    (rdy.blockers || []).forEach(function (e) { items.push(["critical", e]); });
+    (rdy.risks    || []).forEach(function (e) { items.push(["warning",  e]); });
+    (rdy.info     || []).forEach(function (e) { items.push(["info",     e]); });
+
+    if (!items.length && sortedFindings.length) {
+      // No readiness record rode along (older payload, non-VPU host): fall back
+      // to the findings themselves rather than reporting nothing.
+      sortedFindings.forEach(function (f) { items.push([toneOf(f), f]); });
+    }
+
+    if (!items.length) {
+      lines.push("No findings.");
+    } else {
+      items.forEach(function (pair) {
+        var v = VERDICT[pair[0]] || VERDICT.info, e = pair[1];
+        lines.push("[" + v.word + "] " + (e.title || ""));
+        var rec = (e.recommendation || "").trim();
+        if (rec) lines.push("    " + rec);
+        lines.push("");
+      });
+    }
+    window.__pulseTicketText = lines.join("\n").replace(/\n+$/, "\n");
+  })();
 
   // Network config — prefer dashboard-embedded data, fall back to full network cache
   const netCfg = dash.networkConfig || net.config || {};
@@ -1811,14 +2176,14 @@ function renderDashboard() {
     <div class="dash-header">
       <div>
         <div class="dash-title-row">
-          <h2 class="text-2xl font-bold text-white">Dashboard</h2>
+          <h1 class="text-2xl font-bold text-white">Dashboard</h1>
         </div>
         ${vpuName ? `<p class="text-sm text-pulse-muted">${esc(vpuName)}</p>` : ""}
       </div>
     </div>
 
     <!-- Stream Readiness — lead the triage page with "are we game-ready?" -->
-    ${readinessCard(dash.readiness, baselineStr)}
+    ${readinessCard(rdyVerdict, baselineStr)}
 
     ${(dash.sourceErrors && dash.sourceErrors.length) ? `
     <!-- Partial-failure notice — some diagnostic scripts didn't complete -->
@@ -1841,21 +2206,34 @@ function renderDashboard() {
           <span class="dash-hdr-icon">${svgIcon("clipboard-list", 16)}</span>
           <h3 class="card-label mb-0">FINDINGS</h3>
         </div>
-        <span class="cc-findings-count">${totalFindings} issue${totalFindings === 1 ? "" : "s"}</span>
+        <div class="cc-findings-actions">
+          <span class="cc-findings-count">${totalFindings} issue${totalFindings === 1 ? "" : "s"}</span>
+          <button class="finding-copy" id="finding-copy-btn" aria-live="polite" onclick="copyFindingsForTicket()" title="Copy the unit, the verdict and every finding with its fix, ready to paste into a ticket">Copy for ticket</button>
+        </div>
       </div>
       <div class="cc-findings-list">
         ${visibleFindings.map((f, i) => {
           const prev = visibleFindings[i - 1];
-          const groupBreak = i > 0 && prev.severity !== f.severity ? `<div class="cc-findings-divider"></div>` : "";
+          const groupBreak = i > 0 && toneOf(prev) !== toneOf(f) ? `<div class="cc-findings-divider"></div>` : "";
           const fp = _findingPageFor(f.category);
           const encTitle = encodeURIComponent(f.title || "");
+          const v = VERDICT[toneOf(f)] || verdictFor(f.severity);
+          const rec = (f.recommendation || "").trim();
           return groupBreak + `
-        <a class="finding-item" href="#${esc(fp)}" onclick="event.preventDefault();findingJump('${esc(fp)}','${encTitle}')" title="Opens the ${esc(f.category)} tab and highlights this issue">
-          <span class="finding-dot finding-dot-${esc(f.severity)}"></span>
-          <span class="finding-cat finding-cat-${esc(f.severity)}">[${esc((f.severity || "").toUpperCase())}]</span>
-          <span class="finding-title">${esc(f.title)}</span>
-          <span class="finding-arrow">${svgIcon("chevron", 14)}</span>
-        </a>`;
+        <div class="finding-row">
+          <button class="finding-item" id="finding-btn-${i}" type="button"
+                  aria-expanded="false" aria-controls="finding-detail-${i}"
+                  onclick="toggleFinding(${i})">
+            <span class="finding-dot finding-dot-${esc(v.tone)}"></span>
+            <span class="finding-cat finding-cat-${esc(v.tone)}">${esc(v.word)}</span>
+            <span class="finding-title">${esc(f.title)}</span>
+            <span class="finding-arrow">${svgIcon("chevron", 14)}</span>
+          </button>
+          <div class="finding-detail" id="finding-detail-${i}" hidden>
+            ${rec ? `<p class="finding-rec">${esc(rec)}</p>` : `<p class="finding-rec finding-rec-none">No fix recorded for this finding yet. Open ${esc(_pageLabel(fp))} for the full detail.</p>`}
+            <a class="finding-open" href="#${esc(fp)}" onclick="event.preventDefault();findingJump('${esc(fp)}','${encTitle}')">Open ${esc(_pageLabel(fp))}${svgIcon("chevron", 13)}</a>
+          </div>
+        </div>`;
         }).join("")}
         ${overflowCount > 0 ? `<div class="cc-findings-overflow">+${overflowCount} more. Open the relevant tab for the full list</div>` : ""}
       </div>
@@ -2017,7 +2395,7 @@ function renderDashboard() {
 function pageHeader(title, subtitle, actionsHtml) {
   return `<div class="page-header">
     <div>
-      <h2 class="page-title">${esc(title)}</h2>
+      <h1 class="page-title">${esc(title)}</h1>
       ${subtitle ? `<p class="page-subtitle">${esc(subtitle)}</p>` : ""}
     </div>
     <div class="page-actions">${actionsHtml || ""}</div>
@@ -2041,14 +2419,16 @@ function kvRowHtml(label, html) {
 
 function severityChip(sev, text) {
   const s = (sev || "").toLowerCase();
-  // muted/info/none → neutral grey, so "no data" states don't masquerade as
-  // healthy green. Everything unrecognised still falls through to ok (green) —
-  // unchanged for existing callers.
+  // Healthy is now EXPLICIT and the fallback is neutral. It used to be the
+  // other way round: anything unrecognised fell through to green, so a
+  // collector that started emitting a new severity word would render it as
+  // healthy rather than as unknown. A word nobody taught this helper must
+  // degrade to grey, never to a pass.
   const cls =
     s === "critical" || s === "error" ? "sev-chip-crit" :
     s === "warning" ? "sev-chip-warn" :
-    s === "muted" || s === "info" || s === "none" || s === "unknown" ? "sev-chip-muted" :
-    "sev-chip-ok";
+    s === "ok" || s === "pass" || s === "good" || s === "healthy" ? "sev-chip-ok" :
+    "sev-chip-muted";
   return `<span class="sev-chip ${cls}">${esc(text || sev)}</span>`;
 }
 
@@ -2560,6 +2940,7 @@ function _pingCardHtml(p, resolutionWorks) {
       '<span class="net-ping-dot" style="background:' + dot + '"></span>' +
       '<span class="net-ping-label">' + esc(p.label) + '</span>' +
       '<span class="net-ping-target font-mono">' + esc(p.target) + '</span>' +
+      statusBadge(p.status) +
     '</div>' +
     '<div class="net-ping-stats">' +
       '<div class="net-ping-stat"><span class="net-ping-stat-label">Latency</span><span class="net-ping-stat-value">' + esc(latency) + '</span></div>' +
@@ -2859,7 +3240,30 @@ function _renderLiveNetHealth(h) {
   }
   _prevLiveCounters = { failures: curFailures, resets: curResets };
 
+  // A verdict above the numbers. Six raw TCP counters with no thresholds on
+  // screen told a tier-1 agent nothing: the >2 warn / >10 fail rule below
+  // existed only as a colour on one gauge, and "Segs Out/s" is not a
+  // sentence anyone can act on. The counters all stay -- tier 2 reads them
+  // directly -- but the panel now leads with what they add up to.
+  var liveVerdict, liveVerdictCls;
+  if (retrans > 10) {
+    liveVerdict = "The network is struggling: " + retrans.toFixed(1)
+      + " packets a second are being re-sent. Expect the stream to stutter.";
+    liveVerdictCls = "status-fail";
+  } else if (retrans > 2) {
+    liveVerdict = "The network is re-sending " + retrans.toFixed(1)
+      + " packets a second. Worth watching during the game.";
+    liveVerdictCls = "status-warn";
+  } else if (failuresDelta > 0 || resetsDelta > 0) {
+    liveVerdict = "Connections are dropping and being remade. The link is up, but something is cutting sessions short.";
+    liveVerdictCls = "status-warn";
+  } else {
+    liveVerdict = "Traffic is flowing normally. Nothing is being re-sent.";
+    liveVerdictCls = "status-pass";
+  }
+
   el.innerHTML =
+    '<p class="net-live-verdict ' + liveVerdictCls + '">' + esc(liveVerdict) + '</p>' +
     '<div class="net-live-gauges">' +
       _liveGauge("Retransmits/s", retrans, retCls) +
       _liveGauge("Established", tcp.established || 0, "") +
@@ -2890,7 +3294,11 @@ function _renderLiveNetHealth(h) {
     (nics.length ? '<div class="net-live-conns">' +
       '<div class="net-live-conns-title">Network Interfaces (' + nics.length + ')</div>' +
       '<table class="data-table"><thead><tr>' +
-        '<th>Interface</th><th title="Output queue length. Sustained above 2 means the NIC can\'t drain fast enough">Queue</th><th>RX Err</th><th>TX Err</th><th>RX/s</th><th>TX/s</th>' +
+        '<th>Interface</th>'
+        + '<th title="Output queue length. Sustained above 2 means the NIC cannot drain fast enough.">Waiting to send<span class="th-unit">queue, 0-2 normal</span></th>'
+        + '<th>Receive errors</th><th>Send errors</th>'
+        + '<th>Download<span class="th-unit">per second</span></th>'
+        + '<th>Upload<span class="th-unit">per second</span></th>' +
       '</tr></thead><tbody>' +
       nics.map(function(n) {
         var qCls  = (n.queueLen || 0) > 2 ? "status-warn" : "";
@@ -2953,19 +3361,41 @@ async function _runCapture(duration) {
   if (spinner) spinner.style.display = "none";
 }
 
+// One capture stat tile. A metric the collector could not measure arrives as
+// null and must render as an em dash, never as 0 -- on an unpatched VPU the
+// packet monitor cannot see resets or drops at all, and a zero in that tile
+// reads as "no resets, no drops" to whoever opens the card.
+function _capStat(label, val, badClass) {
+  var measured = (val != null);
+  var cls = (measured && val > 0 && badClass) ? badClass : "";
+  return '<div class="net-cap-stat">' +
+    '<span class="net-cap-stat-val ' + cls + '">' + esc(measured ? String(val) : "—") + '</span>' +
+    '<span class="net-cap-stat-label">' + esc(label) + '</span>' +
+  '</div>';
+}
+
 function _renderCapture(el, d) {
   var findings = d.findings || [];
   var topTalkers = d.topTalkers || [];
+  // Unpatched VPUs run the October 2018 packet monitor, which can count
+  // traffic but cannot record it. The collector says which path it took.
+  var countersOnly = (d.captureMode === "counters");
 
   el.innerHTML =
     // Summary stats
     '<div class="net-cap-summary">' +
-      '<div class="net-cap-stat"><span class="net-cap-stat-val">' + esc(String(d.totalPackets || 0)) + '</span><span class="net-cap-stat-label">Packets</span></div>' +
-      '<div class="net-cap-stat"><span class="net-cap-stat-val ' + ((d.tcpRetransmits || 0) > 0 ? 'status-warn' : '') + '">' + esc(String(d.tcpRetransmits || 0)) + '</span><span class="net-cap-stat-label">Retransmits</span></div>' +
-      '<div class="net-cap-stat"><span class="net-cap-stat-val ' + ((d.tcpResets || 0) > 0 ? 'status-warn' : '') + '">' + esc(String(d.tcpResets || 0)) + '</span><span class="net-cap-stat-label">Resets</span></div>' +
-      '<div class="net-cap-stat"><span class="net-cap-stat-val ' + ((d.droppedPackets || 0) > 0 ? 'status-fail' : '') + '">' + esc(String(d.droppedPackets || 0)) + '</span><span class="net-cap-stat-label">Drops</span></div>' +
-      '<div class="net-cap-stat"><span class="net-cap-stat-val">' + esc(String(d.tcpSyns || 0)) + '</span><span class="net-cap-stat-label">SYN</span></div>' +
-      '<div class="net-cap-stat"><span class="net-cap-stat-val">' + esc(String(d.tcpFins || 0)) + '</span><span class="net-cap-stat-label">FIN</span></div>' +
+      _capStat("Packets", d.totalPackets != null ? d.totalPackets : 0, null) +
+      _capStat("Retransmits", d.tcpRetransmits, "status-warn") +
+      _capStat("Resets", d.tcpResets, "status-warn") +
+      _capStat("Drops", d.droppedPackets, "status-fail") +
+      // "Inspected" replaced the old SYN and FIN tiles. Packets is a NIC
+      // counter and is always right; retransmits/resets/endpoints come from
+      // decoding the capture file, which pktmon on the fleet's 1809 build
+      // does erratically. Showing how many packets were actually decoded is
+      // the difference between "nothing is wrong" and "nothing was measured".
+      // The SYN/FIN tiles went because pktmon never logs an outbound SYN on
+      // this build, so that tile read 0 on a perfectly healthy VPU.
+      _capStat("Inspected", d.inspectedPackets, null) +
     '</div>' +
     // Findings
     (findings.length ? '<div class="net-cap-findings">' +
@@ -2991,7 +3421,10 @@ function _renderCapture(el, d) {
             '</tr>';
           }).join("") +
           '</tbody></table>'
-        : '<p class="net-cap-empty">No outbound destinations parsed from the capture. This Windows build may not expose IP details through etl2txt.</p>') +
+        : '<p class="net-cap-empty">' + (countersOnly
+            ? 'Not available on this VPU. Its version of Windows can count traffic but cannot record it, so there is no per-packet detail to list endpoints from. See the note above.'
+            : 'No endpoints were decoded from the capture. Windows recorded the packet totals above but did not write the per-packet detail this table needs, which it does intermittently on the VPU image. Run the capture again.')
+          + '</p>') +
     '</div>';
 }
 
@@ -3026,13 +3459,37 @@ const NET_PORT_IMPACT = {
   "Zixi Backup": "Backup live-stream connection (Zixi over UDP/443, the same streaming protocol as UDP/2088, not HTTPS). Either Zixi port alone carries a fully healthy stream; with both blocked the broadcast degrades to the RTMP fallback.",
   "Zixi Streaming": "The primary live-stream connection (Zixi over UDP/2088). If blocked, the stream fails over to Zixi UDP/443, then to the degraded RTMP fallback (TCP/1935).",
   "RTMP Fallback": "Last-resort streaming path (RTMP over TCP/1935) used only when both Zixi/UDP connections are blocked: games start ~4 minutes late with no packet-loss protection. If this is blocked too, a venue with both UDP ports blocked can't broadcast at all. (Tested against a stable public RTMP host. That proves TCP/1935 is open by port, not that pixellot.stream itself is allowed.)",
-  "Scorebot": "SportzCast scoreboard software can't connect or update (SportzCast sites only).",
 };
+// What each endpoint IS, in words a tier-1 agent can act on. The `purpose`
+// keys are the engineering names the collector emits; several are vendor or
+// protocol jargon ("Zixi Streaming", "RTMP Fallback", "NTP") that mean nothing
+// to someone taking a call from an athletic director. The tile leads with
+// these; the protocol/port stays underneath as the detail tier 2 needs.
+//
+// The three streaming rungs are deliberately named as one chain -- main /
+// backup / last resort -- because that is the single most useful thing the
+// Network tab can tell someone: which way the game is going out tonight.
+const NET_PORT_LABEL = {
+  "DNS":              "Name lookup (DNS)",
+  "NTP":              "Clock sync",
+  "Pixellot":         "Pixellot updates",
+  "Pixellot Echo":    "Pixellot cloud services",
+  "NFHS Network":     "NFHS scheduling",
+  "Singular Overlay": "On-screen graphics",
+  "LogMeIn":          "Remote support",
+  "Zixi Streaming":   "Live video – main path",
+  "Zixi Backup":      "Live video – backup path",
+  "RTMP Fallback":    "Live video – last resort",
+};
+// A tile covering several services that share one port (the five TCP/443
+// endpoints). Naming them all would not fit; the pill carries N/M and the
+// tooltip points at Service Reachability for the breakdown.
+const NET_PORT_LABEL_SHARED = "Cloud services";
+
 const NET_DOMAIN_IMPACT = {
   "nfhsnetwork.com": "Event scheduling, broadcast watermarks, and viewer access are unavailable.",
   "pixellot.tv": "System management and software updates are blocked, and the stream fails to broadcast.",
   "software.pixellot.tv": "Software and firmware updates are blocked.",
-  "sportzcast.net": "SportzCast scoreboard software can't connect or update (SportzCast sites only).",
   "service.singular.live": "On-screen graphics and scorebug overlays won't load.",
   "logmein.com": "The support team can't diagnose the VPU remotely.",
 };
@@ -3152,7 +3609,7 @@ function _renderPortConnectivity(ports) {
 
   // Combine related results into one tile: hosts sharing a protocol/port (the
   // six TCP/443 services) group together, and a single host's port range
-  // (Scorebot 1400–1405) collapses to one tile. Two passes — by proto/port
+  // range on one host collapses to one tile. Two passes -- by proto/port
   // first, then by host for the leftovers — mirroring the original card grid.
   function groupPorts(list) {
     var byPort = {}, portOrder = [];
@@ -3186,12 +3643,36 @@ function _renderPortConnectivity(ports) {
       var pb = Math.min.apply(null, b.items.map(function(p) { return Number(p.port) || 0; }));
       return pa !== pb ? pa - pb : a.order - b.order;
     });
+
+    // The three streaming rungs are one failover chain and now say so on their
+    // faces ("main path" / "backup path" / "last resort"). Ascending port order
+    // scattered them -- backup (UDP/443), last resort (TCP/1935), main
+    // (UDP/2088) -- so the tiles contradicted the chain they name. Keep them
+    // contiguous and in chain order, anchored where the first one already sorted
+    // to, so the reading order matches the order the stream actually tries.
+    function isRung(g) {
+      var p0 = g.items[0] || {};
+      return !p0.optional && STREAM_RUNG_PURPOSES.indexOf(p0.purpose) !== -1;
+    }
+    var firstRung = groups.findIndex(isRung);
+    if (firstRung !== -1) {
+      var rungs = groups.filter(isRung).sort(function(a, b) {
+        return STREAM_RUNG_PURPOSES.indexOf(a.items[0].purpose)
+             - STREAM_RUNG_PURPOSES.indexOf(b.items[0].purpose);
+      });
+      if (rungs.length > 1) {
+        var rest = groups.filter(function(g) { return !isRung(g); });
+        // Everything before the first rung is a non-rung group, so firstRung is
+        // also its count in `rest`.
+        groups = rest.slice(0, firstRung).concat(rungs, rest.slice(firstRung));
+      }
+    }
     return groups;
   }
 
   // Port number (the priority) + protocol for the port-led tile. A shared port
-  // (443 across several hosts) → "443"; a range on one host (Scorebot
-  // 1400–1405) → "1400–1405". Hosts/domains are intentionally NOT shown on the
+  // (443 across several hosts) -> "443"; a contiguous range on one host
+  // collapses to "start-end". Hosts/domains are intentionally NOT shown on the
   // tile — the domain detail lives in the Domain Reachability column.
   function portParts(items) {
     var proto = (items[0].protocol || "TCP").toUpperCase();
@@ -3204,7 +3685,14 @@ function _renderPortConnectivity(ports) {
       var contiguous = portsN[portsN.length - 1] - portsN[0] + 1 === portsN.length;
       num = contiguous ? portsN[0] + "–" + portsN[portsN.length - 1] : portsN.join(",");
     }
-    return { num: num, proto: proto };
+    // The service leads; "UDP 2088" becomes the detail line beneath it.
+    var purposes = {};
+    items.forEach(function(p) { if (p.purpose) purposes[p.purpose] = 1; });
+    var distinct = Object.keys(purposes);
+    var label = distinct.length === 1
+      ? (NET_PORT_LABEL[distinct[0]] || distinct[0])
+      : NET_PORT_LABEL_SHARED;
+    return { num: num, proto: proto, label: label, addr: proto + " " + num };
   }
 
   // Status rollup for a (possibly multi-port) group → pill + accent colour.
@@ -3228,9 +3716,17 @@ function _renderPortConnectivity(ports) {
     return { pillTxt: pillTxt, pillCls: pillCls, accent: accent, stateCls: stateCls };
   }
 
-  // Port-led tile: the port number leads (priority) with the protocol beside
-  // it and a status pill — no hosts/domains (those live in Domain Reachability).
-  // A port shared by several required services (TCP/443) shows an N/M count.
+  // Service-led tile: what the endpoint DOES leads, with "UDP 2088" as the
+  // detail line and a status pill on the right. A port shared by several
+  // required services (TCP/443) shows an N/M count. No hosts/domains -- those
+  // live in Domain Reachability.
+  //
+  // This tile used to lead with the bare port number, which put six integers
+  // across the top of the page -- 53, 123, 443, 443, 1935, 2088, two of them
+  // the same number with opposite verdicts -- and left the three streaming
+  // rungs indistinguishable from each other. The section comment above has
+  // said "uniform rows, service-led, protocol/port as metadata" the whole
+  // time; the implementation had drifted the other way.
   function card(group) {
     var items = group.items, p0 = items[0], st = rollup(items), pp = portParts(items);
     // Impact-if-blocked bubble on hover/focus/tap: single-service ports surface
@@ -3249,11 +3745,14 @@ function _renderPortConnectivity(ports) {
     var help = impact ? '<span class="domain-help net-port-help" aria-hidden="true">?</span>' : "";
     return '<div class="net-port-card net-tip' + st.stateCls + '" style="--rowaccent:' + st.accent + '" tabindex="0"' + aria + '>' + tip +
       '<div class="net-port-card-head">' +
-        '<span class="net-port-card-lead"><span class="net-port-num">' + esc(pp.num) + '</span>' + help + '</span>' +
+        '<span class="net-port-card-lead">' +
+          '<span class="net-port-dot"></span>' +
+          '<span class="net-port-name">' + esc(pp.label) + '</span>' + help +
+        '</span>' +
         badge(st.pillTxt, st.pillCls) +
       '</div>' +
       '<div class="net-port-card-foot">' +
-        '<span class="net-port-proto-tag">' + esc(pp.proto) + '</span>' +
+        '<span class="net-port-addr">' + esc(pp.addr) + '</span>' +
       '</div>' +
     '</div>';
   }
@@ -3276,11 +3775,11 @@ function _renderPortConnectivity(ports) {
     // Guard the degenerate case — don't render "All 0 required reachable".
     summary = '<span class="net-port-summary net-port-summary-opt">No required ports tested</span>';
   } else if (reqBlocked === 0) {
-    summary = '<span class="net-port-summary net-port-summary-ok">' + svgIcon("check", 13) + ' All ' + required.length + ' required reachable</span>';
+    summary = '<span class="net-port-summary net-port-summary-ok">' + svgIcon("check", 13) + ' All ' + required.length + ' connections this VPU needs are open</span>';
   } else if (nonStreamBlocked === 0 && health.healthy) {
     summary = '<span class="net-port-summary net-port-summary-warn">' + svgIcon("triangle", 13) + ' Streaming OK · ' + health.blocked.length + ' failover path' + (health.blocked.length === 1 ? "" : "s") + ' blocked</span>';
   } else {
-    summary = '<span class="net-port-summary net-port-summary-bad">' + svgIcon("triangle", 13) + ' ' + reqBlocked + ' of ' + required.length + ' required blocked</span>';
+    summary = '<span class="net-port-summary net-port-summary-bad">' + svgIcon("triangle", 13) + ' The venue is blocking ' + reqBlocked + ' of the ' + required.length + ' connections this VPU needs</span>';
   }
   // Optional count = tiles shown (a multi-host group or port range is one tile).
   if (optGroups.length) summary += '<span class="net-port-summary-opt">· ' + optGroups.length + ' optional</span>';
@@ -3823,7 +4322,7 @@ function _netTimeSyncCard(cfg, ntp, ntpPeers) {
   } else {
     peersHtml =
       '<table class="data-table"><thead><tr>' +
-        '<th>Peer</th><th>State</th><th>Stratum</th><th>Last Sync</th><th>Poll</th>' +
+        '<th>Peer</th><th>State</th><th>Hops<span class="th-unit">from a reference clock</span></th><th>Last Sync</th><th>Poll<span class="th-unit">how often it checks</span></th>' +
       '</tr></thead><tbody>' +
       peers.map(function(p) {
         var stateCls = (p.state || "").toLowerCase() === "active" ? "status-pass" : "text-pulse-muted";
@@ -3850,7 +4349,7 @@ function _netTimeSyncCard(cfg, ntp, ntpPeers) {
     <div class="kv-grid">
       ${kvRowHtml("Source", esc(sourceDisplay) + " " + approvedChip)}
       ${kvRow("Source IP", sourceIpDisplay)}
-      ${kvRow("Stratum", stratumDisplay)}
+      ${kvRowHtml("Clock source quality", esc(stratumDisplay) + '<span class="kv-hint">how many hops from a reference clock \u2014 lower is better</span>')}
       ${kvRow("Last sync", lastSyncDisplay)}
       ${kvRowHtml("Drift status", driftLabel)}
     </div>
@@ -4309,7 +4808,7 @@ function renderNetwork() {
       <!-- Traceroute -->
       <div class="card">
         <div class="net-ping-toolbar">
-          ${sectionTitle("share", "Traceroute")}
+          ${sectionTitle("share-2", "Traceroute")}
           <div class="net-ping-btns">
             <input id="net-trace-target" type="text" class="net-trace-input" placeholder="pixellot.tv" value="pixellot.tv" onkeydown="if(event.key==='Enter'){event.preventDefault();_runTraceroute(this.value.trim()||'pixellot.tv');}">
             <button id="net-trace-btn" class="btn-outline btn-ol-blue" onclick="_runTraceroute(document.getElementById('net-trace-target').value.trim()||'pixellot.tv')">
@@ -4420,7 +4919,9 @@ function _camPortTile(port, index, ctx) {
   let stateTxt, stateCls, dotCls;
   if (!p.isUp) { stateTxt = downLabelMap[p.downReason] || "Down"; stateCls = "fail"; dotCls = "cam-dot-down"; }
   else if (p.connecting) { stateTxt = "Connecting"; stateCls = "info"; dotCls = "cam-dot-connecting"; }
-  else if (p.isDegraded) { stateTxt = "Degraded"; stateCls = "warn"; dotCls = "cam-dot-warn"; }
+  // "Slow", matching the Dashboard NIC row and the Findings wording for
+  // the identical condition. This tile used to say "Degraded" for it.
+  else if (p.isDegraded) { stateTxt = "Slow"; stateCls = "warn"; dotCls = "cam-dot-warn"; }
   // Fully linked → always green. OCR vs Main is shown by the role badge, so
   // the status dot just signals link health (green = established) and never
   // lingers blue, which reads as "still connecting".
@@ -4432,7 +4933,7 @@ function _camPortTile(port, index, ctx) {
     : "";
 
   const cams = p.camerasDetected || [];
-  var camLabel = p.cameraLabel;
+  var camLabel = camRoleLabel(p.cameraLabel);   // display only; p.cameraLabel stays raw
   // Badge color: OCR → blue, Main Camera N → teal, generic Camera/Pixellot → muted.
   var camLabelCls;
   if (p.isOcr) camLabelCls = "badge-ol-info";
@@ -4512,7 +5013,7 @@ function _camDownGuidanceHtml(p, ctx) {
 function _camFindingsHtml(findings) {
   if (!findings.length) return "";
   return `<div class="card" id="cam-findings">
-    ${sectionTitle("alert-circle", findings.length + " finding" + (findings.length !== 1 ? "s need" : " needs") + " attention")}
+    ${sectionTitle("alert", findings.length + " finding" + (findings.length !== 1 ? "s need" : " needs") + " attention")}
     ${findings.map(f => `
       <div class="cam-finding-row cam-finding-row-${esc(f.severity)}">
         <div class="cam-finding-header">
@@ -4574,7 +5075,7 @@ function _camNicDiagramHtml(ports, showLiveBadge, sysInfo) {
     if (!p) return "—";              // padding slot, no physical port
     if (!p.isUp) return "No link";
     if (p.connecting) return "Connecting";
-    if (p.isDegraded) return "Degraded";
+    if (p.isDegraded) return "Slow";
     return "Linked";
   }
   // Physical ports: reversed (highest port on left = physical chassis left)
@@ -5050,7 +5551,7 @@ function _camPoeCardHtml(poe, ports) {
     var match = (ports || [])[p.port - 1] || null;
     var sub;
     if (p.readOk === false)              sub = "Read rejected by driver";
-    else if (match && match.cameraLabel) sub = match.cameraLabel;
+    else if (match && match.cameraLabel) sub = camRoleLabel(match.cameraLabel);
     else                                 sub = p.poeOn ? "Powered device" : "No device powered";
     return '<div class="cam-poe-row" id="cam-poe-row-' + p.port + '">' +
       '<div class="cam-poe-row-label">' +
@@ -5399,7 +5900,7 @@ function renderServices() {
         <div>
           <div class="svc-quick-action-title">Restart Agent + Coordinator</div>
           <div class="svc-quick-action-body">
-            The documented first fix when the Pixellot Agent or Coordinator stops responding. Try it before escalating for a hardware return (RMA). <span class="font-mono">Runs c:\\pixellot\\bin\\keepagentup.exe.</span>
+            Run this when Agent or Coordinator stop responding. <span class="font-mono">Runs c:\\pixellot\\bin\\keepagentup.exe.</span>
           </div>
         </div>
         <button class="btn-outline btn-ol-blue" id="svc-keepagent-btn" title="Documented first-line remedy when Agent/Coordinator is unresponsive">
@@ -6131,9 +6632,20 @@ function renderEvents() {
 
     function levelChip(level) {
       const l = (level || "").toLowerCase();
+      // "critical" has to come first and has to be LOUDER than error:
+      // Get-EventLogs.ps1:87 maps Windows Level 1 to "Critical", and this
+      // helper used to fall through to the info arm -- which both coloured
+      // it blue AND relabelled the cell "Information". The most severe class
+      // of Windows event was displayed as the least severe one.
+      if (l === "critical") return '<span class="ev-level-chip ev-level-fatal">Critical</span>';
       if (l === "error") return '<span class="ev-level-chip ev-level-error">Error</span>';
       if (l === "warning") return '<span class="ev-level-chip ev-level-warn">Warning</span>';
-      return '<span class="ev-level-chip ev-level-info">Information</span>';
+      if (l === "info" || l === "information" || !l)
+        return '<span class="ev-level-chip ev-level-info">Information</span>';
+      // Anything else (Get-EventLogs emits "Level<N>" for verbose tiers) is
+      // echoed rather than relabelled. Showing the real word is always more
+      // honest than asserting a severity we did not recognise.
+      return '<span class="ev-level-chip ev-level-info">' + esc(level) + '</span>';
     }
 
     evBody.innerHTML = `
@@ -6360,10 +6872,10 @@ function renderHelp() {
         <li><strong>A camera is missing or slow.</strong> Check <strong>Camera Connectivity</strong> for the port's link
         and speed (camera ports should be 1 Gbps), then <strong>Camera Hardware</strong> for firmware and reachability.</li>
         <li><strong>Scores aren't showing.</strong> Check <strong>ScoreConnect</strong> for the service and the
-        scoreboard feed, and confirm the OCR camera is calibrated under <strong>Calibrations</strong>.</li>
+        scoreboard feed, and confirm the scoreboard camera is calibrated under <strong>Calibrations</strong>.</li>
         <li><strong>Pixellot Agent looks stuck.</strong> <strong>Service Status</strong> shows the Agent, Coordinator, and
-        Watchdog. The documented first fix is <strong>Restart Agent + Coordinator</strong> on the
-        <strong>Pixellot Software</strong> tab.</li>
+        Watchdog. The documented first fix is the <strong>Restart Agent + Coordinator</strong> button
+        on that same tab.</li>
         <li><strong>Recording errors, or the disk is filling up.</strong> Check <strong>Disks</strong> for free space and drive
         health, and scan <strong>Pixellot Logs</strong> for fatal/restart markers (it flags the known CUDNN/TensorFlow
         dependency error).</li>
@@ -6822,7 +7334,7 @@ function installSc3() {
     <div class="sc3-modal-box">
       <div class="sc3-modal-header">
         <span class="sc3-modal-title">${svgIcon("download", 16)} Install ScoreConnect III</span>
-        <button class="sc3-modal-close" onclick="closeSc3Modal()" title="Close">${svgIcon("x", 16)}</button>
+        <button class="sc3-modal-close" onclick="closeSc3Modal()" title="Close" aria-label="Close">${svgIcon("x", 16)}</button>
       </div>
       <div class="sc3-modal-body">
         <div class="sc3-warn-box">
@@ -6960,7 +7472,7 @@ function _renderSc3Progress(status) {
     <div class="sc3-modal-box">
       <div class="sc3-modal-header">
         <span class="sc3-modal-title">${svgIcon("download", 16)} Installing ScoreConnect III</span>
-        ${_sc3Installing ? "" : `<button class="sc3-modal-close" onclick="closeSc3Modal()" title="Close">${svgIcon("x", 16)}</button>`}
+        ${_sc3Installing ? "" : `<button class="sc3-modal-close" onclick="closeSc3Modal()" title="Close" aria-label="Close">${svgIcon("x", 16)}</button>`}
       </div>
       <div class="sc3-modal-body">
         <div class="sc3-steps">${stepsHtml}</div>
@@ -7531,8 +8043,8 @@ function renderScoreConnect() {
         ${config.firmware ? kvRow("Firmware", config.firmware) : ""}
         ${config.eventType ? kvRow("Event Type", config.eventType) : ""}
         ${kvRow("Network", data.networkStatus)}
-        ${kvRowHtml("Local Stream", data.hasLocalStream != null
-          ? (data.hasLocalStream ? '<span class="status-pass">Detected</span>' : '<span class="status-fail">Not detected</span>')
+        ${kvRowHtml("Scoreboard feed reaching the VPU", data.hasLocalStream != null
+          ? (data.hasLocalStream ? '<span class="status-pass">Yes</span>' : '<span class="status-fail">No</span>')
           : '—')}
       </div>
       ${data.rawData ? `
@@ -8156,7 +8668,7 @@ function renderFaultIsolator() {
   function portOption(p, i, excludeIdx) {
     if (i === excludeIdx) return "";
     // Camera label (Main Camera 1, OCR, etc.) — same one shown on the port tile.
-    var camLbl = p.cameraLabel ? " (" + p.cameraLabel + ")" : "";
+    var camLbl = p.cameraLabel ? " (" + camRoleLabel(p.cameraLabel) + ")" : "";
     var down = !p.isUp || !(p.linkSpeedMbps > 0);
     var spd;
     if (down) spd = ": no link";
@@ -8231,7 +8743,7 @@ function renderFaultIsolator() {
       "</div>" +
       '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:12px">' +
         '<button id="fi-startover" class="btn-outline btn-ol-blue">Start Over</button>' +
-        (_fi.phase === 3 && !_fi.checking ? '<button id="fi-infer" class="btn-outline btn-ol-muted">No Spare CHU: Infer</button>' : "") +
+        (_fi.phase === 3 && !_fi.checking ? '<button id="fi-infer" class="btn-outline btn-ol-muted">No spare camera: work it out</button>' : "") +
         '<button id="fi-action" class="btn-outline btn-ol-blue"' + (_fi.checking ? " disabled" : "") + ">" + esc(btnLabel) + "</button>" +
       "</div>";
   }
@@ -8245,7 +8757,7 @@ function renderFaultIsolator() {
 
   $page().innerHTML = pageHeader(
     "Camera Connection Troubleshooting",
-    "Swap test that pins a camera fault to the port, the cable, or the camera (CHU).",
+    "Swap test that pins a camera fault to the port, the cable, or the camera head itself.",
     '<button class="btn-outline btn-ol-blue" onclick="navigate(\'cameras\')">' + svgIcon("arrow-left", 14) + " Back to Camera Connectivity</button>"
   ) + diagramCard + '<div class="card">' + stepDots() + inner + historyTable() + "</div>" +
     '<div id="fi-history-wrap">' + _fiHistoryHtml(_fiHistoryCache || []) + '</div>';
@@ -8625,7 +9137,7 @@ function renderFaultIsolator() {
       showResult("Phase 3: " + sl2 + ". The cable is fine; the fault follows the camera.", "", "info");
       _fi.phase = 3;
       _fi.phaseTitle = "DOES THE FAULT FOLLOW THE CAMERA?";
-      _fi.phaseInstruction = "Keep the new cable on " + tn2 + ". Connect a known-good camera, then Check Now. No spare? Click \"No Spare CHU: Infer\".";
+      _fi.phaseInstruction = "Keep the new cable on " + tn2 + ". Connect a known-good camera, then Check Now. No spare camera? Click \"No spare camera: work it out\".";
       _fi.actionLabel = "Check Now";
       renderFaultIsolator();
       return;
@@ -8649,8 +9161,8 @@ function renderFaultIsolator() {
         var v3 = "Link restored with a known-good camera, so the camera is the fault.";
         addHistory("Phase 4 - Camera Test", cfg3, sl3, v3, "Pass");
         showResult("Phase 4: " + sl3 + ". The fault follows the camera.", "", "pass");
-        conclude("Camera", "CONCLUSION: FAULTY CAMERA (CHU)",
-          "Replacing the camera restored the link, so the original camera (CHU) is the fault. Replace the camera unit.");
+        conclude("Camera", "CONCLUSION: FAULTY CAMERA",
+          "Replacing the camera restored the link, so the original camera is the fault. Replace the camera unit.");
         renderFaultIsolator();
         return;
       }
@@ -8676,11 +9188,11 @@ function renderFaultIsolator() {
     var tn = portLabel(_fi.testIdx);
     var cfg = "Port: " + tn + "  |  Cable: (NEW)  |  Camera: (no spare available)";
     addHistory("Phase 4 - SKIPPED", cfg, "—",
-      "No spare CHU, so this is inferred from Phase 2 and Phase 3.", "Info");
+      "No spare camera, so this is inferred from Phase 2 and Phase 3.", "Info");
     showResult("Phase 4 skipped, conclusion inferred.",
-      "The NIC port (Phase 2) and the cable (Phase 3) are both cleared, so the camera (CHU) is the remaining suspect.", "info");
-    conclude("LikelyCamera", "LIKELY CAMERA (CHU) FAULT: UNVERIFIED",
-      "The NIC port and cable are already cleared, so the camera (CHU) is the remaining suspect. Replace it when a known-good spare is available. If a known-good camera still fails, the NIC hardware is the next suspect: run the full diagnostic and escalate.");
+      "The NIC port (Phase 2) and the cable (Phase 3) are both cleared, so the camera is the remaining suspect.", "info");
+    conclude("LikelyCamera", "PROBABLY THE CAMERA \u2014 SWAP TEST NOT FINISHED",
+      "The NIC port and cable are already cleared, so the camera is the remaining suspect. This was not confirmed by a swap, because no spare camera was available. Replace it when a known-good spare is on hand. If a known-good camera still fails, the NIC hardware is the next suspect: run the full diagnostic and escalate.");
     renderFaultIsolator();
   }
 }

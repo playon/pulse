@@ -10,10 +10,16 @@
      BOTH --c-surface (#ffffff) and --c-bg (#f1f5f9). The tiers below carry
      10-12px metadata (log timestamps, gauge sublabels, card section labels),
      which is never "large text", so 3:1 is not good enough.
-     Ratios on #ffffff / #f1f5f9:  muted 7.6/6.9 · dim 5.6/5.1 · dimmer 4.8/4.3 */
+     The ramp is measured against every light surface it lands on, INCLUDING
+     --c-deep-bg. The first cut checked only #ffffff and #f1f5f9 and recorded
+     "dimmer 4.8/4.3" -- 4.3 is already under 4.5, and --c-deep-bg (#e8eef5,
+     the sidebar) is darker still, so the nav section labels sat at 4.07:1.
+     Measure the tier against the DARKEST light surface, not the page body.
+     Ratios on #ffffff / #f1f5f9 / #e8eef5:
+       muted 7.6/6.9/6.5 · dim 5.6/5.1/4.8 · dimmer 5.4/4.9/4.6 */
   --c-muted:     #475569;
   --c-dim:       #5b6980;
-  --c-dimmer:    #64748b;
+  --c-dimmer:    #5d6b80;
   --c-deep-bg:   #e8eef5;
   --c-tint-green:    rgba(22,163,74,0.12);
   --c-tint-red:      rgba(220,38,38,0.12);
@@ -170,7 +176,7 @@ html.dark #sidebar { background: var(--c-surface-2); }
 .badge-notfound { background: var(--c-border); color: var(--c-muted); }
 
 /* ── Severity badges ───────────────────────────────────────── */
-.sev-ok { background: var(--c-tint-green); color: var(--c-accent-green); border-left: 3px solid var(--c-accent-green); }
+.sev-ok { background: var(--c-tint-green); color: var(--c-accent-green); }
 
 /* ── Sidebar brand ─────────────────────────────────────────── */
 /* Full Pulse wordmark + heartbeat as the brand block.
@@ -433,7 +439,10 @@ html.dark .splash-logo {
     text-align: center;
 }
 .powered-by-label {
-    font-size: 0.6rem;
+    /* 0.6rem is 9.6px -- under the 11px floor for functional text, and this
+       sits in the sidebar of a tool read over a remote-desktop session where
+       everything is already resampled once. */
+    font-size: 0.69rem;
     font-weight: 700;
     letter-spacing: 0.1em;
     text-transform: uppercase;
@@ -683,10 +692,10 @@ html.dark .channel-moved-banner {
    The 90-second triage artifact: one big PASS/WARN/FAIL verdict at the top of
    the Dashboard, with the blockers/risks that drove it. A left accent stripe
    carries the verdict colour. */
-.rdy-card { margin-bottom: 1rem; border-left: 4px solid var(--c-border); padding: 1rem 1.25rem; }
-.rdy-card-pass { border-left-color: var(--c-accent-green); }
-.rdy-card-warn { border-left-color: var(--c-accent-amber); }
-.rdy-card-fail { border-left-color: var(--c-accent-red); }
+.rdy-card { margin-bottom: 1rem; padding: 1rem 1.25rem; }
+.rdy-card-pass { border-color: var(--c-accent-green); }
+.rdy-card-warn { border-color: var(--c-accent-amber); }
+.rdy-card-fail { border-color: var(--c-accent-red); }
 
 .rdy-main { display: flex; align-items: center; gap: 1rem; }
 .rdy-badge {
@@ -708,7 +717,6 @@ html.dark .channel-moved-banner {
 .rdy-fresh svg { opacity: 0.7; }
 
 .rdy-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 0.85rem; font-size: 0.72rem; color: var(--c-muted); }
-.rdy-policy { font-family: var(--font-mono, monospace); }
 
 /* Demo-only state switcher — hidden entirely on real VPUs (not rendered). */
 .rdy-demo-bar { display: flex; align-items: center; gap: 6px; margin-top: 0.75rem; padding-top: 0.7rem; border-top: 1px dashed var(--c-border); }
@@ -798,17 +806,67 @@ html.dark .channel-moved-banner {
 
 /* ── Top findings ───────────────────────────────────────────── */
 /* The list lives in .cc-findings, inside the Command Center. */
+/* A disclosure button, not a link: it opens the fix in place. The jump to the
+   owning tab lives inside the panel it opens. */
 .finding-item {
     display: flex;
     align-items: center;
     gap: 10px;
+    width: 100%;
     padding: 8px 10px;
+    border: none;
+    background: none;
+    font: inherit;
+    text-align: left;
     border-radius: 6px;
     text-decoration: none;
     transition: background 0.15s;
     color: var(--c-text);
     cursor: pointer;
 }
+.finding-item:focus-visible {
+    outline: 2px solid var(--c-accent-blue);
+    outline-offset: -2px;
+}
+/* The base chevron points right; as a disclosure it reads down when closed
+   and up when the fix is showing. */
+.finding-item .finding-arrow { transform: rotate(90deg); }
+.finding-item[aria-expanded="true"] .finding-arrow { transform: rotate(-90deg); }
+.finding-item[aria-expanded="true"] { background: var(--c-tint-blue-faint); }
+.finding-detail {
+    padding: 2px 10px 12px 44px;
+}
+.finding-rec {
+    font-size: 0.78rem;
+    line-height: 1.5;
+    color: var(--c-muted);
+    margin: 0 0 8px;
+    max-width: 68ch;
+}
+.finding-rec-none { font-style: italic; }
+.finding-open {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 0.74rem;
+    font-weight: 600;
+    color: var(--c-accent-blue);
+    text-decoration: none;
+}
+.finding-open:hover { text-decoration: underline; }
+.cc-findings-actions { display: inline-flex; align-items: center; gap: 10px; }
+.finding-copy {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--c-muted);
+    background: none;
+    border: 1px solid var(--c-border);
+    border-radius: 5px;
+    padding: 3px 8px;
+    cursor: pointer;
+    transition: color 0.12s, border-color 0.12s;
+}
+.finding-copy:hover { color: var(--c-accent-blue); border-color: var(--c-accent-blue); }
 .finding-item:hover { background: var(--c-tint-blue-faint); }
 .finding-dot {
     width: 8px;
@@ -820,14 +878,14 @@ html.dark .channel-moved-banner {
 .finding-dot-warning  { background: var(--c-accent-amber); box-shadow: 0 0 6px rgba(234, 179, 8, 0.3); }
 .finding-dot-info     { background: var(--c-accent-blue); }
 .finding-cat {
-    font-size: 0.7rem;
-    font-weight: 700;
+    font-size: 0.72rem;
+    font-weight: 600;
     color: var(--c-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    min-width: 80px;
+    white-space: nowrap;
+    flex-shrink: 0;
+    min-width: 132px;
 }
-/* The chip now shows severity (CRITICAL / WARNING), colored to match. */
+/* The chip carries the verdict phrase (VERDICT in app.js), colored to match. */
 .finding-cat-critical { color: var(--c-accent-red); }
 .finding-cat-warning  { color: var(--c-accent-amber); }
 .finding-cat-info     { color: var(--c-accent-blue); }
@@ -841,7 +899,9 @@ html.dark .channel-moved-banner {
     flex-shrink: 0;
     transition: transform 0.15s;
 }
-.finding-item:hover .finding-arrow { transform: translateX(2px); color: var(--c-muted); }
+.finding-item:hover .finding-arrow { color: var(--c-muted); }
+
+
 
 /* ── Active findings ──────────────────────────────────────── */
 .af-header {
@@ -1181,6 +1241,17 @@ html.dark .channel-moved-banner {
     gap: 0.75rem;
 }
 .page-title { font-size: 1.25rem; font-weight: 700; color: var(--c-text); margin: 0; }
+/* Text present for assistive tech and absent from the layout. Used where a
+   signal would otherwise be carried by colour alone. */
+.sr-only {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
 .page-subtitle { font-size: 0.8rem; color: var(--c-muted); margin: 0.15rem 0 0 0; }
 .page-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 
@@ -1283,16 +1354,16 @@ html.dark .channel-moved-banner {
     letter-spacing: 0.04em;
     text-transform: uppercase;
 }
-.svc-deps-current  { background: var(--c-tint-green); border-left: 3px solid var(--c-accent-green); }
+.svc-deps-current  { background: var(--c-tint-green); box-shadow: inset 0 0 0 1px var(--c-accent-green); }
 .svc-deps-current  svg, .svc-deps-current .svc-deps-pill { color: var(--c-accent-green); }
 .svc-deps-current  .svc-deps-pill { background: var(--c-tint-green); }
-.svc-deps-outdated { background: var(--c-tint-amber); border-left: 3px solid var(--c-accent-amber); }
+.svc-deps-outdated { background: var(--c-tint-amber); box-shadow: inset 0 0 0 1px var(--c-accent-amber); }
 .svc-deps-outdated svg, .svc-deps-outdated .svc-deps-pill { color: var(--c-accent-amber); }
 .svc-deps-outdated .svc-deps-pill { background: var(--c-tint-amber); }
-.svc-deps-missing  { background: var(--c-tint-red);   border-left: 3px solid var(--c-accent-red); }
+.svc-deps-missing  { background: var(--c-tint-red);   box-shadow: inset 0 0 0 1px var(--c-accent-red); }
 .svc-deps-missing  svg, .svc-deps-missing .svc-deps-pill { color: var(--c-accent-red); }
 .svc-deps-missing  .svc-deps-pill { background: var(--c-tint-red); }
-.svc-deps-newer    { background: var(--c-surface-3);   border-left: 3px solid var(--c-muted); }
+.svc-deps-newer    { background: var(--c-surface-3);   box-shadow: inset 0 0 0 1px var(--c-muted); }
 .svc-deps-newer    svg, .svc-deps-newer .svc-deps-pill { color: var(--c-muted); }
 .svc-deps-newer    .svc-deps-pill { background: var(--c-surface-3); }
 
@@ -1304,7 +1375,7 @@ html.dark .channel-moved-banner {
     padding: 8px 12px;
     border-radius: 6px;
     background: var(--c-tint-amber, rgba(217, 119, 6, 0.08));
-    border-left: 3px solid var(--c-accent-amber, #d97706);
+    box-shadow: inset 0 0 0 1px var(--c-accent-amber, #d97706);
     color: var(--c-text);
     font-size: 0.8rem;
     line-height: 1.45;
@@ -1326,11 +1397,11 @@ html.dark .channel-moved-banner {
 /* "ok" used to mean green — but EOL is informational, not a celebration,
    even when years away.  Now: blue/info for >1y or unknown, amber for
    <1y, red for <90d or past. */
-.sys-lifecycle-ok   { background: var(--c-tint-blue);  border-left: 3px solid var(--c-accent-blue); }
+.sys-lifecycle-ok   { background: var(--c-tint-blue);  box-shadow: inset 0 0 0 1px var(--c-accent-blue); }
 .sys-lifecycle-ok   svg { color: var(--c-accent-blue); }
-.sys-lifecycle-warn { background: var(--c-tint-amber); border-left: 3px solid var(--c-accent-amber); }
+.sys-lifecycle-warn { background: var(--c-tint-amber); box-shadow: inset 0 0 0 1px var(--c-accent-amber); }
 .sys-lifecycle-warn svg { color: var(--c-accent-amber); }
-.sys-lifecycle-crit { background: var(--c-tint-red);   border-left: 3px solid var(--c-accent-red);   }
+.sys-lifecycle-crit { background: var(--c-tint-red);   box-shadow: inset 0 0 0 1px var(--c-accent-red);   }
 .sys-lifecycle-crit svg { color: var(--c-accent-red); }
 
 /* Peripherals panel (mouse / keyboard / monitor) */
@@ -1378,7 +1449,7 @@ html.dark .channel-moved-banner {
 .sw-concern-banner {
     display: flex; align-items: center; gap: 8px;
     padding: 8px 12px; margin-bottom: 12px;
-    background: var(--c-tint-amber); border-left: 3px solid var(--c-accent-amber);
+    background: var(--c-tint-amber); box-shadow: inset 0 0 0 1px var(--c-accent-amber);
     border-radius: 6px;
     color: var(--c-text); font-size: 0.85rem;
 }
@@ -1446,40 +1517,54 @@ html.dark .channel-moved-banner {
     align-items: start;
     margin-top: 0.5rem;
 }
-/* Port-led tile: the port number leads (priority) with the protocol beside it
-   and a status pill — no hosts/domains (those live in Domain Reachability). A
-   top accent strip carries the status colour (green reachable / amber
-   no-failover / dim optional / red blocked-required), via --rowaccent. */
+/* Service-led tile: what the endpoint DOES leads, "UDP 2088" sits beneath it,
+   and a status pill sits right. Status reads twice — a dot beside the name
+   (the same signal the Dashboard findings list uses) and the pill's own word —
+   so it never depends on one colour alone. --rowaccent tints both.
+
+   This used to carry a 3px colour strip along the top edge. A thick coloured
+   rule on a rounded card is decoration standing in for a status signal, and it
+   was the only thing distinguishing a blocked tile from a reachable one at a
+   glance. The dot says it, and the pill says it in words. */
 .net-port-card {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    padding: 9px 12px 10px;
+    gap: 3px;
+    padding: 10px 12px 11px;
     background: var(--c-surface-2);
     border: 1px solid var(--c-border);
-    border-top: 3px solid var(--rowaccent, var(--c-border));
     border-radius: 8px;
     transition: border-color 0.12s ease;
 }
+.net-port-dot {
+    width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+    background: var(--rowaccent, var(--c-border));
+}
+
 .net-port-card:hover { border-color: var(--rowaccent, var(--c-border)); }
 .net-port-card.is-fail { border-color: rgba(220, 38, 38, 0.4); }
 /* Top row of a port tile: port number + ? tooltip cue on the left, the shared
    .badge-* status pill (same one Service Reachability rows use) on the right. */
 .net-port-card-head {
-    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
 }
 .net-port-card-lead {
-    display: inline-flex; align-items: center; gap: 7px; min-width: 0;
+    display: inline-flex; align-items: baseline; gap: 7px; min-width: 0; flex: 1 1 auto;
 }
 /* Port number leads (priority); protocol sits below it as a small label. */
-.net-port-num {
-    font-size: 1.1rem; font-weight: 700; color: var(--c-text);
+/* The service name leads. It wraps to two lines rather than truncating —
+   "Live video - last resort" has to stay readable, and a clipped service name
+   is worse than a taller tile. */
+.net-port-name {
+    font-size: 0.82rem; font-weight: 600; color: var(--c-text);
+    line-height: 1.25; min-width: 0;
+}
+/* Protocol + port, the tier-2 detail. Monospace here is measurement, not
+   costume: these are numbers a tech reads back to venue IT digit by digit. */
+.net-port-addr {
+    font-size: 0.68rem; font-weight: 500; color: var(--c-muted);
     font-family: "SF Mono","Cascadia Mono","Fira Code",monospace;
     letter-spacing: 0.01em; white-space: nowrap;
-}
-.net-port-proto-tag {
-    font-size: 0.62rem; font-weight: 600; color: var(--c-muted);
-    text-transform: uppercase; letter-spacing: 0.08em;
 }
 .net-port-card-foot {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
@@ -2200,8 +2285,8 @@ details[open] > .cam-details-btn::before { transform: rotate(90deg); }
    row reads as its own card-within-card. */
 .cam-finding-row { border-radius: 6px; padding: 10px 14px; margin-bottom: 10px; box-shadow: inset 0 0 0 1px var(--c-border); }
 .cam-finding-row:last-child { margin-bottom: 0; }
-.cam-finding-row-critical { background: var(--c-tint-red); border-left: 3px solid var(--c-accent-red); }
-.cam-finding-row-warning  { background: var(--c-tint-amber); border-left: 3px solid var(--c-accent-amber); }
+.cam-finding-row-critical { background: var(--c-tint-red); box-shadow: inset 0 0 0 1px var(--c-accent-red); }
+.cam-finding-row-warning  { background: var(--c-tint-amber); box-shadow: inset 0 0 0 1px var(--c-accent-amber); }
 .cam-finding-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
 .cam-finding-pill { font-size: 0.65rem; font-weight: 700; border-radius: 3px; padding: 2px 6px; color: var(--c-on-accent); flex-shrink: 0; }
 .cam-finding-pill-critical { background: var(--c-pill-critical); }
@@ -2214,8 +2299,8 @@ details[open] > .cam-details-btn::before { transform: rotate(90deg); }
    headroom on that port. Fills use --c-status-* (they are fills, not text);
    the note titles use --c-accent-* per the a11y pass in PR #138. */
 .cam-poe-note { border-radius: 6px; padding: 10px 14px; box-shadow: inset 0 0 0 1px var(--c-border); }
-.cam-poe-note-info { background: var(--c-tint-blue); border-left: 3px solid var(--c-accent-blue); }
-.cam-poe-note-warn { background: var(--c-tint-amber); border-left: 3px solid var(--c-accent-amber); }
+.cam-poe-note-info { background: var(--c-tint-blue); box-shadow: inset 0 0 0 1px var(--c-accent-blue); }
+.cam-poe-note-warn { background: var(--c-tint-amber); box-shadow: inset 0 0 0 1px var(--c-accent-amber); }
 .cam-poe-note-title { font-size: 0.8rem; font-weight: 600; margin-bottom: 4px; }
 .cam-poe-note-info .cam-poe-note-title { color: var(--c-accent-blue); }
 .cam-poe-note-warn .cam-poe-note-title { color: var(--c-accent-amber); }
@@ -2306,10 +2391,10 @@ details[open] > .cam-details-btn::before { transform: rotate(90deg); }
 .fi-result-detail { font-size: 0.78rem; color: var(--c-muted); margin-top: 3px; line-height: 1.45; }
 
 .fi-verdict-card { border-radius: 8px; padding: 20px; margin-bottom: 16px; }
-.fi-verdict-cable   { background: var(--c-tint-amber);  border-left: 4px solid var(--c-accent-amber); }
-.fi-verdict-nic     { background: var(--c-tint-red);     border-left: 4px solid var(--c-accent-red); }
-.fi-verdict-camera  { background: var(--c-tint-amber);   border-left: 4px solid var(--c-accent-amber); }
-.fi-verdict-unknown { background: var(--c-surface-3);   border-left: 4px solid var(--c-dim); }
+.fi-verdict-cable   { background: var(--c-tint-amber);  box-shadow: inset 0 0 0 1px var(--c-accent-amber); }
+.fi-verdict-nic     { background: var(--c-tint-red);     box-shadow: inset 0 0 0 1px var(--c-accent-red); }
+.fi-verdict-camera  { background: var(--c-tint-amber);   box-shadow: inset 0 0 0 1px var(--c-accent-amber); }
+.fi-verdict-unknown { background: var(--c-surface-3);   box-shadow: inset 0 0 0 1px var(--c-dim); }
 .fi-verdict-title { font-size: 1.05rem; font-weight: 700; margin-bottom: 8px; color: var(--c-text); }
 .fi-verdict-body  { font-size: 0.875rem; color: var(--c-text); line-height: 1.6; }
 
@@ -2341,16 +2426,20 @@ details[open] > .fi-hist-summary::before { transform: rotate(90deg); }
     display: flex; align-items: center; justify-content: space-between;
     gap: 1rem; flex-wrap: wrap;
 }
+/* The text block takes whatever the button leaves. min-width:0 lets it
+   shrink instead of pushing the button off the card at narrow RDP widths;
+   the row's flex-wrap then drops the button below when it runs out. */
+.svc-quick-action-row > div { flex: 1 1 auto; min-width: 0; }
 .svc-quick-action-title { font-weight: 600; font-size: 0.95rem; color: var(--c-text); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.svc-quick-action-body  { font-size: 0.8rem; color: var(--c-muted); margin-top: 4px; max-width: 580px; line-height: 1.5; }
+.svc-quick-action-body  { font-size: 0.8rem; color: var(--c-muted); margin-top: 4px; line-height: 1.5; }
 
 .svc-quick-action-result {
     margin-top: 0.75rem; padding: 0.75rem 0.875rem; border-radius: 6px;
 }
 .svc-quick-action-result.hidden { display: none; }
-.svc-result-ok  { background: var(--c-tint-green); border-left: 3px solid var(--c-accent-green); color: var(--c-text); }
-.svc-result-err { background: var(--c-tint-red);   border-left: 3px solid var(--c-accent-red);   color: var(--c-text); }
-.svc-result-warn { background: var(--c-tint-amber); border-left: 3px solid var(--c-accent-amber); color: var(--c-text); }
+.svc-result-ok  { background: var(--c-tint-green); box-shadow: inset 0 0 0 1px var(--c-accent-green); color: var(--c-text); }
+.svc-result-err { background: var(--c-tint-red);   box-shadow: inset 0 0 0 1px var(--c-accent-red);   color: var(--c-text); }
+.svc-result-warn { background: var(--c-tint-amber); box-shadow: inset 0 0 0 1px var(--c-accent-amber); color: var(--c-text); }
 .svc-result-output {
     margin-top: 6px; padding: 6px 8px; border-radius: 4px;
     background: var(--c-surface-3); color: var(--c-text);
@@ -2385,14 +2474,13 @@ details[open] > .fi-hist-summary::before { transform: rotate(90deg); }
     padding: 14px;
     display: flex;
     flex-direction: column;
-    border-left: 4px solid;
 }
 /* Theme-aware accent colors + thicker stripe so the running/stopped
    indicator is legible at a glance — was 3px raw hex that washed out
    on the dark surface. */
-.svc-tile-running { border-left-color: var(--c-accent-green); }
-.svc-tile-stopped { border-left-color: var(--c-accent-red); }
-.svc-tile-muted   { border-left-color: var(--c-dimmer); }
+.svc-tile-running { border-color: var(--c-accent-green); }
+.svc-tile-stopped { border-color: var(--c-accent-red); }
+.svc-tile-muted   { border-color: var(--c-dimmer); }
 .svc-tile-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
 .svc-tile-name { font-size: 0.85rem; font-weight: 600; color: var(--c-text); }
 .svc-tile-display { font-size: 0.7rem; color: var(--c-muted); margin-bottom: 4px; }
@@ -2556,7 +2644,7 @@ details[open] > .fi-hist-summary::before { transform: rotate(90deg); }
 .px-log-deps-warn {
     display: flex; gap: 10px; align-items: flex-start;
     padding: 10px 14px; border-radius: 6px;
-    background: var(--c-tint-red); border-left: 3px solid var(--c-accent-red);
+    background: var(--c-tint-red); box-shadow: inset 0 0 0 1px var(--c-accent-red);
     color: var(--c-text);
 }
 .px-log-deps-warn svg { flex-shrink: 0; color: var(--c-accent-red); margin-top: 2px; }
@@ -2833,8 +2921,8 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
   padding: 0.625rem 0.75rem; border-radius: 6px; margin-bottom: 0.5rem;
 }
 .audio-finding:last-child { margin-bottom: 0; }
-.audio-finding-warning { background: var(--c-tint-amber, rgba(217, 119, 6, 0.08)); border-left: 3px solid var(--c-accent-amber, #d97706); }
-.audio-finding-info    { background: var(--c-tint-blue-faint); border-left: 3px solid var(--c-accent-blue); }
+.audio-finding-warning { background: var(--c-tint-amber, rgba(217, 119, 6, 0.08)); box-shadow: inset 0 0 0 1px var(--c-accent-amber, #d97706); }
+.audio-finding-info    { background: var(--c-tint-blue-faint); box-shadow: inset 0 0 0 1px var(--c-accent-blue); }
 .audio-finding-pill {
   font-size: 0.65rem; font-weight: 700; border-radius: 3px;
   padding: 2px 6px; color: var(--c-on-accent); flex-shrink: 0;
@@ -2998,10 +3086,10 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
     border: 1px solid var(--c-border);
     background: var(--c-surface-3);
 }
-.net-ping-pass { border-left: 3px solid var(--c-accent-green); }
-.net-ping-warn { border-left: 3px solid var(--c-accent-amber); }
-.net-ping-fail { border-left: 3px solid var(--c-accent-red); }
-.net-ping-info { border-left: 3px solid var(--c-accent-blue); }
+.net-ping-pass { border-color: var(--c-accent-green); }
+.net-ping-warn { border-color: var(--c-accent-amber); }
+.net-ping-fail { border-color: var(--c-accent-red); }
+.net-ping-info { border-color: var(--c-accent-blue); }
 
 .net-ping-header {
     display: flex;
@@ -3220,6 +3308,52 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
     grid-template-columns: repeat(6, 1fr);
     gap: 0.75rem;
     margin-bottom: 1rem;
+}
+/* A short qualifier after a key-value figure, where the number alone does
+   not say whether it is good. */
+.kv-hint {
+    display: block;
+    font-size: 0.66rem;
+    font-weight: 500;
+    color: var(--c-dimmer);
+}
+/* Per-camera headline: what Pulse actually checked, above ~30 raw fields. */
+.cam-hl {
+    font-size: 0.74rem;
+    font-weight: 600;
+    margin: 2px 0 8px;
+}
+.cam-hl-ok   { color: var(--c-dim); }
+.cam-hl-warn { color: var(--c-accent-amber); }
+.cam-hl-bad  { color: var(--c-accent-red); }
+/* A gauge's verdict in a word. The ring's colour already encoded this; the
+   word makes it readable to someone who does not know what 64% means, and to
+   anyone who cannot separate the amber ring from the blue one. */
+.gauge-verdict {
+    font-size: 0.66rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+}
+.gauge-verdict-ok   { color: var(--c-dim); }
+.gauge-verdict-warn { color: var(--c-accent-amber); }
+.gauge-verdict-crit { color: var(--c-accent-red); }
+/* The panel's verdict, above its raw counters. */
+.net-live-verdict {
+    font-size: 0.82rem;
+    font-weight: 500;
+    line-height: 1.45;
+    margin: 0 0 0.7rem;
+    max-width: 72ch;
+}
+/* A column's unit or normal range, under its name, so the header carries the
+   meaning that used to live in a title= nobody hovers. */
+.th-unit {
+    display: block;
+    font-size: 0.62rem;
+    font-weight: 500;
+    color: var(--c-dimmer);
+    text-transform: none;
+    letter-spacing: 0;
 }
 @media (max-width: 900px) { .net-live-gauges { grid-template-columns: repeat(3, 1fr); } }
 @media (max-width: 500px) { .net-live-gauges { grid-template-columns: repeat(2, 1fr); } }
@@ -3789,9 +3923,9 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
 }
 
 /* ── SC III crash auto-restart panel ────────────────────────── */
-.sc3-recovery { border-left: 3px solid var(--c-border); }
-.sc3-recovery-on { border-left-color: var(--c-accent-green); }
-.sc3-recovery-off { border-left-color: var(--c-accent-amber); }
+.sc3-recovery { box-shadow: inset 0 0 0 1px var(--c-border); border-radius: 6px; }
+.sc3-recovery-on { box-shadow: inset 0 0 0 1px var(--c-accent-green); }
+.sc3-recovery-off { box-shadow: inset 0 0 0 1px var(--c-accent-amber); }
 .sc3-recovery-head {
     display: flex;
     align-items: flex-start;

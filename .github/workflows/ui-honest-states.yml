@@ -1,0 +1,82 @@
+# Kill a collector, load the page, and check Pulse admits it.
+#
+# The third frontend guard. ui-contract.yml reads the source, ui-render-sweep
+# .yml opens the healthy page, and this one breaks things on purpose.
+#
+# What it is for. A PowerShell collector on a real VPU can die: a script
+# times out, WMI hangs, a device disappears. Pulse's job in that moment is to
+# say so. A map of 42 panels found 28 that do the opposite -- they render the
+# failure as a healthy result -- and only 1 that gets it right.
+#
+# The costly one: with the camera collectors dead, Camera Connectivity draws
+# "No NIC ports detected" and four fabricated "Port N - Not detected" rows.
+# That is pixel-identical to a genuinely absent GIE74P PoE card, which is the
+# signature that sends a unit to RMA. A timed-out script and missing hardware
+# look the same on screen.
+#
+# Why nobody noticed: demo_data.py contains zero '"error": True', so before
+# tools/ui-sweep/serve_demo.py --fault existed, not one degraded path was
+# reachable outside a real broken VPU. Every failure branch shipped unseen.
+#
+# This is slower than the other two guards (~8 min) because it boots a server
+# per scenario -- powershell.py keeps a short-TTL result cache, so switching
+# faults at runtime would be masked by it. The healthy baselines are captured
+# in a single session to keep that cost down.
+#
+# It is green today: the 10 already-dishonest lanes are enumerated in
+# BASELINE inside states.mjs, so the guard fails on a NEW one. The
+# local-network scenario is a POSITIVE CONTROL -- the one lane that handles
+# this correctly. If it ever fails, the harness is broken, not the lane.
+
+name: UI honest states
+
+on:
+  push:
+    branches: [dev, beta, main]
+    paths:
+      - "Pulse.Web/app/static/**"
+      - "Pulse.Web/app/main.py"
+      - "Pulse.Web/app/demo_data.py"
+      - "Pulse.Web/app/powershell.py"
+      - "tools/ui-sweep/**"
+      - ".github/workflows/ui-honest-states.yml"
+  pull_request:
+    paths:
+      - "Pulse.Web/app/static/**"
+      - "Pulse.Web/app/main.py"
+      - "Pulse.Web/app/demo_data.py"
+      - "Pulse.Web/app/powershell.py"
+      - "tools/ui-sweep/**"
+      - ".github/workflows/ui-honest-states.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  honest-states:
+    name: A dead collector must not render as a pass
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Pulse.Web dependencies
+        run: python3 -m pip install --quiet -r Pulse.Web/app/requirements.txt
+
+      - name: Confirm Chrome is present
+        run: google-chrome --version
+
+      # The harness starts and stops its own servers, one per scenario.
+      - name: Fault each collector and check the page says so
+        env:
+          CHROME_PATH: /usr/bin/google-chrome
+        run: node tools/ui-sweep/states.mjs
