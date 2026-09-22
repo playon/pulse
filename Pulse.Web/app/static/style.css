@@ -3071,6 +3071,54 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
 }
 .net-issue-details li + li { margin-top: 2px; }
 
+/* Under a finding's body on the Dashboard, the Network card and Camera
+   Connectivity: one row per affected port or service, the line to send venue
+   IT, and a collapsed "How Pulse knows". The body above is written to be read
+   aloud to a school; these are for whoever acts on it. */
+.finding-details {
+    margin: 0 0 8px;
+    padding-left: 1rem;
+    list-style: disc;
+    font-size: 0.72rem;
+    color: var(--c-dim);
+    line-height: 1.6;
+    max-width: 68ch;
+}
+.finding-details li + li { margin-top: 2px; }
+.finding-it {
+    margin: 8px 0 0;
+    max-width: 68ch;
+    font-size: 0.74rem;
+    line-height: 1.5;
+    color: var(--c-text);
+}
+.finding-it-label { font-weight: 600; margin-right: 4px; }
+.finding-evidence {
+    margin: 6px 0 0;
+    max-width: 68ch;
+    font-size: 0.72rem;
+    color: var(--c-dim);
+}
+.finding-evidence > summary {
+    cursor: pointer;
+    width: max-content;
+    color: var(--c-muted);
+}
+.finding-evidence > summary:focus-visible {
+    outline: 2px solid var(--c-accent-blue);
+    outline-offset: 2px;
+}
+.finding-evidence > p { margin: 4px 0 0; line-height: 1.5; }
+/* The Dashboard detail puts "Open <page>" under the extras; keep a gap. */
+.finding-detail > .finding-evidence,
+.finding-detail > .finding-it { margin-bottom: 8px; }
+/* The Network card's issue body runs the card's full width; match it so the
+   venue-IT line and the evidence don't stop short of the text above them. */
+.net-issue-text .finding-it,
+.net-issue-text .finding-evidence { max-width: none; }
+.net-tip-evidence { display: block; margin-top: 5px; color: var(--c-muted); }
+.cam-poe-note-evidence { font-size: 0.72rem; color: var(--c-dim); line-height: 1.4; margin-top: 4px; }
+
 /* Local Network Health — ping cards */
 .net-ping-grid {
     display: grid;

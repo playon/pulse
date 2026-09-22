@@ -24,6 +24,14 @@ import main  # noqa: E402
 import powershell  # noqa: E402
 
 
+def _finding_text(f):
+    """Everything a finding tells the reader: the body, the venue-IT line,
+    the evidence and the per-row details. Findings carry their facts in
+    whichever of these fits the audience, so assert against all of them."""
+    return " ".join([f.get("recommendation") or "", f.get("it") or "",
+                     f.get("evidence") or ""] + list(f.get("details") or []))
+
+
 # ── Version comparison (GPU compat caps) ─────────────────────
 class TestVersionCompare(unittest.TestCase):
     def test_wildcard_cap_allows_any_patch(self):
@@ -809,8 +817,8 @@ class TestAdapterRoles(unittest.TestCase):
         self.assertIsNotNone(f)
         self.assertEqual(f["severity"], "critical")
         self.assertIn("camera port", f["title"].lower())
-        self.assertIn("Ethernet 28", f["recommendation"])
-        self.assertIn("no cable connected", f["recommendation"])  # motherboard cable is out
+        self.assertIn("Ethernet 28", _finding_text(f))
+        self.assertIn("no cable connected", _finding_text(f))  # motherboard cable is out
 
     def test_motherboard_disabled_note(self):
         cfg = self._bad()
@@ -838,7 +846,7 @@ class TestAdapterRoles(unittest.TestCase):
                 ipc["ipv4DefaultGateway"] = "192.168.100.1"   # scalar, not a list
         f = main._camera_nic_uplink_finding(cfg)
         self.assertIsNotNone(f)
-        self.assertIn("192.168.100.1", f["recommendation"])  # full gateway, not "1"
+        self.assertIn("192.168.100.1", _finding_text(f))  # full gateway, not "1"
 
 
 # ── Wi-Fi card disabled (Pixellot Connect) ───────────────────────────
@@ -884,7 +892,7 @@ class TestWifiDisabled(unittest.TestCase):
         self.assertIsNotNone(f)
         self.assertEqual(f["severity"], "warning")
         self.assertIn("Connect", f["recommendation"])
-        self.assertIn("Wireless-AC 9560", f["recommendation"])
+        self.assertIn("Wireless-AC 9560", _finding_text(f))
 
     def test_enabled_wifi_does_not_warn(self):
         self.assertIsNone(main._wifi_disabled_finding(self._cfg(wifi_status="Up", wifi_admin="Up")))
@@ -927,7 +935,7 @@ class TestDnsProbeFalsePositive(unittest.TestCase):
     def test_dns_reported_when_nothing_resolves(self):
         # DNS fails AND no hostname-based service passed → genuine DNS problem, still flag.
         titles = self._net_titles(self._ports("fail", "fail"))
-        self.assertTrue(any("DNS is blocked" in t for t in titles), titles)
+        self.assertTrue(any("blocking name lookups" in t for t in titles), titles)
 
 
 # ── NTP source allowlist (PDF #9) ────────────────────────────
@@ -1102,10 +1110,10 @@ class TestLmiGatewayLogFinding(unittest.TestCase):
              if x["code"] == "lmi-ssl-blocked"]
         self.assertEqual(len(f), 1)
         self.assertEqual(f[0]["severity"], "warning")
-        self.assertIn("201", f[0]["recommendation"])
+        self.assertIn("201", _finding_text(f[0]))
         # The fix has to name the gateway wildcard - an allowlist entry for
         # secure.logmein.com alone leaves control.lmi-app*.logmein.com dead.
-        self.assertIn("*.logmein.com", f[0]["recommendation"])
+        self.assertIn("*.logmein.com", _finding_text(f[0]))
 
     def test_recovered_block_stays_off_dashboard(self):
         # Failures followed by a successful login = venue lifted the block.

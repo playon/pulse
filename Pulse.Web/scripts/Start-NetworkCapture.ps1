@@ -320,7 +320,7 @@ try {
         $rtmFindings += [ordered]@{
             severity = 'info'
             title    = 'This VPU cannot capture packets until Windows is updated'
-            body     = "Windows is at build $osBuild, whose packet monitor is the original October 2018 release. It can count traffic, which is what the totals above are, but it cannot record the packets themselves -- so connection resets, retransmissions and the endpoint list are unavailable on this unit. A current VPU reports all of them. This is the same missing Windows cumulative update that the Software Updates card reports."
+            body     = "This VPU's Windows (build $osBuild) is too old to record individual packets, so resets, retransmissions and the endpoint list aren't available. The totals above are still accurate. The fix is the missing Windows update shown on the Software Updates card."
         }
         if ($rtmPackets -eq 0) {
             $rtmFindings += [ordered]@{
@@ -594,16 +594,16 @@ try {
     if ($tcpResets -gt 5) {
         $findings += [ordered]@{
             severity = 'warning'
-            title    = "$tcpResets TCP reset(s) seen"
-            body     = "Connections are being forcefully terminated. Common causes: a content filter resetting blocked domains, a server rejecting connections, or idle connection timeouts."
+            title    = "$tcpResets connection resets seen"
+            body     = "Connections are being cut off. Check Network Test for a web filter or SSL inspection finding; if there is none, these may just be servers closing idle connections."
         }
     }
 
     if ($droppedPackets -gt 0) {
         $findings += [ordered]@{
             severity = 'critical'
-            title    = "$droppedPackets packet(s) dropped by the network stack"
-            body     = "Packets were dropped before reaching the application. Look at NIC buffer overflow, the network driver, or a security filter blocking traffic."
+            title    = "$droppedPackets packet$(if ($droppedPackets -ne 1) { 's' }) dropped inside the VPU"
+            body     = "Packets are being dropped inside the VPU before any app receives them. Try an updated network driver first; a full network buffer or security software filtering traffic can also cause this."
         }
     }
 
