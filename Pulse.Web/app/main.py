@@ -1377,6 +1377,19 @@ def _wifi_disabled_finding(network_config):
 # www.python.org). Only a hit in here gates readiness — a district blocking
 # LogMeIn is a support headache, not a reason to tell a tech the game is at
 # risk.
+
+def _tls_exempt_list(rows):
+    """The exact list to hand venue IT: a wildcard plus the bare domain for
+    each affected site. Built from the failing rows so the example is never
+    a domain that isn't actually broken on this network."""
+    seen, out = set(), []
+    for r in rows:
+        base = ".".join((r.get("domain") or "").split(".")[-2:])
+        if base and base not in seen:
+            seen.add(base)
+            out += [f"*.{base}", base]
+    return ", ".join(out)
+
 _BROADCAST_CRITICAL_TLS_DOMAINS = {
     "singular.live",
     "app.singular.live",
@@ -2230,6 +2243,7 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
         if intercepted:
             interceptors = ", ".join(tls_inspection.get("interceptorIssuers") or [])
             hosts = ", ".join(r.get("domain", "?") for r in intercepted)
+            exempt = _tls_exempt_list(intercepted)
             findings.append(
                 {
                     "code": "ssl-inspection",
@@ -2237,15 +2251,10 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                     "category": "Network",
                     "title": "The venue firewall is intercepting secure connections (SSL inspection)",
                     "recommendation": (
-                        f"The network is decrypting the VPU's secure connections to: {hosts}. "
-                        + (f"The intercepting device identifies itself as {interceptors}. " if interceptors else "")
-                        + "The VPU rejects the substituted certificate, so those services are cut "
-                        "off outright. Don't expect a clean broadcast until this is fixed, and it "
-                        "can only be fixed on the venue's network. "
-                        "Ask the venue's IT team to add these domains to the firewall's SSL "
-                        "decryption bypass/exemption list (use a wildcard like *.singular.live "
-                        "plus the bare domain). A URL allowlist alone will not do it. "
-                        "See the Network tab for the full certificate detail."
+                        f"The firewall{f' ({interceptors})' if interceptors else ''} is replacing "
+                        f"the VPU's certificates for {hosts}, so the VPU refuses those connections. "
+                        f"Ask venue IT to exempt these from SSL decryption (an allowlist entry "
+                        f"alone won't do it): {exempt}"
                     ),
                 }
             )
@@ -2284,17 +2293,12 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                 else "A web filter on the venue network"
             )
             evidence = (
-                f" Browsing to one of them from this network lands on the filter's "
-                f"block page ({block_urls[0]}), which names the rule and category "
-                f"being applied." if block_urls else ""
+                f" The filter's block page names the rule it applied: {block_urls[0]}"
+                if block_urls else ""
             )
             fix = (
-                f"Ask the venue's IT team to allow these domains in the WEB FILTER's "
-                f"category/URL policy. This is a content-category block, so an SSL "
-                f"decryption bypass alone will not fix it. Use a wildcard plus the bare "
-                f"domain (e.g. *.singular.live AND singular.live). While they are in "
-                f"there, have them exempt the same domains from SSL decryption so the "
-                f"second failure mode can't replace the first."
+                f"Ask venue IT for a category exception (not just a URL entry) and an "
+                f"SSL-decryption exemption: {_tls_exempt_list(filtered)}"
             )
             if broadcast_hit:
                 findings.append(
@@ -2307,12 +2311,9 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                             f"{'s' if len(filtered) != 1 else ''}"
                         ),
                         "recommendation": (
-                            f"{who_lower} accepts the connection to {hosts} and then drops it the "
-                            f"instant the VPU names the site. That is a blocked category, "
-                            f"not certificate inspection: the certificates here are "
-                            f"untouched.{evidence} Graphics, scheduling and updates are cut "
-                            f"off outright and it can only be fixed on the venue's network. "
-                            f"{fix} See the Network tab for the per-service impact."
+                            f"{who_lower} drops connections to {hosts} by category. Certificates "
+                            f"aren't touched, so an SSL-decryption bypass alone won't fix it. "
+                            f"{fix}{evidence}"
                         ),
                     }
                 )
@@ -2327,9 +2328,8 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                             f"{'s' if len(filtered) != 1 else ''} ({hosts})"
                         ),
                         "recommendation": (
-                            f"These are support-plane services, so tonight's broadcast is "
-                            f"unaffected. Remote support and installer downloads will still "
-                            f"fail on this network.{evidence} {fix}"
+                            f"Tonight's broadcast is unaffected, but remote support and installer "
+                            f"downloads will fail on this network. {fix}{evidence}"
                         ),
                     }
                 )

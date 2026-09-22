@@ -3561,6 +3561,19 @@ const TLS_DOMAIN_IMPACT = {
   "www.python.org": "The Pulse installer can't download Python on this network.",
 };
 
+// The exact list to hand venue IT: a wildcard plus the bare domain for each
+// affected site, built from the rows that failed. The old copy always used
+// singular.live as its example, even when the only failing host was
+// pixellot.tv, and a tech pasted the wrong domain to IT.
+function _tlsExemptList(rows) {
+  var seen = {}, out = [];
+  rows.forEach(function(r) {
+    var base = (r.domain || "").split(".").slice(-2).join(".");
+    if (base && !seen[base]) { seen[base] = true; out.push("*." + base, base); }
+  });
+  return out.join(", ");
+}
+
 // One-line LogMeIn service-log note under the Secure Connections table — the
 // historical half of the middlebox story. The live handshake rows above show
 // the network as it is right now; LogMeIn's own log shows what the venue did
@@ -3978,20 +3991,22 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
     issues.push({
       severity: "critical",
       title: "The venue firewall is intercepting secure connections (SSL inspection)",
-      body: "The venue's network is decrypting the VPU's secure traffic and substituting its own certificate"
-        + (interceptorNames ? '. The intercepting device identifies itself as "' + interceptorNames + '"' : "")
-        + ". The VPU rejects the substituted certificate, so every service listed below is cut off. Each "
-        + "line shows what that breaks. Don't expect a clean broadcast until this is fixed, and it can only "
-        + "be fixed on the venue's network. Ask the venue's IT team to add these domains "
-        + "to the firewall's SSL decryption bypass/exemption list, using a wildcard that covers every "
-        + "subdomain plus the bare domain (e.g. *.singular.live AND singular.live). A URL allowlist alone "
-        + "will not do it. The traffic has to be exempt from decryption.",
+      // Three sentences: what is happening, why every other check is green,
+      // and the exact list to paste to venue IT. Per-host impact lives in the
+      // detail rows, so the body doesn't restate it.
+      body: (interceptorNames ? 'The firewall ("' + interceptorNames + '")' : "The firewall")
+        + " is replacing the VPU's certificates, so the VPU refuses the connections below."
+        + " Port checks still pass because the connection opens first."
+        + " Ask venue IT to exempt these from SSL decryption (an allowlist entry alone won't do it): "
+        + _tlsExemptList(tlsIntercepted.concat(tlsHsFail)),
       details: tlsIntercepted.map(function(r) {
-        var impact = TLS_DOMAIN_IMPACT[r.domain] || "";
-        return r.domain + ': certificate issued by "' + (r.issuerCn || r.issuer || "an untrusted authority")
-          + '" instead of a public certificate authority' + (impact ? ". " + impact : "");
+        var impact = TLS_DOMAIN_IMPACT[r.domain] || "connection refused.";
+        // The body already names the interceptor; only repeat the issuer
+        // when the collector couldn't name it up there.
+        return r.domain + ": " + (interceptorNames ? "" : 'certificate from "'
+          + (r.issuerCn || r.issuer || "an untrusted authority") + '". ') + impact;
       }).concat(tlsHsFail.map(function(r) {
-        return r.domain + ": the secure handshake was refused (consistent with the same inspection)";
+        return r.domain + ": handshake refused, likely the same inspection.";
       })),
     });
   }
@@ -4011,26 +4026,20 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
       title: (vendorNames ? "Venue web filter (" + vendorNames + ")" : "A web filter on the venue network")
         + " is blocking " + tlsFiltered.length + " Pixellot service"
         + (tlsFiltered.length === 1 ? "" : "s") + " by category",
-      body: (vendorNames ? "The venue runs a " + vendorNames + " web filter. " : "")
-        + "Each connection below reaches the server and is then dropped the instant the VPU says which site it wants. "
-        + "That is a content filter matching the hostname against a blocked category. It is not certificate "
-        + "inspection. The certificates are untouched, so an SSL-decryption bypass on its own will not fix it"
-        + (blockUrlRow ? ", and a browser on this network is sent to the filter's own block page instead ("
-            + blockUrlRow.blockPageHost + ")" : "")
-        + ". Ask the venue's IT team to allow these domains in the web filter's category/URL policy, using a wildcard "
-        + "plus the bare domain (e.g. *.singular.live AND singular.live). It has to be a category exception, not only a URL entry. "
-        + "While they are in the console, have them exempt the same domains from SSL decryption so the other failure "
-        + "mode can't take its place. It can only be fixed on the venue's network.",
+      body: (vendorNames ? "The venue's " + vendorNames + " web filter" : "A web filter on the venue network")
+        + " drops these connections by category the moment the VPU names the site."
+        + " Certificates aren't touched, so an SSL-decryption bypass alone won't fix it."
+        + " Ask venue IT for a category exception (not just a URL entry) and an SSL-decryption exemption: "
+        + _tlsExemptList(tlsFiltered),
       // Per-service impact first, then the block page URL ONCE at the end:
       // it's the single most useful line to paste to venue IT (it carries the
       // rule and category the filter applied), and repeating a 200-character
       // URL on every row buries the impacts it sits next to.
       details: tlsFiltered.map(function(r) {
         var impact = TLS_DOMAIN_IMPACT[r.domain] || "";
-        return r.domain + ": connection reset during the secure handshake"
-          + (impact ? ". " + impact : "");
-      }).concat(blockUrlRow ? ["Evidence to send venue IT. Browsing to "
-        + blockUrlRow.domain + " on this network lands here: " + blockUrlRow.blockPageUrl] : []),
+        return r.domain + ": " + (impact || "connection reset.");
+      }).concat(blockUrlRow ? ["For venue IT, the filter's block page for "
+        + blockUrlRow.domain + ": " + blockUrlRow.blockPageUrl] : []),
     });
   }
   if (tlsHsFail.length && !tlsIntercepted.length) {
@@ -4212,7 +4221,7 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
     if (sysBlocked.length) {
       issues.push({
         severity: "critical",
-        title: sysBlocked.length + " domain(s) blocked by configured DNS but reachable via Google DNS (8.8.8.8)",
+        title: sysBlocked.length + (sysBlocked.length === 1 ? " domain" : " domains") + " blocked by configured DNS but reachable via Google DNS (8.8.8.8)",
         body: "The local DNS resolver is filtering or failing on Pixellot infrastructure. Change the VPU's DNS servers to 8.8.8.8 / 8.8.4.4, or ask the venue's network admin to whitelist these hostnames.",
         details: sysBlocked.map(function(r) {
           return r.host + ": system says " + (r.system.error || "no answer") + "; Google says " + (r.google.resolvedTo || "nothing");
@@ -4227,7 +4236,7 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
     if (redirects.length) {
       issues.push({
         severity: "warning",
-        title: redirects.length + " domain(s) redirected by the local DNS to an internal IP",
+        title: redirects.length + (redirects.length === 1 ? " domain" : " domains") + " redirected by the local DNS to an internal IP",
         body: "The configured resolver returned a private/internal address where Google DNS returned a public one. That usually means a captive portal or an SSL-inspection proxy, and Pixellot traffic may be intercepted. Have the venue bypass inspection for these hosts.",
         details: redirects.map(function(r) {
           return r.host + ": system says " + r.system.resolvedTo + " (internal); Google says " + r.google.resolvedTo;
@@ -4258,7 +4267,7 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
   var slowDns = (domains || []).filter(function(d) { return d.resolutionMs != null && d.resolutionMs > 500 && (d.status || "").toLowerCase() === "pass"; });
   if (slowDns.length > 0) {
     var slowDetails = slowDns.map(function(d) { return d.domain + ": " + d.resolutionMs + " ms"; });
-    issues.push({ severity: "info", title: slowDns.length + " domain(s) resolved slowly (>500 ms)",
+    issues.push({ severity: "info", title: slowDns.length + (slowDns.length === 1 ? " domain" : " domains") + " resolved slowly (over 500 ms)",
       body: "Slow DNS delays every connection. Switch to a faster DNS server.",
       details: slowDetails });
   }
@@ -4272,7 +4281,7 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
   // ── Adapter: interface errors ────────────────────────────
   var ifaceErrors = (uStats.rxErrors || 0) + (uStats.txErrors || 0);
   if (ifaceErrors > 0)
-    issues.push({ severity: "warning", title: ifaceErrors + " interface error(s) on uplink adapter",
+    issues.push({ severity: "warning", title: ifaceErrors + (ifaceErrors === 1 ? " interface error" : " interface errors") + " on the uplink adapter",
       body: "RX errors: " + (uStats.rxPacketErrors || 0) + ", RX discards: " + (uStats.rxDiscards || 0) +
             ", TX errors: " + (uStats.txPacketErrors || 0) + ", TX discards: " + (uStats.txDiscards || 0) +
             ". Try replacing the cable, switching ports, or updating the NIC driver." });
