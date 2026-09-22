@@ -27,6 +27,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - Pulse now reads LogMeIn's own log for proof the venue is blocking remote support. Repeated killed handshakes on LogMeIn's gateway connections raise a warning with the timeline you can hand venue IT, and after IT lifts the block, the Network tab shows exactly when the unit came back — even though the live test now passes.
 
 ### Fixed
+- Stream Readiness no longer says **Game-ready** when no cameras are connected. A camera port carrying the internet cable no longer counts as a camera, the check runs even when the Coordinator doesn't say how many cameras to expect, and Camera Connectivity now shows the same **No main cameras detected** finding as the Dashboard.
+- The Dashboard verdict now updates on its own. It re-checks the cameras about a minute after Pulse starts, and again whenever a camera cable is plugged in, moved or unplugged, instead of keeping the first reading until someone clicks Refresh.
 - The gateway ping card no longer shows red when the gateway simply ignores ping but traffic is getting through, and the DNS card no longer shows FAIL in the same situation. Both now read **Ping blocked**.
 - The camera details note no longer shows the camera admin login on screen.
 - **Network Traffic Capture now works.** Under Network Test > Advanced Diagnostics, this card had never produced a result on a real VPU — it always failed with a Windows parameter error, because it asked Windows for a packet limit that this Windows version does not accept. It now runs, and reports the packets it saw, anything the network stack dropped, connection resets, retransmissions, and which endpoints the VPU is actually talking to. It also tells you when Windows gave it totals but no per-packet detail, instead of showing a green "no issues" tick over numbers it never measured. The SYN and FIN tiles are gone: Windows does not record outbound connection starts on the VPU image, so SYN always read 0 even on a perfectly healthy unit.
@@ -49,6 +51,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - The **Inspection Report** tab is gone. Everything it showed still lives on the Dashboard, Hardware, Network and Camera Connectivity tabs.
 
 ### Changed
+- A non-US time zone now says why it matters: the VPU may go on air or off air at the wrong time.
 - Stream Readiness now fails a unit that is set to a non-US time zone, or that has a required Pixellot service blocked (cloud services, NFHS scheduling, on-screen graphics, clock sync, remote support). Internet plugged into a camera port is now a risk for tonight; it was being reported as "Worth knowing".
 - Findings are now written to be read to the school over the phone: what's wrong and what it breaks, then what to do and who does it. The exact ports and domains sit on their own **For venue IT** line, and the evidence behind the verdict is under a collapsed **How Pulse knows**. Copy for ticket pastes all three, labelled, so the IT line can go straight into an email.
 - The Network Test card and the Dashboard now show the same wording for each network finding. They used to be written separately and had drifted apart.

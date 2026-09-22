@@ -1079,6 +1079,93 @@ class TestReadinessPolicy(unittest.TestCase):
         )
 
 
+
+# ── Zero cameras must never read PASS ─────────────────────────────────
+class TestNoCamerasNeverPasses(unittest.TestCase):
+    """North East (MD) Gym, 2026-09-22, web-v1.3.0: 2 main cameras expected,
+    none connected, the venue's internet cable in camera port 2 -- and Stream
+    Readiness said PASS "Game-ready". The cold-start guard read port 2's link
+    as proof of a camera; the Dashboard never re-collected; and with no
+    expected count the check would not have run at all."""
+
+    def setUp(self):
+        self._saved_start = main._PROCESS_START_MONO
+        self._saved_tracker = main._PORT_STATE_TRACKER
+        main._PORT_STATE_TRACKER = {}
+        main._PROCESS_START_MONO = main.time.monotonic()  # inside the grace window
+
+    def tearDown(self):
+        main._PROCESS_START_MONO = self._saved_start
+        main._PORT_STATE_TRACKER = self._saved_tracker
+
+    @staticmethod
+    def _port(name, mac, up):
+        return {"name": name, "status": "Up" if up else "Disconnected",
+                "linkSpeedMbps": 1000 if up else None, "mac": mac, "arpEntries": []}
+
+    def _north_east(self):
+        nics = {"ports": [
+            self._port("Ethernet 28", "00:30:64:5F:61:86", True),   # the internet cable
+            self._port("Ethernet 29", "00:30:64:5F:61:87", False),
+            self._port("Ethernet 30", "00:30:64:5F:61:88", False),
+            self._port("Ethernet 31", "00:30:64:5F:61:89", False),
+        ]}
+        cfg = {"adapters": [
+            {"name": "Ethernet 5", "interfaceDescription": "Intel(R) Ethernet Connection (7) I219-LM",
+             "status": "Disconnected", "adminStatus": "Up", "physicalMediaType": "802.3",
+             "macAddress": "E0-D5-5E-00-00-01", "interfaceIndex": 22, "pciBus": 0},
+            {"name": "Ethernet 28", "interfaceDescription": "Intel(R) 82574L Gigabit Network Connection #13",
+             "status": "Up", "adminStatus": "Up", "physicalMediaType": "802.3",
+             "macAddress": "00-30-64-5F-61-86", "interfaceIndex": 23, "pciBus": 4},
+        ], "ipConfigurations": [
+            {"interfaceAlias": "Ethernet 28", "interfaceIndex": 23, "ipv4DefaultGateway": "10.10.60.1"},
+        ]}
+        return nics, cfg
+
+    def _findings(self, nics, cfg=None, expected=2, probes=None, identity=None):
+        return main._compute_findings(
+            identity=identity or _identity("5.37.2"), performance={}, services={}, nics=nics,
+            network_config=cfg, probe_results={} if probes is None else probes,
+            expectations={"expectedMainCameras": expected} if expected else None)
+
+    def test_internet_cable_link_is_not_camera_evidence(self):
+        nics, cfg = self._north_east()
+        f = self._findings(nics, cfg)
+        cam = [x for x in f if x["code"] == "cam-none"]
+        self.assertEqual(len(cam), 1, [x["code"] for x in f])
+        self.assertIn("internet cable", " ".join(cam[0]["details"]))
+        self.assertIn("carrying the internet cable", cam[0]["recommendation"])
+        verdict = main._compute_readiness(f)
+        self.assertEqual(verdict["status"], "FAIL")
+        self.assertIn("cam-none", [b["code"] for b in verdict["blockers"]])
+
+    def test_zero_cameras_fire_without_an_expected_count(self):
+        nics, cfg = self._north_east()
+        cam = [x for x in self._findings(nics, cfg, expected=None) if x["code"] == "cam-none"]
+        self.assertEqual(len(cam), 1)
+        self.assertNotIn("expected", cam[0]["title"])
+
+    def test_non_vpu_host_without_count_stays_quiet(self):
+        nics, cfg = self._north_east()
+        f = self._findings(nics, cfg, expected=None,
+                           identity={**_identity("5.37.2"), "isNonVpuHost": True})
+        self.assertEqual([x for x in f if x["code"].startswith("cam-")], [])
+
+    def test_cold_start_on_a_real_camera_link_is_pending_not_pass(self):
+        # The VPU2 case (camera links up, caches cold) still doesn't fire the
+        # critical, but it no longer reads as a pass either.
+        nics = {"ports": [self._port("Ethernet 28", "00:30:64:5F:61:86", True)]}
+        f = self._findings(nics)
+        self.assertEqual([x["code"] for x in f if x["code"].startswith("cam-")], ["cam-count-pending"])
+        self.assertEqual(main._compute_readiness(f)["status"], "WARN")
+
+    def test_camera_tab_carries_the_same_finding(self):
+        nics, cfg = self._north_east()
+        ports = main._enrich_ports(nics, None, {})
+        main._flag_uplink_ports(ports, cfg)
+        f = main._camera_count_findings(ports, 2, {}, True)
+        self.assertEqual([x["code"] for x in f], ["cam-none"])
+
 # ── LogMeIn service-log evidence (Get-LmiGatewayLog) ─────────────────
 # Fixture numbers are the real field log (2026-08-28): a VPU dark in LMI all
 # day - 201 handshakes killed with "SSL error: SSLv3/TLS write client hello"

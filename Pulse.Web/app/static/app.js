@@ -2398,6 +2398,15 @@ function renderDashboard() {
     </div>
   `;
 
+  // A camera count held back by the cold-start guard comes with a time to
+  // re-check. Without this the held-back reading stood as the verdict until
+  // someone clicked Refresh (North East (MD) Gym read PASS at 1:44 with no
+  // cameras connected, and was still PASS at 2:02).
+  if (dash.recheckAfterSec && !_dashRecheckTimer) {
+    _dashRecheckTimer = setTimeout(function() { _dashRecheckTimer = null; _dashRecheck(); },
+      dash.recheckAfterSec * 1000);
+  }
+
   // ── Live NIC refresh: poll /api/cameras every 3s and update NIC table ──
   // Uses an in-flight flag to skip ticks while a previous request is pending,
   // so slow PowerShell on the VPU can't pile up overlapping requests.
@@ -2412,9 +2421,36 @@ function renderDashboard() {
       dataCache.cameras = fresh;
       var el = document.getElementById("dash-nic-table");
       if (el) el.innerHTML = _renderNicRows(fresh.ports || []);
+      // The verdict is collected once; the ports are live. When a cable moves
+      // or a camera appears, re-collect the verdict so the card can't keep
+      // saying "Game-ready" about hardware that has changed under it.
+      var sig = _camLinkSignature(fresh.ports || []);
+      if (_dashLinkSig !== null && sig !== _dashLinkSig) _dashRecheck();
+      _dashLinkSig = sig;
     }).catch(function() { /* network blip — skip this tick */ })
       .then(function() { _nicPollBusy = false; });
   }, 3000);
+}
+
+var _dashRecheckTimer = null, _dashRecheckBusy = false, _dashLinkSig = null;
+// Link state, uplink placement and camera presence per port: the inputs to
+// the camera-count finding, and nothing that flickers on every poll.
+function _camLinkSignature(ports) {
+  return ports.map(function(p) {
+    return (p.isUp ? "U" : "D") + (p.hasInternetUplink ? "I" : "") + ((p.camerasDetected || []).length ? "C" : "");
+  }).join("|");
+}
+// Re-collect the Dashboard in the background and swap it in, without the
+// full-page loading state refreshSection() shows.
+function _dashRecheck() {
+  if (_dashRecheckBusy) return;
+  _dashRecheckBusy = true;
+  api("/api/dashboard").then(function(fresh) {
+    if (!fresh || fresh.error) return;
+    dataCache.dashboard = fresh;
+    if (currentPage === "dashboard") renderDashboard();
+  }).catch(function() { /* keep the current verdict; the next change retries */ })
+    .then(function() { _dashRecheckBusy = false; });
 }
 
 // ── Shared Page Helpers ─────────────────────────────────────

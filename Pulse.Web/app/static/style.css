@@ -3117,6 +3117,11 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
 .net-issue-text .finding-it,
 .net-issue-text .finding-evidence { max-width: none; }
 .net-tip-evidence { display: block; margin-top: 5px; color: var(--c-muted); }
+/* On Camera Connectivity the finding sits on a severity-tinted row; the dim
+   ramp washes out there, so match the row's own body text. */
+.cam-finding-row .finding-details,
+.cam-finding-row .finding-evidence { color: var(--c-muted); }
+.cam-finding-row .finding-details { margin: 6px 0 0; }
 .cam-poe-note-evidence { font-size: 0.72rem; color: var(--c-dim); line-height: 1.4; margin-top: 4px; }
 
 /* Local Network Health — ping cards */

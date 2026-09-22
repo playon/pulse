@@ -2041,12 +2041,11 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                     "code": "tz-non-us",
                     "severity": "critical",
                     "category": "System",
-                    "title": "VPU clock is set to a non-US time zone",
+                    "title": "VPU clock is set to a non-US time zone, so games may go on or off air at the wrong time",
                     "recommendation": (
-                        f"The VPU's clock is set to {shown}, not a US time zone, so its logs "
-                        f"won't line up with event times and problems take longer to trace. "
-                        f"Open Date & Time settings and choose Pacific, Mountain, Central, "
-                        f"Eastern, Alaska, or Hawaii."
+                        f"The VPU's clock is set to {shown}, not a US time zone, so it may go "
+                        f"on air or off air at the wrong time. Open Date & Time settings and "
+                        f"choose Pacific, Mountain, Central, Eastern, Alaska, or Hawaii."
                     ),
                 }
             )
@@ -2558,98 +2557,21 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
     findings.extend(_lmi_findings(lmi_log))
 
     # ── Missing / under-count main cameras ─────────────────────
-    # Compare what the Coordinator says the VPU is configured for
-    # (`expectedMainCameras`, from Get-CameraExpectations) against what's
-    # actually present on the camera NIC. Only fires when we have an
-    # authoritative expected count — never guesses. OCR ports don't count
-    # toward the main total (the OCR camera is its own role).
-    if expectations and not expectations.get("error") and nics and not nics.get("error"):
-        expected_main = expectations.get("expectedMainCameras")
-        if isinstance(expected_main, int) and expected_main > 0:
-            # Enrich ports for accurate Main vs OCR classification (by ARP +
-            # default-OCR-IP convention; no CGI probe results required).
+    # One helper for the Dashboard, readiness, the ticket and Camera
+    # Connectivity; see _camera_count_findings.
+    if nics and not nics.get("error"):
+        expected_main = None
+        if expectations and not expectations.get("error"):
+            expected_main = expectations.get("expectedMainCameras")
+        # Without the Coordinator's count, a machine that isn't a VPU (the
+        # NIC collector also matches Realtek adapters) must not read as a
+        # camera-less VPU.
+        known = isinstance(expected_main, int) and expected_main > 0
+        if known or not (identity or {}).get("isNonVpuHost"):
             enriched_ports = _enrich_ports(nics, pixellot_config, None)
-            detected_main = 0
-            for p in enriched_ports:
-                if not p.get("isUp") or p.get("isOcr"):
-                    continue
-                for c in (p.get("camerasDetected") or []):
-                    if "OCR" not in (c.get("role") or ""):
-                        detected_main += 1
-
-            # ── ARP-independent count from CGI probes ──
-            # The ARP snapshot alone can read zero on a cold start: cameras
-            # that sat quiet age out of the Windows neighbor cache, so the
-            # count above sees nothing even though both mains are alive.
-            # The CGI probe always tries the default camera IPs regardless
-            # of ARP (same philosophy as the ARP-independent OCR guard on
-            # the slow-port finding), so a probe answer is positive proof a
-            # camera is present. probe_results is keyed by MAC — each
-            # camera counts once. Take the better of the two counts.
-            probe_main = 0
-            for r in (probe_results or {}).values():
-                role, _speed = _lookup_camera_model(r.get("modelNumber"))
-                if role is not None:
-                    probe_is_ocr = "OCR" in role
-                else:
-                    probe_is_ocr = (
-                        bool(r.get("is_ocr"))
-                        or (r.get("ip") or "").strip() in _DEFAULT_OCR_IPS
-                    )
-                if not probe_is_ocr:
-                    probe_main += 1
-            detected_main = max(detected_main, probe_main)
-
-            # Cold-start guard for the zero-count CRITICAL. If probes ran
-            # but nothing was seen by ARP *or* probe while a non-OCR port
-            # has live link, the link layer contradicts "no cameras" — a
-            # link doesn't come up without a powered device on the other
-            # end. During the startup grace that reading means the
-            # collection burst starved both caches, not that the rig is
-            # dark; skip once and let the next collection (warm caches)
-            # decide. Ports genuinely down still alarm immediately, even
-            # at startup.
-            suppress_cold_zero = (
-                detected_main == 0
-                and probes_attempted
-                and not (probe_results or {})
-                and _in_startup_grace()
-                and any(
-                    p.get("isUp") and not p.get("isOcr")
-                    for p in enriched_ports
-                )
-            )
-            if detected_main < expected_main and not suppress_cold_zero:
-                missing = expected_main - detected_main
-                if detected_main == 0:
-                    sev = "critical"
-                    title = f"No main cameras detected (expected {expected_main})"
-                    rec = (
-                        f"The VPU expects {expected_main} main camera"
-                        f"{'s' if expected_main != 1 else ''} but can't see any on the "
-                        f"camera card, so it has nothing to broadcast. Check that the "
-                        f"camera cables are seated, the cameras have power, and they're "
-                        f"in the right ports. Camera Connectivity shows each port."
-                    )
-                else:
-                    sev = "warning"
-                    title = (
-                        f"{detected_main} of {expected_main} main cameras detected "
-                        f"({missing} missing)"
-                    )
-                    rec = (
-                        f"{missing} main camera{'s are' if missing != 1 else ' is'} "
-                        f"expected but not detected. Inspect the missing port(s) on "
-                        f"the Camera Connectivity tab. It is usually a cable, a switch "
-                        f"port, or camera power."
-                    )
-                findings.append({
-                    "code": "cam-none" if detected_main == 0 else "cam-partial",
-                    "severity": sev,
-                    "category": "Camera",
-                    "title": title,
-                    "recommendation": rec,
-                })
+            _flag_uplink_ports(enriched_ports, network_config)
+            findings.extend(_camera_count_findings(
+                enriched_ports, expected_main, probe_results, probes_attempted))
 
     # Deduplicate by (category, title) — separate checks shouldn't produce
     # the same finding twice on the dashboard.
@@ -2719,6 +2641,9 @@ _READINESS_POLICY = {
 
     # ── RISKS → WARN (will likely stream, but a human should eyeball) ──
     "cam-partial":           "risk",     # F6  k of N present (k>0)
+    "cam-count-pending":     "risk",     # zero cameras during the cold-start grace:
+                                         #     unconfirmed is not a pass. The Dashboard
+                                         #     re-checks when the grace window closes.
     "nic-slow":              "risk",     # F7  camera NIC below gigabit
     "stream-degraded-rtmp":  "risk",     # F1b both UDP rungs dead, RTMP open — games
                                          #     air ~4 min late, no loss protection.
@@ -3393,6 +3318,149 @@ def _flag_uplink_ports(ports: list, network_config) -> None:
             p["uplinkGateway"] = gw
 
 
+
+# Why the zero-camera finding used to miss: a unit whose only linked camera
+# port carried the venue's internet cable (North East (MD) Gym, 2026-09-22,
+# 2 mains expected, none connected) read PASS "Game-ready". Three things
+# stacked: the cold-start guard below treated that link as proof a camera
+# was there and skipped the alarm; the Dashboard never re-collects on its
+# own, so "skip once, let the next collection decide" never got a next
+# collection; and with no expected count from the Coordinator the check did
+# not run at all. Each is closed here.
+CAM_COUNT_PENDING = "cam-count-pending"
+
+
+def _camera_count_findings(ports, expected_main, probe_results, probes_attempted) -> list:
+    """cam-none / cam-partial, or cam-count-pending while a cold start makes
+    zero ambiguous. `ports` are enriched and uplink-flagged. Returns a list
+    so both callers can extend with it."""
+    if not ports and not (isinstance(expected_main, int) and expected_main > 0):
+        # No camera card and no configured count: a non-VPU host, or a card
+        # that isn't on the bus (its own finding). Nothing to count against.
+        return []
+    known = isinstance(expected_main, int) and expected_main > 0
+    # Every VPU broadcasts from at least one main camera, so zero is a fault
+    # even when the Coordinator's expected count is unavailable.
+    expected = expected_main if known else 1
+
+    # A port carrying the venue's internet cable is not a camera port: its
+    # link proves nothing about cameras, and anything on it is the venue LAN.
+    cam_ports = [p for p in ports if not p.get("hasInternetUplink")]
+    uplinks = [p for p in ports if p.get("hasInternetUplink")]
+
+    detected_main = 0
+    for p in cam_ports:
+        if not p.get("isUp") or p.get("isOcr"):
+            continue
+        for c in (p.get("camerasDetected") or []):
+            if "OCR" not in (c.get("role") or ""):
+                detected_main += 1
+
+    # ── ARP-independent count from CGI probes ──
+    # The ARP snapshot alone can read zero on a cold start: cameras that sat
+    # quiet age out of the Windows neighbor cache. The CGI probe always tries
+    # the default camera IPs regardless of ARP, so an answer is positive proof
+    # a camera is present. Keyed by MAC, so each camera counts once. Take the
+    # better of the two counts.
+    probe_main = 0
+    for r in (probe_results or {}).values():
+        role, _speed = _lookup_camera_model(r.get("modelNumber"))
+        if role is not None:
+            probe_is_ocr = "OCR" in role
+        else:
+            probe_is_ocr = (
+                bool(r.get("is_ocr"))
+                or (r.get("ip") or "").strip() in _DEFAULT_OCR_IPS
+            )
+        if not probe_is_ocr:
+            probe_main += 1
+    detected_main = max(detected_main, probe_main)
+    if detected_main >= expected:
+        return []
+
+    # Cold-start guard for the zero-count CRITICAL. If probes ran but nothing
+    # answered while a *camera* port has live link, the link layer contradicts
+    # "no cameras" (a link doesn't come up without a powered device on the
+    # other end). During the startup grace that means the collection burst
+    # starved both caches (false CRITICAL on VPU2, 2026-07-28). Say so as a
+    # pending check instead of a PASS, and the Dashboard re-checks once the
+    # grace ends. Ports genuinely down still alarm immediately.
+    if (
+        detected_main == 0
+        and probes_attempted
+        and not (probe_results or {})
+        and _in_startup_grace()
+        and any(p.get("isUp") and not p.get("isOcr") for p in cam_ports)
+    ):
+        return [{
+            "code": CAM_COUNT_PENDING,
+            "severity": "warning",
+            "category": "Camera",
+            "title": "Cameras not confirmed yet, so this verdict may change",
+            "recommendation": (
+                "Pulse just started and the cameras haven't answered yet. It checks again "
+                "in about a minute; nothing to do unless this stays."
+            ),
+        }]
+
+    details = []
+    for p in ports:
+        label = p.get("portLabel") or p.get("name") or "Port"
+        if p.get("hasInternetUplink"):
+            state = f"internet cable (gateway {p.get('uplinkGateway')}), not a camera"
+        elif not p.get("isUp"):
+            state = "no link"
+        elif p.get("isOcr"):
+            state = "scoreboard camera"
+        elif p.get("camerasDetected"):
+            state = "camera connected"
+        else:
+            state = "linked, but no camera answering"
+        details.append(f"{label}: {state}")
+    uplink_note = ""
+    if uplinks:
+        names = ", ".join(p.get("portLabel") or "a camera port" for p in uplinks)
+        uplink_note = (f" {names} {'is' if len(uplinks) == 1 else 'are'} carrying the "
+                       f"internet cable instead of a camera.")
+    evidence = (
+        "Pulse looked for Pixellot cameras in each camera-card port's network neighbours "
+        "and queried the default camera addresses directly."
+    )
+
+    if detected_main == 0:
+        s_ = "s" if expected != 1 else ""
+        return [{
+            "code": "cam-none",
+            "severity": "critical",
+            "category": "Camera",
+            "title": (f"No main cameras detected (expected {expected_main}), so there's nothing to broadcast"
+                      if known else "No main cameras detected, so there's nothing to broadcast"),
+            "recommendation": (
+                (f"The VPU expects {expected_main} main camera{s_} but can't see any on the camera card, "
+                 if known else "The VPU can't see any main cameras on the camera card, ")
+                + "so there's nothing to broadcast." + uplink_note
+                + " Check that the camera cables are seated in the camera card, the cameras have power, "
+                "and they're in the right ports."
+            ),
+            "details": details,
+            "evidence": evidence + " No main camera answered.",
+        }]
+    missing = expected - detected_main
+    return [{
+        "code": "cam-partial",
+        "severity": "warning",
+        "category": "Camera",
+        "title": f"{detected_main} of {expected} main cameras detected ({missing} missing)",
+        "recommendation": (
+            f"{missing} main camera{'s are' if missing != 1 else ' is'} expected but not "
+            f"connected." + uplink_note + " Check the missing port's cable, the camera's "
+            "power, and the switch port."
+        ),
+        "details": details,
+        "evidence": evidence,
+    }]
+
+
 def _compute_camera_findings(ports: list, poe=None) -> list:
     findings = []
 
@@ -3580,6 +3648,13 @@ def _build_dashboard(identity, performance, services, nics, network_config=None,
         "readiness": _compute_readiness(findings, performance=performance, disk_health=disk_health, perf_sample=perf_sample),
         "networkConfig": net_cfg,
         "sourceErrors": source_errors,
+        # A camera count held back by the cold-start guard is re-checked by
+        # the page once the grace window closes, instead of standing as the
+        # verdict until someone clicks Refresh.
+        "recheckAfterSec": (
+            max(1, int(_STARTUP_GRACE_SECONDS - (time.monotonic() - _PROCESS_START_MONO)) + 2)
+            if any(f.get("code") == CAM_COUNT_PENDING for f in findings) else None
+        ),
     }
 
 
@@ -4096,10 +4171,17 @@ async def api_cameras(refresh: bool = False):
     probe_results = await _probe_all_cameras(raw_ports, ocr_ips, block=refresh)
     ports = _enrich_ports(nics, pix_config, probe_results, expected_main_cameras=expected_main)
     _flag_uplink_ports(ports, net_config)
+    # The camera tab renders `body`; the Dashboard's copy of this finding
+    # uses `recommendation`. Same record either way.
+    count_findings = [
+        {**f, "body": f["recommendation"]}
+        for f in _camera_count_findings(ports, expected_main, probe_results, True)
+        if f["code"] != CAM_COUNT_PENDING  # this tab re-polls every few seconds
+    ]
     return {
         "ports": ports,
         "pixellotConfig": pix_config,
-        "findings": _compute_camera_findings(ports, poe),
+        "findings": count_findings + _compute_camera_findings(ports, poe),
         "systemType": system_type,
         "expectedMainCameras": expected_main,
         # Whole collector payload, not just the readings — the frontend needs
