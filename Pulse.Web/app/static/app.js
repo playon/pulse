@@ -4998,7 +4998,7 @@ function _camPortLinesHtml(list) {
       (p.cameras > 1 ? " (" + p.cameras + " cameras)" : "");
     return p.slow
       ? '<span class="status-warn">' + line + ' (Slow)</span>'
-      : '<span>' + line + '</span>';
+      : '<span class="status-pass">' + line + '</span>';
   }).join("");
 }
 
