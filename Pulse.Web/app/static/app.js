@@ -4980,12 +4980,26 @@ function _camFigHtml(img, w, h, alt) {
 }
 
 // "Expected" / "Connected" rows under each camera. The connected value takes
-// the status colour; the word carries the meaning on its own.
-function _camFactsHtml(expected, connectedText, tone) {
+// the status colour; the word carries the meaning on its own. `portsHtml`
+// lists where the cameras are plugged in, one line per port.
+function _camFactsHtml(expected, connectedText, tone, portsHtml) {
   return '<dl class="cam-head-facts">' +
     '<dt>Expected</dt><dd>' + esc(expected) + '</dd>' +
     '<dt>Connected</dt><dd class="' + tone + '">' + esc(connectedText) + '</dd>' +
+    (portsHtml ? '<dt class="sr-only">Ports</dt><dd class="cam-head-ports">' + portsHtml + '</dd>' : '') +
   '</dl>';
+}
+
+// "Port 1 at 1 Gbps", one line per port. A slow link says "Slow", the word
+// the port cards and the legend use for the same state.
+function _camPortLinesHtml(list) {
+  return (list || []).map(function(p) {
+    var line = esc(p.port || "A camera port") + (p.speedMbps ? " at " + esc(fmtSpeed(p.speedMbps)) : "") +
+      (p.cameras > 1 ? " (" + p.cameras + " cameras)" : "");
+    return p.slow
+      ? '<span class="status-warn">' + line + ' (Slow)</span>'
+      : '<span>' + line + '</span>';
+  }).join("");
 }
 
 function _camHeadPanelHtml(sysInfo) {
@@ -5006,7 +5020,7 @@ function _camHeadPanelHtml(sysInfo) {
       var conn = typeof got !== "number" ? "Checking"
         : got > n ? cams(got) + ", more than configured"
         : got === 0 ? "None" : got + " of " + n;
-      facts = _camFactsHtml(cams(n), conn, tone);
+      facts = _camFactsHtml(cams(n), conn, tone, _camPortLinesHtml(sysInfo.mainCameraPorts));
     }
     items += '<div class="cam-head-item">' +
       (head ? _camFigHtml(head.img, head.w, head.h, head.alt) : "") +
@@ -5578,7 +5592,7 @@ function renderCameras() {
 
       <div id="cam-s1-wrap"></div>
 
-      <div class="card" id="cam-nic-diagram">${_camNicDiagramHtml(ports, true, {systemType: data.systemType, expectedMainCameras: data.expectedMainCameras, detectedMainCameras: data.detectedMainCameras, scoreboardCamera: data.scoreboardCamera})}</div>
+      <div class="card" id="cam-nic-diagram">${_camNicDiagramHtml(ports, true, {systemType: data.systemType, expectedMainCameras: data.expectedMainCameras, detectedMainCameras: data.detectedMainCameras, mainCameraPorts: data.mainCameraPorts, scoreboardCamera: data.scoreboardCamera})}</div>
 
       <div class="cam-port-grid" id="cam-port-grid">
         ${_camPortGridHtml(ports)}
@@ -5650,7 +5664,7 @@ function renderCameras() {
           });
         }
         var diag = document.getElementById("cam-nic-diagram");
-        if (diag) diag.innerHTML = _camNicDiagramHtml(freshPorts, true, {systemType: fresh.systemType, expectedMainCameras: fresh.expectedMainCameras, detectedMainCameras: fresh.detectedMainCameras, scoreboardCamera: fresh.scoreboardCamera});
+        if (diag) diag.innerHTML = _camNicDiagramHtml(freshPorts, true, {systemType: fresh.systemType, expectedMainCameras: fresh.expectedMainCameras, detectedMainCameras: fresh.detectedMainCameras, mainCameraPorts: fresh.mainCameraPorts, scoreboardCamera: fresh.scoreboardCamera});
         var fw = document.getElementById("cam-findings-wrap");
         if (fw) fw.innerHTML = _camFindingsHtml(fresh.findings || []);
       }

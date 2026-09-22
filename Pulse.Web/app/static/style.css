@@ -1868,6 +1868,10 @@ html.dark .channel-moved-banner {
 .cam-head-facts dd.status-fail { color: var(--c-accent-red); }
 .cam-head-facts dd.status-warn { color: var(--c-accent-amber); }
 .cam-head-facts dd.text-pulse-muted { color: var(--c-muted); }
+/* Port lines run the item's full width under Expected / Connected: in the
+   value column alone "Port 2 at 100 Mbps (Slow)" wrapped onto two lines. */
+.cam-head-facts .cam-head-ports { grid-column: 1 / -1; font-weight: 400; display: flex; flex-direction: column; gap: 1px; margin-top: 2px; }
+.cam-head-facts .cam-head-ports .status-warn { color: var(--c-accent-amber); }
 .nic-diagram-ports {
     display: flex;
     gap: 48px;

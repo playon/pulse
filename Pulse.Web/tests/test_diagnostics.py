@@ -1192,6 +1192,18 @@ class TestMainCameraCount(unittest.TestCase):
                  self._port(["00:0E:53:AA:01:02"], up=False)]
         self.assertEqual(main._count_main_cameras(ports, {}), 0)
 
+    def test_main_camera_ports_name_where_each_camera_is(self):
+        ports = [
+            {**self._port(["00:0E:53:AA:01:01"]), "portLabel": "Port 1", "linkSpeedMbps": 1000},
+            {**self._port(["00:0E:53:BB:02:01"]), "portLabel": "Port 2", "linkSpeedMbps": 100, "isDegraded": True},
+            {**self._port(["00:D0:89:1B:03:01"], ocr=True), "portLabel": "Port 3"},
+            {**self._port(["00:0E:53:CC:03:01"], uplink=True), "portLabel": "Port 4"},
+        ]
+        self.assertEqual(main._main_camera_ports(ports), [
+            {"port": "Port 1", "speedMbps": 1000, "cameras": 1, "slow": False},
+            {"port": "Port 2", "speedMbps": 100, "cameras": 1, "slow": True},
+        ])
+
     def test_scoreboard_state_only_when_configured_or_present(self):
         self.assertIsNone(main._scoreboard_camera_state([self._port([])], {"cameras": []}))
         live = {"isUp": True, "isOcr": True, "portLabel": "Port 3", "linkSpeedMbps": 100}

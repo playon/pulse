@@ -3364,6 +3364,21 @@ def _count_main_cameras(ports, probe_results) -> int:
             macs.add(_norm(r.get("mac") or key))
     return len(macs)
 
+def _main_camera_ports(ports) -> list:
+    """Where the main cameras are plugged in, for the Cameras panel ("Port 1
+    at 1 Gbps"). Same filter as _count_main_cameras. A camera found only by
+    the CGI probe has no port to name, so it counts but isn't listed."""
+    out = []
+    for p in ports or []:
+        if p.get("hasInternetUplink") or not p.get("isUp") or p.get("isOcr"):
+            continue
+        n = sum(1 for c in (p.get("camerasDetected") or []) if "OCR" not in (c.get("role") or ""))
+        if n:
+            out.append({"port": p.get("portLabel"), "speedMbps": p.get("linkSpeedMbps"),
+                        "cameras": n, "slow": bool(p.get("isDegraded"))})
+    return out
+
+
 def _scoreboard_camera_state(ports, pixellot_config):
     """For the Camera Connectivity reference panel: is a scoreboard (OCR)
     camera configured, and is it connected? The OCR IP set always includes
@@ -4215,6 +4230,7 @@ async def api_cameras(refresh: bool = False):
         # The same count the camera-count finding uses, for the camera-head
         # panel ("0 of 2 main cameras connected").
         "detectedMainCameras": _count_main_cameras(ports, probe_results),
+        "mainCameraPorts": _main_camera_ports(ports),
         "scoreboardCamera": _scoreboard_camera_state(ports, pix_config),
         # Whole collector payload, not just the readings — the frontend needs
         # supported/available/reason to tell "this NIC family can't measure
