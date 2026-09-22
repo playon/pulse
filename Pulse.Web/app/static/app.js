@@ -3903,20 +3903,46 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
     }
   }
 
+  // ── ICMP filtering: gateway and DNS both silent ─────────────
+  // Is name resolution demonstrably working? (Shared signal — also gates the
+  // DNS ping reconciliation below, the UDP/53 probe, and the Local Network
+  // Health ping card.)
+  var _dnsResolving = _dnsResolvingFrom(domains, ports);
+
+  // Two separate "the ping is dead but the service behind it is fine" cases.
+  // Either one alone is a local quirk — a router that won't answer pings to
+  // itself, a resolver that won't. Both at once is one fact, not two
+  // coincidences: outbound ICMP is filtered at the venue edge. Roll them into a
+  // single finding so a tech reads that conclusion directly instead of joining
+  // two INFO rows to reach it, and so nobody keeps ping-testing a box whose
+  // pings are never coming back.
+  var _gwPingFiltered  = !!(gw && !gw.reachable && gw.target && cfg && cfg.internetReachable);
+  var _dnsPingFiltered = !!(dns && !dns.reachable && _dnsResolving);
+  var _icmpFiltered    = _gwPingFiltered && _dnsPingFiltered;
+
+  if (_icmpFiltered)
+    issues.push({ severity: "info", title: "Ping (ICMP) is blocked on this network, but traffic is flowing normally",
+      body: "Neither the gateway nor the DNS server answers ping, so both tests above show red. The VPU is still routing to the internet and resolving domains, which means the venue's network is filtering ping rather than anything being wrong with the unit. Pings from this VPU will keep failing, so judge connectivity by the port and service tests above instead. No action needed.",
+      details: [ "Gateway " + gw.target + ": no ping reply, traffic routing normally",
+                 "DNS server " + dns.target + ": no ping reply, name resolution working" ] });
+
   // ── Gateway ──────────────────────────────────────────────
   if (gw && !gw.reachable) {
     if (!gw.target)
       issues.push({ severity: "critical", title: "VPU has no route to the network",
         body: "The internet adapter has no IPv4 default gateway. Set one, by DHCP or a static address. The VPU can't reach the internet without it." });
-    else if (cfg && cfg.internetReachable)
+    else if (_gwPingFiltered) {
       // The gateway answers no ICMP, but the VPU is reaching the internet through
       // it — lots of routers/firewalls (and managed venue networks) silently drop
       // pings to the gateway itself while routing traffic fine. internetReachable
       // is authoritative (it has a TCP/443 fallback), so a dropped ping here is
       // filtering, not a fault — explain the red gateway test instead of falsely
-      // calling the uplink dead and sending a tech to chase a cable.
-      issues.push({ severity: "info", title: "Gateway doesn't answer ping, but traffic is routing normally (" + gw.target + ")",
-        body: "The gateway isn't replying to ping (ICMP), so the gateway test above shows red, but the VPU is reaching the internet through it. Many routers and firewalls are set to ignore pings to themselves while still forwarding traffic, so this is expected and needs no action." });
+      // calling the uplink dead and sending a tech to chase a cable. When the DNS
+      // ping is dead too, the combined ICMP finding above already covers it.
+      if (!_icmpFiltered)
+        issues.push({ severity: "info", title: "Gateway doesn't answer ping, but traffic is routing normally (" + gw.target + ")",
+          body: "The gateway isn't replying to ping (ICMP), so the gateway test above shows red, but the VPU is reaching the internet through it. Many routers and firewalls are set to ignore pings to themselves while still forwarding traffic, so this is expected and needs no action." });
+    }
     else
       issues.push({ severity: "critical", title: "VPU can't reach its gateway (" + gw.target + ")",
         body: "Verify the uplink Ethernet cable is seated, the switch port is active, and the VLAN is correct. No traffic will leave the VPU until this is resolved." });
@@ -3929,19 +3955,18 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
       body: "Try a different switch port, replace the Ethernet cable, or check for broadcast storms on the venue network." });
 
   // ── DNS server: blocked ICMP vs. real resolution failure ─
-  // Is name resolution demonstrably working? (Shared signal — also gates the
-  // UDP/53 probe below and the Local Network Health ping card.)
-  var _dnsResolving = _dnsResolvingFrom(domains, ports);
-
   // A 100%-loss ping to the DNS server is NOT proof it's down — ICMP is
   // routinely firewalled on locked-down venue networks while the resolver keeps
   // answering real UDP/53 queries. When resolution is demonstrably working, the
   // dead ping is just blocked ICMP: report it as INFO, not a warning that sends
   // a tech chasing a healthy box. Only call lookups "failing" when nothing
   // resolved either.
-  if (dns && !dns.reachable && _dnsResolving)
-    issues.push({ severity: "info", title: "DNS server " + dns.target + " isn't answering pings, but name resolution is working",
-      body: "The VPU is resolving domains normally. The DNS server just isn't replying to ICMP ping, which many venue firewalls block. No action needed." });
+  if (_dnsPingFiltered) {
+    // Covered by the combined ICMP finding above when the gateway is silent too.
+    if (!_icmpFiltered)
+      issues.push({ severity: "info", title: "DNS server " + dns.target + " isn't answering pings, but name resolution is working",
+        body: "The VPU is resolving domains normally. The DNS server just isn't replying to ICMP ping, which many venue firewalls block. No action needed." });
+  }
   else if (dns && !dns.reachable)
     issues.push({ severity: "warning", title: "Name lookups are failing (DNS server " + dns.target + " unreachable)",
       body: "Nothing will resolve until this is fixed. Check the DNS server address in the adapter settings, or try a public DNS (8.8.8.8, 1.1.1.1)." });
