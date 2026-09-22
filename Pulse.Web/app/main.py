@@ -3331,25 +3331,27 @@ CAM_COUNT_PENDING = "cam-count-pending"
 
 
 def _count_main_cameras(ports, probe_results) -> int:
-    """Main cameras present on the camera card: the better of the ARP count
-    and the CGI probe count. Ports carrying the internet uplink are skipped;
-    their link and neighbours are the venue LAN, not cameras."""
-    detected_main = 0
+    """Main cameras present on the camera card, counted once each by MAC
+    across both sources: the ports' neighbour tables (ARP) and the CGI
+    probes. Ports carrying the internet uplink are skipped; their link and
+    neighbours are the venue LAN, not cameras.
+
+    This used to take the larger of the two counts. That double-counted a
+    camera the neighbour table held under two addresses, and under-counted
+    when each source saw a different camera. The probe is ARP-independent
+    (it tries the default camera IPs), so it still rescues a cold start where
+    quiet cameras have aged out of the neighbour cache."""
+    def _norm(mac):
+        return str(mac or "").strip().upper().replace("-", ":")
+
+    macs = set()
     for p in ports:
         if p.get("hasInternetUplink") or not p.get("isUp") or p.get("isOcr"):
             continue
         for c in (p.get("camerasDetected") or []):
-            if "OCR" not in (c.get("role") or ""):
-                detected_main += 1
-
-    # ── ARP-independent count from CGI probes ──
-    # The ARP snapshot alone can read zero on a cold start: cameras that sat
-    # quiet age out of the Windows neighbor cache. The CGI probe always tries
-    # the default camera IPs regardless of ARP, so an answer is positive proof
-    # a camera is present. Keyed by MAC, so each camera counts once. Take the
-    # better of the two counts.
-    probe_main = 0
-    for r in (probe_results or {}).values():
+            if "OCR" not in (c.get("role") or "") and c.get("mac"):
+                macs.add(_norm(c.get("mac")))
+    for key, r in (probe_results or {}).items():
         role, _speed = _lookup_camera_model(r.get("modelNumber"))
         if role is not None:
             probe_is_ocr = "OCR" in role
@@ -3359,8 +3361,27 @@ def _count_main_cameras(ports, probe_results) -> int:
                 or (r.get("ip") or "").strip() in _DEFAULT_OCR_IPS
             )
         if not probe_is_ocr:
-            probe_main += 1
-    return max(detected_main, probe_main)
+            macs.add(_norm(r.get("mac") or key))
+    return len(macs)
+
+def _scoreboard_camera_state(ports, pixellot_config):
+    """For the Camera Connectivity reference panel: is a scoreboard (OCR)
+    camera configured, and is it connected? The OCR IP set always includes
+    Pixellot's default addresses, so "configured" comes from a cameras.cfg
+    entry whose role names OCR. None when neither is true: plenty of venues
+    have no scoreboard camera, and the panel shouldn't imply one is missing."""
+    cfg_cams = (pixellot_config or {}).get("cameras") or [] if isinstance(pixellot_config, dict) else []
+    configured = any("OCR" in str(c.get("role") or "").upper() for c in cfg_cams)
+    live = [p for p in ports or [] if p.get("isOcr") and p.get("isUp") and not p.get("hasInternetUplink")]
+    if not live and not configured:
+        return None
+    p = live[0] if live else None
+    return {
+        "configured": configured,
+        "connected": bool(p),
+        "port": p.get("portLabel") if p else None,
+        "speedMbps": p.get("linkSpeedMbps") if p else None,
+    }
 
 
 def _camera_count_findings(ports, expected_main, probe_results, probes_attempted) -> list:
@@ -4194,6 +4215,7 @@ async def api_cameras(refresh: bool = False):
         # The same count the camera-count finding uses, for the camera-head
         # panel ("0 of 2 main cameras connected").
         "detectedMainCameras": _count_main_cameras(ports, probe_results),
+        "scoreboardCamera": _scoreboard_camera_state(ports, pix_config),
         # Whole collector payload, not just the readings — the frontend needs
         # supported/available/reason to tell "this NIC family can't measure
         # power" apart from "the driver isn't installed" apart from "measured,

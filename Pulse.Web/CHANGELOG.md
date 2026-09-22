@@ -23,7 +23,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 ## [Unreleased]
 
 ### Added
-- Camera Connectivity shows a picture of the unit's camera head (S1, S2 or S2S) with how many main cameras are connected, so you can match it to what's on the pole when talking someone through it.
+- Camera Connectivity shows a picture of the unit's camera head (S1, S2 or S2S) and of the scoreboard camera, with what the unit expects and what's actually connected, so you can match it to what's on the pole when talking someone through it.
 - The ScoreConnect page now says whether this VPU is protected against the known ScoreConnect III crash. Green means Windows restarts the service on its own; amber means it doesn't, and the scoreboard will stay dark until someone restarts it by hand. It also shows how many crashes Windows has already caught for you.
 - Pulse now reads LogMeIn's own log for proof the venue is blocking remote support. Repeated killed handshakes on LogMeIn's gateway connections raise a warning with the timeline you can hand venue IT, and after IT lifts the block, the Network tab shows exactly when the unit came back — even though the live test now passes.
 

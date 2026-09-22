@@ -1166,6 +1166,40 @@ class TestNoCamerasNeverPasses(unittest.TestCase):
         f = main._camera_count_findings(ports, 2, {}, True)
         self.assertEqual([x["code"] for x in f], ["cam-none"])
 
+
+class TestMainCameraCount(unittest.TestCase):
+    """_count_main_cameras counts each camera once, by MAC, across the
+    neighbour table and the CGI probes. It used to take max(ARP, probes)."""
+
+    @staticmethod
+    def _port(macs, up=True, ocr=False, uplink=False):
+        return {"isUp": up, "isOcr": ocr, "hasInternetUplink": uplink,
+                "camerasDetected": [{"mac": m, "role": "Main Camera"} for m in macs]}
+
+    def test_one_camera_under_two_addresses_counts_once(self):
+        ports = [self._port(["00-0E-53-AA-01-01"]), self._port(["00:0e:53:aa:01:01"])]
+        self.assertEqual(main._count_main_cameras(ports, {}), 1)
+
+    def test_each_source_seeing_a_different_camera_counts_both(self):
+        ports = [self._port(["00:0E:53:AA:01:01"])]
+        probes = {"00:0E:53:BB:02:01": {"mac": "00:0E:53:BB:02:01", "ip": "169.254.16.51",
+                                         "modelNumber": "Z4SF-5"}}
+        self.assertEqual(main._count_main_cameras(ports, probes), 2)  # max() said 1
+
+    def test_uplink_ocr_and_down_ports_never_count(self):
+        ports = [self._port(["00:0E:53:AA:01:01"], uplink=True),
+                 self._port(["00:D0:89:1B:03:01"], ocr=True),
+                 self._port(["00:0E:53:AA:01:02"], up=False)]
+        self.assertEqual(main._count_main_cameras(ports, {}), 0)
+
+    def test_scoreboard_state_only_when_configured_or_present(self):
+        self.assertIsNone(main._scoreboard_camera_state([self._port([])], {"cameras": []}))
+        live = {"isUp": True, "isOcr": True, "portLabel": "Port 3", "linkSpeedMbps": 100}
+        st = main._scoreboard_camera_state([live], None)
+        self.assertEqual((st["connected"], st["port"], st["speedMbps"]), (True, "Port 3", 100))
+        st = main._scoreboard_camera_state([], {"cameras": [{"role": "OCR"}]})
+        self.assertEqual((st["configured"], st["connected"]), (True, False))
+
 # ── LogMeIn service-log evidence (Get-LmiGatewayLog) ─────────────────
 # Fixture numbers are the real field log (2026-08-28): a VPU dark in LMI all
 # day - 201 handshakes killed with "SSL error: SSLv3/TLS write client hello"

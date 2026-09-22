@@ -4928,14 +4928,9 @@ function _camNicDiagramHtml(ports, showLiveBadge, sysInfo) {
   if (nicDesc) headerLabel = svgIcon("cpu", 16) + ' ' + esc(nicDesc) + ' · ' + count + ' ports';
   else if (hasRealPorts) headerLabel = count + ' ports';
   else headerLabel = svgIcon("cpu", 16) + ' No NIC ports detected';
-  // System-type chip (S1/S2/S2S) + expected main-camera count, when known.
-  var sysChip = "";
-  if (sysInfo && sysInfo.expectedMainCameras) {
-    var sysName = sysInfo.systemType ? esc(sysInfo.systemType) + " · " : "";
-    var n = sysInfo.expectedMainCameras;
-    sysChip = '<span class="nic-sys-chip">' + sysName + n +
-      ' main camera' + (n === 1 ? '' : 's') + ' expected</span>';
-  }
+  // The system type and expected camera count used to ride here as a chip
+  // ("S2 · 2 main cameras expected"). The Cameras panel below shows both,
+  // with the picture, so the header stays the card's name.
   // Toggle to flip the LED row between upright (horizontal) and on-its-side
   // (vertical) so it matches however the VPU is physically mounted.
   var layoutToggle = hasRealPorts
@@ -4945,7 +4940,7 @@ function _camNicDiagramHtml(ports, showLiveBadge, sysInfo) {
         svgIcon("refresh", 12) + ' Flip layout</button>'
     : '';
   var nicHeader = '<div class="nic-diagram-header">' +
-    headerLabel + sysChip + layoutToggle +
+    headerLabel + layoutToggle +
     (showLiveBadge ? '<span id="cam-live-badge" class="cam-live-badge" aria-live="polite">Auto-Refresh</span>' : '') +
   '</div>';
   // Only show the physical-order note when we actually have NIC data;
@@ -4975,29 +4970,67 @@ var CAMERA_HEADS = {
          alt: "Pixellot S2S camera: a single white bullet camera on a wall mount with a junction box" },
 };
 
+// The scoreboard (OCR) camera looks the same at 100 Mbps and 1 Gbps.
+var SCOREBOARD_CAMERA = { img: "/static/img/cameras/pixellot-ocr.png", w: 360, h: 240,
+  alt: "Scoreboard camera: a white box camera with a single zoom lens" };
+
+function _camFigHtml(img, w, h, alt) {
+  return '<div class="cam-head-fig"><img src="' + img + '" width="' + w + '" height="' + h +
+    '" alt="' + esc(alt) + '" loading="lazy" decoding="async"></div>';
+}
+
+// "Expected" / "Connected" rows under each camera. The connected value takes
+// the status colour; the word carries the meaning on its own.
+function _camFactsHtml(expected, connectedText, tone) {
+  return '<dl class="cam-head-facts">' +
+    '<dt>Expected</dt><dd>' + esc(expected) + '</dd>' +
+    '<dt>Connected</dt><dd class="' + tone + '">' + esc(connectedText) + '</dd>' +
+  '</dl>';
+}
+
 function _camHeadPanelHtml(sysInfo) {
-  var head = sysInfo && CAMERA_HEADS[sysInfo.systemType];
-  if (!head) return "";
+  sysInfo = sysInfo || {};
+  var head = CAMERA_HEADS[sysInfo.systemType];
+  var sb = sysInfo.scoreboardCamera;
   var n = sysInfo.expectedMainCameras, got = sysInfo.detectedMainCameras;
-  var count = "";
-  if (typeof n === "number" && n > 0 && typeof got === "number") {
-    var cams = function(k) { return k + " main camera" + (k === 1 ? "" : "s"); };
-    // More than configured isn't a pass or a fault Pulse can call: say it
-    // plainly in neutral text rather than a green "5 of 2".
-    if (got > n) {
-      count = '<div class="cam-head-count text-pulse-muted">' + cams(got) + " connected, " + n + " expected</div>";
-    } else {
-      var tone = got === n ? "status-pass" : got === 0 ? "status-fail" : "status-warn";
-      count = '<div class="cam-head-count ' + tone + '">' + got + " of " + cams(n) + " connected</div>";
+  var known = typeof n === "number" && n > 0;
+  if (!head && !known && !sb) return "";
+  var cams = function(k) { return k + " main camera" + (k === 1 ? "" : "s"); };
+  var items = "";
+  if (head || known) {
+    var facts = "";
+    if (known) {
+      var tone = typeof got !== "number" ? "text-pulse-muted"
+        : got > n ? "text-pulse-muted"          // more than configured: not a pass Pulse can call
+        : got === n ? "status-pass" : got === 0 ? "status-fail" : "status-warn";
+      var conn = typeof got !== "number" ? "Checking"
+        : got > n ? cams(got) + ", more than configured"
+        : got === 0 ? "None" : got + " of " + n;
+      facts = _camFactsHtml(cams(n), conn, tone);
     }
+    items += '<div class="cam-head-item">' +
+      (head ? _camFigHtml(head.img, head.w, head.h, head.alt) : "") +
+      '<div class="cam-head-name">' + (head ? "Pixellot " + esc(sysInfo.systemType) : "Main cameras") + '</div>' +
+      (head ? '<div class="orient-caption">' + esc(head.what) + '</div>' : "") +
+      facts + '</div>';
+  }
+  if (sb) {
+    // Only shown when a scoreboard camera is configured or present: many
+    // venues have none, and the panel must not imply one is missing.
+    var sbConn = sb.connected
+      ? (sb.port || "Connected") + (sb.speedMbps ? " at " + fmtSpeed(sb.speedMbps) : "")
+      : "Not connected";
+    items += '<div class="cam-head-item">' +
+      _camFigHtml(SCOREBOARD_CAMERA.img, SCOREBOARD_CAMERA.w, SCOREBOARD_CAMERA.h, SCOREBOARD_CAMERA.alt) +
+      '<div class="cam-head-name">Scoreboard camera</div>' +
+      '<div class="orient-caption">Reads the scoreboard for the on-screen score</div>' +
+      _camFactsHtml(sb.configured ? "1 scoreboard camera" : "Not set up",
+                    sbConn, sb.connected ? "status-pass" : "status-warn") +
+      '</div>';
   }
   return '<div class="nic-orient-panel cam-head-panel">' +
-    '<div class="nic-orient-title">Camera head</div>' +
-    '<div class="cam-head-fig"><img src="' + head.img + '" width="' + head.w + '" height="' + head.h +
-      '" alt="' + esc(head.alt) + '" loading="lazy" decoding="async"></div>' +
-    '<div class="cam-head-name">Pixellot ' + esc(sysInfo.systemType) + '</div>' +
-    '<div class="orient-caption">' + esc(head.what) + '</div>' +
-    count +
+    '<div class="nic-orient-title">Cameras</div>' +
+    '<div class="cam-head-items">' + items + '</div>' +
   '</div>';
 }
 
@@ -5545,7 +5578,7 @@ function renderCameras() {
 
       <div id="cam-s1-wrap"></div>
 
-      <div class="card" id="cam-nic-diagram">${_camNicDiagramHtml(ports, true, {systemType: data.systemType, expectedMainCameras: data.expectedMainCameras, detectedMainCameras: data.detectedMainCameras})}</div>
+      <div class="card" id="cam-nic-diagram">${_camNicDiagramHtml(ports, true, {systemType: data.systemType, expectedMainCameras: data.expectedMainCameras, detectedMainCameras: data.detectedMainCameras, scoreboardCamera: data.scoreboardCamera})}</div>
 
       <div class="cam-port-grid" id="cam-port-grid">
         ${_camPortGridHtml(ports)}
@@ -5617,7 +5650,7 @@ function renderCameras() {
           });
         }
         var diag = document.getElementById("cam-nic-diagram");
-        if (diag) diag.innerHTML = _camNicDiagramHtml(freshPorts, true, {systemType: fresh.systemType, expectedMainCameras: fresh.expectedMainCameras, detectedMainCameras: fresh.detectedMainCameras});
+        if (diag) diag.innerHTML = _camNicDiagramHtml(freshPorts, true, {systemType: fresh.systemType, expectedMainCameras: fresh.expectedMainCameras, detectedMainCameras: fresh.detectedMainCameras, scoreboardCamera: fresh.scoreboardCamera});
         var fw = document.getElementById("cam-findings-wrap");
         if (fw) fw.innerHTML = _camFindingsHtml(fresh.findings || []);
       }
