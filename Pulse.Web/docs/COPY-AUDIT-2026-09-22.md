@@ -6,21 +6,20 @@
 > `details`; `/api/network` returns the same records the Dashboard and Copy
 > for ticket use, and the impact/label maps moved from app.js into main.py.
 >
-> **Still open (your call):**
-> 1. `uplink-on-camera-port` and `wifi-disabled` had no `code`, so readiness
->    filed them as info and Copy for ticket pastes a critical wiring fault
->    under **[Worth knowing]**. They now have codes but are deliberately
->    unmapped in `_READINESS_POLICY`, so behaviour is unchanged. Suggest
->    `uplink-on-camera-port` -> risk.
-> 2. `tz-non-us` is a critical on the Dashboard and info in readiness; its
->    only stated effect is logs that don't line up. Pick one severity.
-> 3. The Network card's grouped "required services blocked" is critical; the
->    server's per-port finding is a warning (readiness risk). Left as is.
-> 4. `gpu-anomaly` now says "Escalate to Pixellot support". Confirm that is
->    the right destination.
-> 5. NTP now says a drifting clock "can miss scheduled events", the claim the
->    NTP port tile already made. The code comment's stronger claim (breaks
->    signed-URL streaming) is not surfaced.
+> **Decided 2026-09-22 (Ian):**
+> 1. `uplink-on-camera-port` -> readiness **risk** (was unclassified, so info).
+> 2. `tz-non-us` -> **critical** (readiness blocker).
+> 3. Required ports -> **critical**: `port-required-blocked` is now a
+>    blocker and its finding severity is critical, matching the Network card.
+> 4. `gpu-anomaly` escalates to **Tier 3**.
+>
+> **Still open:** NTP uses the tile's claim ("can miss scheduled events"),
+> not the code comment's stronger one. `wifi-disabled` stays unclassified
+> (info). `tz-non-us` now stops readiness, but its only stated effect is logs
+> that don't line up with events. If there is a bigger effect, the body
+> should say it. A blocked LogMeIn *port* now fails readiness while a
+> LogMeIn *filter block* (`lmi-ssl-blocked`, `tls-filtered-support`) stays
+> info.
 
 2026-09-22. Scope: every user-facing explanation in `app.js`, `main.py`,
 `cloud_api.py`, `powershell.py` and the 58 collector scripts, extracted

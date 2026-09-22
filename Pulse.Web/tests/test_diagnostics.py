@@ -1167,6 +1167,10 @@ _CRITICAL_FINDING_CODES = {
     "sw-security",
     "temp-critical",
     "tz-non-us",
+    "uplink-on-camera-port",
+    # port-dns-blocked / port-required-blocked share one emit site.
+    "port-dns-blocked",
+    "port-required-blocked",
     # Built from a variable at emit time: the `{name}-down` service findings
     # and cam-none (critical when zero main cameras are present).
     "agent-down",

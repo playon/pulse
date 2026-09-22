@@ -49,6 +49,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - The **Inspection Report** tab is gone. Everything it showed still lives on the Dashboard, Hardware, Network and Camera Connectivity tabs.
 
 ### Changed
+- Stream Readiness now fails a unit that is set to a non-US time zone, or that has a required Pixellot service blocked (cloud services, NFHS scheduling, on-screen graphics, clock sync, remote support). Internet plugged into a camera port is now a risk for tonight; it was being reported as "Worth knowing".
 - Findings are now written to be read to the school over the phone: what's wrong and what it breaks, then what to do and who does it. The exact ports and domains sit on their own **For venue IT** line, and the evidence behind the verdict is under a collapsed **How Pulse knows**. Copy for ticket pastes all three, labelled, so the IT line can go straight into an email.
 - The Network Test card and the Dashboard now show the same wording for each network finding. They used to be written separately and had drifted apart.
 - The SSL-inspection and web-filter findings on Network Test are now three short sentences, and end with the exact domains to send venue IT (for example *.pixellot.tv, pixellot.tv) instead of a singular.live example that often wasn't the broken site.

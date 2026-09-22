@@ -1715,7 +1715,7 @@ def _port_findings(port_tests) -> list:
         out.append(
             {
                 "code": "port-dns-blocked" if is_dns else "port-required-blocked",
-                "severity": "warning",
+                "severity": "critical",
                 "category": "Network",
                 "title": f"The venue network is blocking {noun}",
                 "recommendation": (
@@ -2157,7 +2157,7 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                 "recommendation": (
                     f"This VPU has {compat['architecture']} graphics hardware, which isn't a "
                     f"known Pixellot setup, so the unit may be mis-imaged or Pixellot's hardware "
-                    f"list may need updating. Escalate to Pixellot support."
+                    f"list may need updating. Escalate to Tier 3."
                 ),
                 "evidence": f"Installed Pixellot version: {compat['installedVersion']}.",
             })
@@ -2711,6 +2711,12 @@ _READINESS_POLICY = {
     # F15a C: disk >90% is computed below from disk-health (not the
     # `disk-critical` finding — see _compute_readiness).
 
+    "port-required-blocked": "blocker",  # F23b NTP / Pixellot cloud / NFHS / Singular /
+                                         #     LogMeIn port blocked. Prerequisites, not
+                                         #     redundant paths (Ian, 2026-09-22: critical,
+                                         #     matching the Network card).
+    "tz-non-us":             "blocker",  # F25 non-US time zone (Ian, 2026-09-22: critical)
+
     # ── RISKS → WARN (will likely stream, but a human should eyeball) ──
     "cam-partial":           "risk",     # F6  k of N present (k>0)
     "nic-slow":              "risk",     # F7  camera NIC below gigabit
@@ -2723,12 +2729,16 @@ _READINESS_POLICY = {
     "watchdog-down":         "risk",     # F9  KeepAgentUp down — no self-heal
     "pixellot-over-cap":     "risk",     # F10 build newer than GPU/OS supports
     "gpu-anomaly":           "risk",     # F12 Volta / roster anomaly
+    "uplink-on-camera-port": "risk",     # internet cable on the camera card. Had no
+                                         #     code until 2026-09-22, so it defaulted to
+                                         #     info and Copy for ticket pasted a critical
+                                         #     wiring fault under "Worth knowing". Ian's
+                                         #     call: risk.
     "install-incomplete":    "risk",     # F13 interrupted installer, agent up
     # F16 (`disk-low`, a volume at 80–90%) removed — disk fill is critical-only now.
     "disk-smart-prefail":    "risk",     # F16b drive SMART pre-fail / uncorrectable errors
     "ram-insufficient":      "risk",     # F21 <32 GB host
     "ntp-unapproved":        "risk",     # F22 drift can break signed-URL stream
-    "port-required-blocked": "risk",     # F23b NTP / Pixellot cloud / etc.
     "wifi-uplink":           "risk",     # F24 Wi-Fi uplink — latency/loss
     # F14 temp≥90, F15b D:>90, F17 CPU sustained, F19 mem sustained are computed
     # below (readiness-specific thresholds the dashboard findings don't surface).
@@ -2745,7 +2755,6 @@ _READINESS_POLICY = {
     "disk-critical":         "info",
     "disk-smart-wear":       "info",     # SSD ≥80% rated life — heads-up, won't stop tonight's game
     "temp-critical":         "info",     # 85°C snapshot — readiness gate is 90°C (F14)
-    "tz-non-us":             "info",     # F25
     "os-eos-reached":        "info",     # F26
     "os-eos-imminent":       "info",     # F27
     "os-eos-approaching":    "info",     # F28
