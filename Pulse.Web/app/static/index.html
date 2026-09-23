@@ -22,37 +22,41 @@
     </script>
 </head>
 <body class="h-full bg-pulse-bg text-pulse-text overflow-hidden">
-    <!-- Splash screen — visible until ALL preload sections finish loading.
-         App.js calls hideSplash() once preloadProgressive() resolves, and
-         showSplash() when refreshAll() re-runs diagnostics. The logo div
-         picks its background image from CSS based on html.dark — no JS
-         needed to swap themes. -->
-    <div id="splash" class="splash" role="status" aria-live="polite">
-        <div class="splash-logo" aria-label="Pulse"></div>
-        <div class="splash-version" id="splash-version">{{PULSE_VERSION}}</div>
-        <div class="splash-progress">
-            <div id="splash-progress-fill" class="splash-progress-fill"></div>
+    <!-- Splash screen (system map variant): the rig drawn as its signal
+         chain -- cameras, the VPU, the venue network, the Pixellot cloud,
+         ScoreConnect and the stream itself. Each node lights up with the
+         answer its check produced, links carry traffic while probes run,
+         and the findings list below names every issue as it lands.
+         Visible until every preload section has settled; re-shown by Run
+         All Diagnostics. Filled by the _splash* code in app.js. -->
+    <div id="splash" class="splash">
+        <div class="splash-frame">
+            <header class="splash-head">
+                <div class="splash-logo" role="img" aria-label="Pulse"></div>
+                <div class="splash-meta">
+                    <span class="splash-version" id="splash-version">{{PULSE_VERSION}}</span>
+                    <span class="splash-clock" id="splash-clock" aria-hidden="true">0.0s</span>
+                </div>
+            </header>
+            <div class="splash-status" role="status" aria-live="polite">
+                <div class="splash-verb" id="splash-verb">Loading diagnostics…</div>
+                <div class="splash-count" id="splash-count">&nbsp;</div>
+            </div>
+            <div class="splash-progress" aria-hidden="true">
+                <div id="splash-progress-fill" class="splash-progress-fill"></div>
+            </div>
+            <div class="splash-verdict" id="splash-verdict" role="alert" hidden></div>
+            <div class="map-ticker" id="splash-ticker" aria-hidden="true"></div>
+            <section class="map" id="splash-map" aria-label="Checks by part of the system">
+                <svg class="map-links" id="map-links" aria-hidden="true"></svg>
+                <ol class="map-nodes" id="splash-checklist"></ol>
+            </section>
+            <section class="map-findings" aria-label="Issues found so far">
+                <h2 class="splash-pane-title"><span id="map-findings-title">Found so far</span> <span class="splash-pane-count" id="map-findings-count"></span></h2>
+                <ul class="map-findings-list" id="map-findings"></ul>
+            </section>
+            <div class="splash-note" id="splash-note">Running a full diagnostic sweep. This can take a moment.</div>
         </div>
-        <div class="splash-status">
-            <div class="splash-verb"  id="splash-verb">Loading diagnostics…</div>
-            <div class="splash-count" id="splash-count">&nbsp;</div>
-        </div>
-        <!-- Live checklist — one row per diagnostic section, ticked off as
-             each one settles. Populated by _buildSplashChecklist() from
-             PAGE_API so the order and labels stay in sync with what's
-             actually fetched. aria-hidden: the polite count line above is
-             what gets announced; the grid is decorative progress. -->
-        <div class="splash-checklist" id="splash-checklist" aria-hidden="true"></div>
-        <!-- Issue banner — surfaces critical/warning findings from the
-             dashboard the moment it loads (it's fetched first), so a tech
-             sees there's a problem before the full UI even paints. Hidden
-             on a clean system; populated by _setSplashIssues(). -->
-        <div class="splash-issues" id="splash-issues" role="alert"></div>
-        <!-- Static reassurance line. Pulse runs a lot more checks than it
-             used to, so set the expectation up front. preloadProgressive
-             escalates this to a calmer "still working" message if a slow
-             box runs long. -->
-        <div class="splash-note" id="splash-note">Running a full diagnostic sweep. This can take a moment.</div>
     </div>
     <div id="app" class="flex h-full">
         <nav id="sidebar" class="w-56 bg-pulse-sidebar border-r border-pulse-border flex flex-col flex-shrink-0">

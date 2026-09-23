@@ -3803,8 +3803,16 @@ async def api_server_log(tail: int = Query(default=200)):
 
 
 @app.get("/api/scripts/running")
-async def api_scripts_running():
-    return {"tasks": get_running_tasks()}
+async def api_scripts_running(since: Optional[int] = Query(default=None)):
+    """In-flight collectors. With `since`, also the script log from that index,
+    so the splash feed costs one request per poll: during a cold start the
+    browser's six connections per host are already busy with the sweep."""
+    out = {"tasks": get_running_tasks()}
+    if since is not None:
+        logs = list(LOG_BUFFER)
+        out["logs"] = logs[max(0, since):]
+        out["total"] = len(logs)
+    return out
 
 
 @app.post("/api/scripts/cancel")

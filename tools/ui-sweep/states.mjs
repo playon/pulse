@@ -382,8 +382,8 @@ async function main() {
   if (globalSeen.size) {
     console.log("GLOBAL  the page claims completeness no matter which collector died:");
     for (const c of globalSeen) console.log(`    "${c}"`);
-    console.log("    (the splash checklist marks a step ready on its failure arm too,");
-    console.log("     so all 12 rows tick green with collectors dead - app.js markReady)");
+    console.log("    (a health claim is on the page although a collector died -- check");
+    console.log("     the splash note and verdict, _splashDoneNote / finish in app.js)");
     console.log("");
   }
   if (fixed.length) {

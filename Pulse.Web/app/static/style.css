@@ -70,6 +70,7 @@
   --c-tint-purple:       rgba(167, 139, 250, 0.25);
   --c-tint-slate:        rgba(148, 163, 184, 0.25);
   --c-scrim:             rgba(8, 10, 16, 0.82);  /* modal backdrop */
+  --c-shadow-lift:       rgba(8, 10, 16, 0.45);  /* soft offset shadow under raised tiles */
   /* Broadcast scoreboard chrome — a fixed "stadium board" look that stays
      dark in both themes regardless of app theme. */
   --c-board-bg:       #0f1419;
@@ -220,176 +221,419 @@ html.dark .sidebar-brand-logo {
     margin: 0;
 }
 
-/* ── Splash screen ─────────────────────────────────────────── */
-/* Shown immediately on page load and kept up until every preload
-   section (dashboard + all PAGE_API endpoints + WebSocket) has
-   settled. Also re-shown when "Run All Diagnostics" is invoked.
-   Both the background and the logo image swap based on the active
-   theme — html.dark uses the dark-bg / white-text variant. */
+/* ── Splash screen: live diagnostic sweep (system map) ─────── */
+/* Up from first paint until every preload section has settled; re-shown by
+   Run All Diagnostics. The rig is drawn as its signal chain -- cameras, the
+   VPU, the venue network, the Pixellot cloud, ScoreConnect and the stream --
+   and each node takes the answer its check produced. Connectors are an SVG
+   laid over the node grid, recomputed from the nodes' rects so they follow
+   the layout, and carry moving dashes while their check is still running.
+   The findings list names each issue as it lands; the verdict band closes
+   it out. Everything here is transform/opacity/stroke-dashoffset, so it
+   stays cheap over LogMeIn. */
 .splash {
     position: fixed;
     inset: 0;
+    z-index: 9999;
+    display: flex;
+    justify-content: center;
+    align-items: safe center;
+    overflow-y: auto;
+    /* Reserve the scrollbar so the verdict appearing can't narrow the frame
+       and shift every connector. */
+    scrollbar-gutter: stable;
+    padding: 28px 16px;
     background: var(--c-bg);
+    transition: opacity 0.45s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.splash-frame {
+    width: min(1040px, 100%);
     display: flex;
     flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 1.25rem;
-    z-index: 9999;
-    transition: opacity 0.4s ease-out;
+    gap: 14px;
+    transition: transform 0.45s cubic-bezier(0.16, 1, 0.3, 1), filter 0.45s ease-out;
+}
+.splash-head {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 6px;
 }
 .splash-logo {
-    width: 65vmin;
-    max-width: 480px;
-    /* Use the same single-image + filter approach as the sidebar brand
-       so light and dark splash variants render identically (same
-       typography, same size). */
+    width: min(230px, 55vw);
     aspect-ratio: 1428 / 442;
     background-image: url('/static/img/pulse-splash-dark.png');
     background-repeat: no-repeat;
-    background-position: center;
+    background-position: left center;
     background-size: contain;
-    animation: pulse-fade 1.6s ease-in-out infinite;
     filter: invert(1) hue-rotate(180deg);
+    animation: pulse-fade 1.6s ease-in-out infinite;
+    transform-origin: left center;
 }
-html.dark .splash-logo {
-    filter: none;
-}
-.splash-version {
-    /* Sits snug under the logo (counteracts the .splash flex gap). */
-    margin-top: -0.85rem;
+html.dark .splash-logo { filter: none; }
+.splash-final .splash-logo { animation: none; }
+.splash-meta {
+    display: flex;
+    gap: 14px;
+    align-items: baseline;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 0.8rem;
-    letter-spacing: 0.03em;
+    font-size: 0.78rem;
+    font-variant-numeric: tabular-nums;
     color: var(--c-dim);
 }
-.splash-version:empty { display: none; }   /* hide when version is unknown */
+.splash-version:empty { display: none; }
+.splash-clock { color: var(--c-muted); min-width: 4.5ch; text-align: right; }
+.splash-status {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 6px 16px;
+    flex-wrap: wrap;
+}
+.splash-verb {
+    font-size: 1.05rem;
+    font-weight: 650;
+    color: var(--c-text);
+    letter-spacing: -0.005em;
+}
+.splash-count {
+    font-size: 0.82rem;
+    font-weight: 500;
+    color: var(--c-muted);
+    font-variant-numeric: tabular-nums;
+    min-height: 1.2em;
+}
 .splash-progress {
-    width: min(420px, 60vmin);
-    height: 6px;
-    border-radius: 3px;
+    height: 4px;
+    border-radius: 2px;
     background: var(--c-border);
     overflow: hidden;
 }
+/* Scaled, not resized: a transform never triggers layout. */
 .splash-progress-fill {
     height: 100%;
-    width: 0%;
-    border-radius: 3px;
+    border-radius: 2px;
     background: linear-gradient(90deg, var(--c-accent-blue), var(--c-accent-sky));
-    transition: width 0.35s ease-out;
+    transform: scaleX(0);
+    transform-origin: left center;
+    transition: transform 0.5s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.3s;
 }
-.splash-status {
-    text-align: center;
+.splash-progress-fill[data-tone="pass"]  { background: var(--c-status-ok); }
+.splash-progress-fill[data-tone="warn"]  { background: var(--c-status-warn); }
+.splash-progress-fill[data-tone="fail"]  { background: var(--c-pill-critical); }
+.splash-progress-fill[data-tone="muted"] { background: var(--c-status-down); }
+
+.splash-pane-title {
     display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 0.25rem;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+    margin: 0 0 6px;
+    font-size: 0.72rem;
+    font-weight: 650;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--c-dim);
 }
-.splash-verb {
-    font-size: 0.85rem;
-    color: var(--c-muted);
+.splash-pane-count {
     font-weight: 500;
     letter-spacing: 0.02em;
-}
-.splash-count {
-    font-size: 0.8rem;
-    color: var(--c-dim);
-    font-weight: 500;
+    text-transform: none;
     font-variant-numeric: tabular-nums;
-    letter-spacing: 0.02em;
-    min-height: 1.2em;       /* reserve the row so layout doesn't jump */
 }
-/* Live section checklist — two columns of compact rows, each ticked off
-   as its diagnostic settles. Width matches the progress bar above it. */
-.splash-checklist {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 0.32rem 1.5rem;
-    width: min(420px, 78vw);
-    margin-top: 0.1rem;
-}
-.splash-check {
+
+/* Collector ticker: one line of what PowerShell is doing right now. */
+.map-ticker {
     display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    min-width: 0;                /* let the label ellipsize instead of overflowing */
-    font-size: 0.78rem;
-    color: var(--c-dim);
-    transition: color 0.3s ease-out;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 16px;
+    min-height: 1.4em;
+    font-size: 0.8rem;
+    color: var(--c-muted);
 }
-.splash-check-label {
-    white-space: nowrap;
+.map-tk-k {
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--c-accent-blue);
+}
+.map-ticker[data-done="1"] .map-tk-k { color: var(--c-dim); }
+.map-tk-job { color: var(--c-text); white-space: nowrap; }
+.map-tk-job b {
+    font-weight: 500;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--c-dim);
+}
+.map-tk-more { color: var(--c-dim); white-space: nowrap; }
+.map-tk-more em { font-style: normal; font-weight: 650; color: var(--c-accent-red); }
+
+/* Status mark: an 18px disc carrying a glyph drawn for this size. Shared by
+   the node rows, the VPU cells and the findings list. */
+.sp-mark {
+    --sp-tone: var(--c-dim);
+    flex: 0 0 auto;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    border: 1.5px solid var(--c-border);
+    color: var(--sp-tone);
+    transition: background-color 0.3s, border-color 0.3s, color 0.3s;
+}
+[data-state="pending"] > .sp-mark {
+    border-top-color: var(--c-accent-blue);
+    animation: sp-spin 1.1s linear infinite;
+}
+[data-state="pass"]  > .sp-mark { --sp-tone: var(--c-accent-green); background: var(--c-tint-green); border-color: transparent; }
+[data-state="warn"]  > .sp-mark { --sp-tone: var(--c-accent-amber); background: var(--c-tint-amber); border-color: transparent; }
+[data-state="crit"]  > .sp-mark { --sp-tone: var(--c-on-accent); background: var(--c-pill-critical); border-color: transparent; }
+[data-state="error"] > .sp-mark { --sp-tone: var(--c-muted); border-style: dashed; border-color: var(--c-dim); }
+[data-state="stalled"] > .sp-mark { --sp-tone: var(--c-muted); border-style: dashed; }
+[data-state="collected"] > .sp-mark { --sp-tone: var(--c-accent-blue); }
+
+/* A check row inside a node: mark · word · time (single) or mark · label ·
+   word (VPU cell). The word carries the state; colour never does alone. */
+.sp-row {
+    --row-tone: var(--c-muted);
+    display: grid;
+    grid-template-columns: 18px minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 8px;
+    font-size: 0.82rem;
+    line-height: 1.35;
+}
+.sp-row[data-state="pass"]  { --row-tone: var(--c-accent-green); }
+.sp-row[data-state="warn"]  { --row-tone: var(--c-accent-amber); }
+.sp-row[data-state="crit"]  { --row-tone: var(--c-accent-red); }
+.sp-row[data-state="pending"] { --row-tone: var(--c-dim); }
+.sp-label {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--c-text);
+    font-weight: 550;
 }
-.splash-check-mark {
-    position: relative;
-    flex: 0 0 auto;
-    width: 13px;
-    height: 13px;
-    border-radius: 50%;
-    border: 1.5px solid var(--c-border);
-    transition: background 0.3s ease-out, border-color 0.3s ease-out;
+.sp-row[data-state="pending"] .sp-label { color: var(--c-muted); font-weight: 500; }
+.sp-word {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--row-tone);
+    font-weight: 650;
+    font-size: 0.78rem;
+    white-space: nowrap;
 }
-.splash-check.done {
-    color: var(--c-muted);
-}
-.splash-check.done .splash-check-mark {
-    background: var(--c-accent-blue);
-    border-color: var(--c-accent-blue);
-}
-.splash-check.done .splash-check-mark::after {  /* the checkmark */
-    content: "";
-    position: absolute;
-    left: 4px;
-    top: 1px;
-    width: 3px;
-    height: 6.5px;
-    border: solid #fff;
-    border-width: 0 1.5px 1.5px 0;
-    transform: rotate(45deg);
-}
-/* Issue banner — a severity-tinted pill that appears only when the dashboard
-   reports critical/warning findings. Mirrors the app's .sev-* token palette. */
-.splash-issues {
-    display: none;             /* hidden until _setSplashIssues() adds .is-visible */
-    align-items: center;
-    gap: 0.45rem;
-    max-width: min(420px, 78vw);
-    padding: 0.28rem 0.75rem;
-    border: 1px solid transparent;
-    border-radius: 999px;
-    font-size: 0.8rem;
-    font-weight: 600;
-    letter-spacing: 0.01em;
-}
-.splash-issues.is-visible { display: inline-flex; }
-.splash-issues svg { flex: 0 0 auto; }
-.splash-issues-crit {
-    color: var(--c-accent-red);
-    background: var(--c-tint-red);
-    border-color: var(--c-tint-red-border);
-}
-.splash-issues-warn {
-    color: var(--c-accent-amber);
-    background: var(--c-tint-amber);
-    border-color: var(--c-tint-amber-border);
-}
-.splash-note {
-    max-width: min(420px, 78vw);
-    text-align: center;
-    font-size: 0.8rem;
-    line-height: 1.4;
+/* A check that never answered has no time worth showing. */
+.sp-row[data-state="stalled"] > .sp-time { display: none; }
+.sp-time {
     color: var(--c-dim);
-    letter-spacing: 0.01em;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
 }
-.splash-hidden {
-    opacity: 0;
+
+/* The map. */
+.map { position: relative; }
+.map-links {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
     pointer-events: none;
 }
+.map-link-base, .map-link-flow { fill: none; stroke-width: 2; stroke-linejoin: round; }
+/* Neutral links use the slate status tone, half strength: --c-border all
+   but vanishes against --c-bg in the light theme. */
+.map-link-base { stroke: var(--c-status-down); stroke-opacity: 0.5; transition: stroke 0.4s ease-out; }
+.map-link[data-flow="0"][data-state="pass"] .map-link-base,
+.map-link[data-flow="0"][data-state="warn"] .map-link-base,
+.map-link[data-flow="0"][data-state="crit"] .map-link-base { stroke-opacity: 1; }
+.map-link-flow {
+    stroke: var(--c-accent-sky);
+    stroke-dasharray: 3 9;
+    stroke-linecap: round;
+    opacity: 0;
+    transition: opacity 0.3s ease-out;
+}
+.map-link[data-flow="1"] .map-link-flow { opacity: 1; animation: map-flow 0.9s linear infinite; }
+.map-link[data-flow="0"][data-state="pass"]  .map-link-base { stroke: var(--c-status-ok); }
+.map-link[data-flow="0"][data-state="warn"]  .map-link-base { stroke: var(--c-status-warn); }
+.map-link[data-flow="0"][data-state="crit"]  .map-link-base { stroke: var(--c-pill-critical); }
+.map-link[data-flow="0"][data-state="error"] .map-link-base { stroke: var(--c-dim); stroke-dasharray: 4 5; }
+
+.map-nodes {
+    position: relative;
+    z-index: 1;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: 150px minmax(0, 1fr) 168px 168px;
+    grid-template-areas:
+        "cams vpu   net cloud"
+        ".    score .   stream";
+    gap: 22px 32px;
+    align-items: center;
+}
+.map-node[data-node="cams"]   { grid-area: cams; }
+.map-node[data-node="vpu"]    { grid-area: vpu; }
+.map-node[data-node="net"]    { grid-area: net; }
+.map-node[data-node="cloud"]  { grid-area: cloud; }
+.map-node[data-node="score"]  { grid-area: score; justify-self: start; width: min(240px, 100%); }
+.map-node[data-node="stream"] { grid-area: stream; }
+.map-node {
+    --node-tone: var(--c-dim);
+    min-width: 0;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1.5px solid var(--c-border);
+    background: var(--c-surface);
+    box-shadow: 0 2px 6px -3px var(--c-shadow-lift);
+    transition: border-color 0.4s ease-out, background-color 0.4s ease-out;
+}
+.map-node[data-state="pass"]  { --node-tone: var(--c-accent-green); border-color: var(--c-tint-green-border); background: linear-gradient(var(--c-tint-green-faint), var(--c-tint-green-faint)), var(--c-surface); }
+.map-node[data-state="warn"]  { --node-tone: var(--c-accent-amber); border-color: var(--c-status-warn); background: linear-gradient(var(--c-tint-amber-faint), var(--c-tint-amber-faint)), var(--c-surface); }
+.map-node[data-state="crit"]  { --node-tone: var(--c-accent-red); border-color: var(--c-pill-critical); background: linear-gradient(var(--c-tint-red-faint), var(--c-tint-red-faint)), var(--c-surface); }
+.map-node[data-state="error"] { --node-tone: var(--c-muted); border-style: dashed; border-color: var(--c-dim); }
+.map-node[data-state="collected"] { --node-tone: var(--c-accent-blue); }
+.map-node-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.map-node-icon { display: inline-flex; color: var(--node-tone); transition: color 0.4s; }
+.map-node-label { font-size: 0.86rem; font-weight: 650; color: var(--c-text); white-space: nowrap; }
+.map-node-host {
+    margin-left: auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.7rem;
+    color: var(--c-dim);
+}
+.map-single { margin-top: 6px; }
+.map-node-detail {
+    margin: 4px 0 0;
+    font-size: 0.74rem;
+    line-height: 1.35;
+    color: var(--c-muted);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+.map-cells {
+    list-style: none;
+    margin: 8px 0 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 16px;
+}
+.map-cell { padding: 4px 0; border-bottom: 1px solid var(--c-border); }
+.map-cell:nth-last-child(-n+2) { border-bottom-color: transparent; }
+.map-cell > .sp-label { font-size: 0.8rem; }
+
+/* Findings: every issue, worst first, as it lands. */
+.map-findings { margin-top: 2px; }
+.map-findings-list { list-style: none; margin: 0; padding: 0; display: grid; }
+.map-f {
+    --row-tone: var(--c-muted);
+    display: grid;
+    grid-template-columns: 18px 6.8rem 11rem minmax(0, 1fr);
+    align-items: center;
+    column-gap: 10px;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--c-border);
+    font-size: 0.82rem;
+}
+.map-f[data-state="crit"] { --row-tone: var(--c-accent-red); }
+.map-f[data-state="warn"] { --row-tone: var(--c-accent-amber); }
+.map-f-word { font-weight: 650; font-size: 0.78rem; color: var(--row-tone); white-space: nowrap; }
+.map-f-where { font-weight: 600; color: var(--c-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.map-f-what { color: var(--c-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.map-f-empty, .map-f-more { padding: 4px 0; font-size: 0.82rem; color: var(--c-dim); }
+.map-f-empty[data-final="1"] { color: var(--c-accent-green); font-weight: 600; }
+
+/* Verdict band — the one authored moment. */
+.splash-verdict {
+    --v-tone: var(--c-muted);
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 6px 22px;
+    padding: 16px 20px;
+    border-radius: 12px;
+    border: 1px solid var(--c-border);
+    background: var(--c-surface);
+}
+.splash-verdict[hidden] { display: none; }
+.sp-v-pass { --v-tone: var(--c-accent-green); background: var(--c-tint-green); border-color: var(--c-tint-green-border); }
+.sp-v-warn { --v-tone: var(--c-accent-amber); background: var(--c-tint-amber); border-color: var(--c-tint-amber-border); }
+.sp-v-fail { --v-tone: var(--c-accent-red);   background: var(--c-tint-red);   border-color: var(--c-tint-red-border); }
+.sp-v-word {
+    font-size: clamp(1.9rem, 4vw, 2.6rem);
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    line-height: 1;
+    color: var(--v-tone);
+}
+.sp-v-body { min-width: 0; }
+.sp-v-tag { margin: 0; font-size: 0.9rem; font-weight: 550; color: var(--c-text); }
+.sp-v-gap { margin: 6px 0 0; font-size: 0.8rem; color: var(--c-muted); }
+
+.splash-note { font-size: 0.8rem; line-height: 1.4; color: var(--c-dim); }
+.splash-hidden { opacity: 0; pointer-events: none; }
+.splash-hidden .splash-frame { transform: scale(0.985); filter: blur(2px); }
+
 @keyframes pulse-fade {
     0%, 100% { opacity: 0.85; transform: scale(1); }
     50%      { opacity: 1;    transform: scale(1.02); }
+}
+@keyframes sp-spin  { to { transform: rotate(360deg); } }
+@keyframes map-flow { to { stroke-dashoffset: -12; } }
+
+/* Short RDP/LogMeIn viewports (1280x720 and below): tighten the rhythm so
+   the map, the findings and the verdict fit without scrolling. */
+@media (max-height: 780px) {
+    .splash { padding-block: 16px; }
+    .splash-frame { gap: 10px; }
+    .splash-head { margin-bottom: 0; }
+    .splash-logo { width: min(180px, 50vw); }
+    .splash-verdict { padding: 12px 18px; }
+    .map-nodes { row-gap: 16px; }
+    .map-node { padding: 8px 11px; }
+    .map-cell { padding-block: 3px; }
+}
+/* Below desktop width the chain can't run left to right: stack it in chain
+   order and drop the connectors rather than draw diagonals through nodes. */
+@media (max-width: 960px) {
+    .map-links { display: none; }
+    .map-nodes {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-areas: "cams net" "vpu vpu" "cloud score" "stream stream";
+        gap: 12px;
+    }
+    .map-node[data-node="score"] { width: auto; justify-self: stretch; }
+    .map-f { grid-template-columns: 18px auto minmax(0, 1fr); }
+    .map-f-what { grid-column: 2 / -1; white-space: normal; }
+}
+@media (max-width: 520px) {
+    .splash { padding: 20px 16px; }
+    .map-nodes { grid-template-columns: minmax(0, 1fr); grid-template-areas: "cams" "vpu" "net" "cloud" "stream" "score"; }
+    .map-cells { grid-template-columns: minmax(0, 1fr); }
+    .map-cell:nth-last-child(2) { border-bottom-color: var(--c-border); }
+    .splash-verdict { grid-template-columns: minmax(0, 1fr); }
+}
+@media (prefers-reduced-motion: reduce) {
+    .splash-logo, [data-state="pending"] > .sp-mark, .map-link[data-flow="1"] .map-link-flow { animation: none; }
 }
 
 /* ── Theme toggle ───────────────────────────────────────────── */

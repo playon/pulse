@@ -73,7 +73,10 @@ def _log(script: str, duration_ms: float, status: str, detail: str = "", size: i
 def get_running_tasks() -> list[dict]:
     now = time.monotonic()
     return [
-        {"id": tid, "script": t["script"], "runningSec": round(now - t["started"], 1)}
+        {"id": tid, "script": t["script"], "runningSec": round(now - t["started"], 1),
+         # "queued" until the 4-slot semaphore admits it. The splash feed shows
+         # the difference so a backed-up box reads as waiting, not as slow.
+         "state": "running" if t.get("active") else "queued"}
         for tid, t in RUNNING_TASKS.items()
     ]
 
@@ -235,6 +238,7 @@ async def run_ps(
 
     try:
         async with _get_semaphore():
+            RUNNING_TASKS[task_id]["active"] = True
             result = await _run_ps_inner(script_name, args, timeout, task_id, cancel_evt)
         # Only cache successful results. Errors should retry on next call.
         if use_cache and isinstance(result, dict) and not result.get("error"):
