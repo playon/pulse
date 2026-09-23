@@ -332,8 +332,8 @@ async def _on_startup():
     except Exception:
         pass
 
-    # Fire-and-forget run-tracking check-in (no-op until the check-in secret is
-    # filled in, and never in demo/dev). Scheduled so it can't delay startup.
+    # Fire-and-forget run-tracking check-in (queued on disk, never in demo/dev).
+    # Scheduled so it can't delay startup.
     try:
         asyncio.create_task(_send_checkin())
     except Exception:
@@ -6437,96 +6437,246 @@ async def _remove_splashtop() -> None:
 
 
 # Fire-and-forget "Pulse ran on this VPU" beacon for fleet tracking. The sink is
-# a Google Apps Script web app that upserts one row per unit (first/last seen,
-# run count). The URL + secret are embedded below by deliberate choice: this is
-# a low-value, rotatable, write-only spreadsheet key, and baking it into main.py
-# means every release checks in with zero per-VPU setup. Env vars
-# PULSE_CHECKIN_URL / PULSE_CHECKIN_SECRET override the embedded defaults.
+# the pulse-checkin Cloudflare Worker (tools/checkin-worker/), which appends one
+# row per check-in to D1. The URL + secret are embedded on purpose: the secret is
+# a low-value, rotatable, write-only key (the repo is public, so the Worker's
+# validation and rate limit are the real protection), and embedding it means
+# every release checks in with zero per-VPU setup. Env vars PULSE_CHECKIN_URL /
+# PULSE_CHECKIN_SECRET override the defaults.
 #
-# Never runs in demo/dev (DEMO_MODE) so a developer's machine can't pollute the
-# list. Identity-only payload; one-way (we POST, we don't act on any response).
-# Fail-open in every branch: a blocked network or unreachable sink must never
-# slow or break launch. Stdlib urllib on purpose (no httpx) — the beacon has to
-# work on any installed build, even one missing an optional pip dependency.
+# Every check-in is queued on disk first and leaves the queue only when the
+# Worker acknowledges it. The previous sink (an Apps Script sheet) lost four days
+# of check-ins because nothing checked the reply; now a dead sink only delays
+# them, and they replay with their original sentAt on a later launch. The queue
+# lives in the web root beside pulse-settings.json, which the launcher's xcopy
+# update never removes.
 #
-# ============================================================================
-#  >>> PASTE YOUR APPS SCRIPT SECRET HERE <<<
-#  Replace PASTE_CHECKIN_SECRET_HERE below with the secret from your Apps Script
-#  deployment. The URL is already set. Until then, check-in stays inert (it
-#  won't send with the placeholder).
-# ============================================================================
-_CHECKIN_URL    = "https://script.google.com/macros/s/AKfycbworYEcINtNfd1R6sTvHFDFqOHzYVA1XxHZRStB54T2GcTgQ8JvE0lxnboJ9q_jEFS4/exec"
-_CHECKIN_SECRET = "7a161bad7765fc5078b8375007999160c5687bf5da52ae1ca717ebbad628e648"
+# Never sends in demo/dev (DEMO_MODE), so a developer's machine can't pollute the
+# list. Fail-open in every branch: a blocked network or unreachable sink must
+# never slow or break launch. Stdlib urllib on purpose (no httpx): the beacon has
+# to work on any installed build, even one missing an optional pip dependency.
+_CHECKIN_URL    = "PASTE_WORKER_URL_HERE"
+_CHECKIN_SECRET = "d63a83e8a45f8bd71409ac2eef00dec2584a04d70abb962139e5e08f7ee6d93d"
+_CHECKIN_STATE_PATH = _os.path.join(_web_root, "pulse-checkin-queue.json")
+_CHECKIN_BATCH = 50
+_CHECKIN_MAX_QUEUED = 200
+_CHECKIN_MAX_AGE_DAYS = 30
+# A failure younger than this is a blip; older is worth a notice on the About page.
+_CHECKIN_NOTICE_AFTER_HOURS = 24
+_CHECKIN_TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+_checkin_lock = asyncio.Lock()
 
 
-def _post_checkin_sync(url: str, payload: dict) -> None:
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}
-    )
-    # Apps Script 302-redirects the POST to a result URL; urllib follows it as a
-    # GET and reads the JSON ack. We don't need the body — just don't error.
-    with urllib.request.urlopen(req, timeout=4) as resp:
-        resp.read(256)
+def _checkin_now() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime(_CHECKIN_TS_FORMAT)
+
+
+def _checkin_age_hours(ts, now: str) -> Optional[float]:
+    from datetime import datetime
+    try:
+        return (datetime.strptime(now, _CHECKIN_TS_FORMAT)
+                - datetime.strptime(ts, _CHECKIN_TS_FORMAT)).total_seconds() / 3600
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_checkin_state() -> dict:
+    try:
+        with open(_CHECKIN_STATE_PATH, "r", encoding="utf-8") as fh:
+            state = json.load(fh)
+    except (OSError, ValueError):
+        return {"queue": []}
+    if not isinstance(state, dict):
+        return {"queue": []}
+    if not isinstance(state.get("queue"), list):
+        state["queue"] = []
+    state["queue"] = [e for e in state["queue"] if isinstance(e, dict) and e.get("checkinId")]
+    return state
+
+
+def _save_checkin_state(state: dict) -> None:
+    tmp = _CHECKIN_STATE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(state, fh)
+    _os.replace(tmp, _CHECKIN_STATE_PATH)
+
+
+def _trim_checkin_queue(queue: list, now: str) -> list:
+    keep = []
+    for entry in queue:
+        age = _checkin_age_hours(entry.get("sentAt"), now)
+        if age is None or age <= _CHECKIN_MAX_AGE_DAYS * 24:
+            keep.append(entry)
+    return keep[-_CHECKIN_MAX_QUEUED:]
+
+
+def _post_checkin_sync(url: str, body: dict) -> dict:
+    """POST one batch; return the Worker's JSON reply or raise."""
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers={
+        "Content-Type": "application/json",
+        "User-Agent": f"Pulse/{APP_VERSION}",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            raw = resp.read(256 * 1024)
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = json.loads(e.read(4096) or b"{}").get("error") or ""
+        except Exception:
+            pass
+        raise RuntimeError(f"HTTP {e.code}" + (f": {detail}" if detail else ""))
+    try:
+        reply = json.loads(raw)
+    except ValueError:
+        raise RuntimeError("reply was not JSON")
+    if not isinstance(reply, dict) or reply.get("ok") is not True or not isinstance(reply.get("results"), list):
+        raise RuntimeError("sink did not acknowledge" + (f": {reply['error']}" if isinstance(reply, dict) and reply.get("error") else ""))
+    return reply
+
+
+async def _flush_checkin_queue(state: dict, url: str, secret: str) -> None:
+    """Send queued check-ins oldest first; drop only what the Worker answered for."""
+    while state["queue"]:
+        batch = state["queue"][:_CHECKIN_BATCH]
+        state["lastAttemptAt"] = _checkin_now()
+        try:
+            reply = await asyncio.to_thread(_post_checkin_sync, url, {"secret": secret, "checkins": batch})
+        except Exception as e:
+            state["lastError"] = str(e) or e.__class__.__name__
+            return
+        answered = set()
+        for r in reply["results"]:
+            if isinstance(r, dict) and r.get("status") in ("inserted", "duplicate", "invalid"):
+                answered.add(r.get("checkinId"))
+                if r.get("status") == "invalid":
+                    _server_log.warning("Check-in %s rejected as invalid by the sink", r.get("checkinId"))
+        if not answered.intersection(e["checkinId"] for e in batch):
+            state["lastError"] = "sink answered for none of the batch"
+            return
+        state["queue"] = [e for e in state["queue"] if e["checkinId"] not in answered]
+        state["lastSentAt"] = state["lastAttemptAt"]
+        state.pop("lastError", None)
+
+
+async def _build_checkin_entry() -> Optional[dict]:
+    import uuid
+    ident = await run_ps("Get-SystemIdentity.ps1")
+    if not isinstance(ident, dict) or ident.get("error"):
+        return None
+    cs   = ident.get("computerSystem") or {}
+    bios = ident.get("bios") or {}
+    px   = ident.get("pixellot") or {}
+    os_  = ident.get("operatingSystem") or {}
+    entry = {
+        "checkinId":    str(uuid.uuid4()),
+        "sentAt":       _checkin_now(),
+        "hostname":     cs.get("name"),
+        "serialNumber": bios.get("serialNumber"),
+        "venueId":      px.get("venueId"),
+        "vpuName":      px.get("vpuName"),
+        "model":        cs.get("model"),
+        "pulseVersion": APP_VERSION,
+        "channel":      _update_channel(),
+        "osBuild":      os_.get("buildNumber"),
+    }
+    # UBR tells an unpatched 17763.253 unit from a patched one; the build
+    # number alone can't. Fail-open: the check-in goes out without it.
+    try:
+        ubr = await run_ps("Get-WindowsUbr.ps1", timeout=10)
+        if isinstance(ubr, dict) and not ubr.get("error"):
+            entry["ubr"] = ubr.get("ubr")
+            entry["osBuild"] = entry["osBuild"] or ubr.get("currentBuild")
+    except Exception as e:
+        _server_log.info("Check-in UBR skipped (%s)", e)
+    # Stream Readiness verdict on the beacon: a pre-game-readiness time series at
+    # ~zero marginal cost. A readiness error never blocks the check-in.
+    try:
+        dash = await _collect_dashboard()
+        verdict = (dash or {}).get("readiness") or {}
+        if verdict:
+            entry["readiness"] = {
+                "status":        verdict.get("status"),
+                "policyVersion": verdict.get("policyVersion"),
+                "blockers":      [b.get("code") for b in verdict.get("blockers", [])],
+                "risks":         [r.get("code") for r in verdict.get("risks", [])],
+            }
+    except Exception as e:
+        _server_log.info("Check-in readiness skipped (%s)", e)
+    return entry
+
+
+def _checkin_configured(url: str, secret: str) -> bool:
+    return bool(url and secret and url.startswith("https://")
+                and "PASTE_" not in url and "PASTE_" not in secret)
 
 
 async def _send_checkin() -> None:
+    if DEMO_MODE:
+        return  # a dev/demo machine never reports
     url = (_os.environ.get("PULSE_CHECKIN_URL") or _CHECKIN_URL).strip()
     secret = (_os.environ.get("PULSE_CHECKIN_SECRET") or _CHECKIN_SECRET).strip()
-    if not url or not secret or secret == "PASTE_CHECKIN_SECRET_HERE" or DEMO_MODE:
-        return  # not configured (placeholder secret), or a dev/demo machine — never report
     try:
-        ident = await run_ps("Get-SystemIdentity.ps1")
-        if not isinstance(ident, dict) or ident.get("error"):
-            return  # couldn't read identity — skip silently
-        cs   = ident.get("computerSystem") or {}
-        bios = ident.get("bios") or {}
-        px   = ident.get("pixellot") or {}
-        os_  = ident.get("operatingSystem") or {}
-        payload = {
-            "secret":       secret,
-            "hostname":     cs.get("name"),
-            "serialNumber": bios.get("serialNumber"),
-            "venueId":      px.get("venueId"),
-            "vpuName":      px.get("vpuName"),
-            "model":        cs.get("model"),
-            "pulseVersion": APP_VERSION,
-            "channel":      _update_channel(),
-            "osBuild":      os_.get("buildNumber"),
-        }
-        # UBR tells an unpatched 17763.253 unit from a patched one; the build
-        # number alone can't. Fail-open: the check-in goes out without it.
-        try:
-            ubr = await run_ps("Get-WindowsUbr.ps1", timeout=10)
-            if isinstance(ubr, dict) and not ubr.get("error"):
-                payload["ubr"] = ubr.get("ubr")
-                payload["osBuild"] = payload["osBuild"] or ubr.get("currentBuild")
-        except Exception as e:
-            _server_log.info("Check-in UBR skipped (%s)", e)
-        # Stream Readiness verdict on the beacon → a pre-game-readiness time
-        # series at ~zero marginal cost (the beacon already fires on launch).
-        # Fail-open like everything else here: a readiness error never blocks
-        # the check-in — we just send the identity fields without the verdict.
-        try:
-            dash = await _collect_dashboard()
-            verdict = (dash or {}).get("readiness") or {}
-            if verdict:
-                payload["readiness"] = {
-                    "status":        verdict.get("status"),
-                    "policyVersion": verdict.get("policyVersion"),
-                    "blockers":      [b.get("code") for b in verdict.get("blockers", [])],
-                    "risks":         [r.get("code") for r in verdict.get("risks", [])],
-                }
-        except Exception as e:
-            _server_log.info("Check-in readiness skipped (%s)", e)
-        await asyncio.to_thread(_post_checkin_sync, url, payload)
-        _server_log.info("Check-in sent for %s", payload.get("hostname") or "unknown VPU")
+        async with _checkin_lock:
+            entry = await _build_checkin_entry()
+            state = _load_checkin_state()
+            if entry:
+                state["queue"].append(entry)
+            state["queue"] = _trim_checkin_queue(state["queue"], _checkin_now())
+            # Persist before sending, so a crash mid-POST still leaves it queued.
+            _save_checkin_state(state)
+            if not _checkin_configured(url, secret):
+                return
+            await _flush_checkin_queue(state, url, secret)
+            _save_checkin_state(state)
+        if state.get("lastError"):
+            _server_log.info("Check-in queued (%d waiting): %s", len(state["queue"]), state["lastError"])
+        else:
+            _server_log.info("Check-in sent for %s", (entry or {}).get("hostname") or "unknown VPU")
     except Exception as e:
-        # Fail-open: the beacon must never affect Pulse.
         try:
             _server_log.info("Check-in skipped (%s)", e)
         except Exception:
             pass
+
+
+def _checkin_status() -> dict:
+    """What the About page shows. Read-only: never sends, never runs PowerShell."""
+    url = (_os.environ.get("PULSE_CHECKIN_URL") or _CHECKIN_URL).strip()
+    secret = (_os.environ.get("PULSE_CHECKIN_SECRET") or _CHECKIN_SECRET).strip()
+    state = _load_checkin_state()
+    queue = state["queue"]
+    oldest = min((e.get("sentAt") for e in queue if e.get("sentAt")), default=None)
+    age = _checkin_age_hours(oldest, _checkin_now()) if oldest else None
+    # A build with no sink never tried to reach one, so it must not claim it failed to.
+    unconfigured = not DEMO_MODE and not _checkin_configured(url, secret)
+    if unconfigured:
+        status = "not-configured"
+    elif queue:
+        status = "queued"
+    elif state.get("lastSentAt"):
+        status = "sent"
+    elif DEMO_MODE:
+        status = "demo"
+    else:
+        status = "never"
+    return {
+        "status":        status,
+        "queued":        len(queue),
+        "oldestQueued":  oldest,
+        "lastSentAt":    state.get("lastSentAt"),
+        "lastAttemptAt": state.get("lastAttemptAt"),
+        "lastError":     state.get("lastError"),
+        "notice":        (not unconfigured and bool(queue) and age is not None
+                          and age >= _CHECKIN_NOTICE_AFTER_HOURS),
+    }
+
+
+@app.get("/api/checkin-status")
+async def api_checkin_status():
+    return _checkin_status()
 
 
 async def _resolve_latest_release(channel):
