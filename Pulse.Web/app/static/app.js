@@ -921,6 +921,8 @@ function _splashReset(verbText) {
   _splashView.build();
   _setSplashVerb(`${_splash.verb}…`);
   _setSplashNote(SPLASH_NOTE_DEFAULT);
+  const cd = document.getElementById("splash-countdown");
+  if (cd) cd.textContent = "";
   clearTimeout(_splash.pollTimer);
   _splash.gen++;
   _splashPoll(_splash.gen);
@@ -974,11 +976,18 @@ function hideSplash() {
   _setSplashNote(_splashDoneNote(t));
   try { _splashView.finish(rd, t); } catch (e) { console.error("splash finish", e); }
   splash.classList.add("splash-final");
-  const reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  const hold = (rd && rd.status === "PASS" && !t.error && !_splash.timedOut) ? 1400 : 2600;
-  let gone = false;
+  // Hold the verdict long enough to read, counting down so the tech knows
+  // Pulse is about to open, then fade into the app. A clean PASS needs less
+  // reading than a frame with issues. Any key or click opens it now.
+  const hold = (rd && rd.status === "PASS" && !_splashGapPhrase(t) && !_splash.timedOut) ? 3000 : 5000;
+  const page = PAGES.find((p) => p.id === currentPage);
+  const dest = page ? page.label : "Pulse";
+  const cd = document.getElementById("splash-countdown");
+  let gone = false, cdTimer = null, goTimer = null;
   const go = () => {
     if (gone) return; gone = true;
+    clearInterval(cdTimer); clearTimeout(goTimer);
+    if (cd) cd.textContent = "";
     window.removeEventListener("keydown", go, true);
     splash.removeEventListener("pointerdown", go);
     splash.classList.add("splash-hidden");
@@ -987,13 +996,22 @@ function hideSplash() {
   };
   window.addEventListener("keydown", go, true);
   splash.addEventListener("pointerdown", go);
+  _setSplashNote(_splashDoneNote(t) + " Click or press any key to open it now.");
   // ?splash=hold keeps the verdict frame up until a click or key, for
   // reviewing the splash itself. Never set by the app.
   if (/[?&]splash=hold\b/.test(location.search)) {
+    if (cd) cd.textContent = "held for review";
     _setSplashNote(_splashDoneNote(t) + " Click or press any key to open Pulse.");
     return;
   }
-  setTimeout(go, reduce ? Math.min(hold, 1200) : hold);
+  const endAt = performance.now() + hold;
+  const paint = () => {
+    const left = Math.max(1, Math.ceil((endAt - performance.now()) / 1000));
+    if (cd) cd.textContent = `opening ${dest} in ${left}s`;
+  };
+  paint();
+  cdTimer = setInterval(paint, 250);
+  goTimer = setTimeout(go, hold);
 }
 
 function preloadProgressive(opts) {
