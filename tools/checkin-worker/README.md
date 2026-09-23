@@ -3,12 +3,13 @@
 Where Pulse's launch check-in lands. It replaced the Google Apps Script sheet
 after a lapsed personal subscription silently dropped four days of check-ins.
 
-Two Workers, one D1 database (`pulse-checkins`):
+Two Workers, one D1 database (`pulse-checkins`, id `30ea63a8-dbec-494c-827b-ddb48e6dbaac`),
+on the ian.moore@playonsports.com Cloudflare account:
 
 | Worker | Who calls it | What it does |
 |---|---|---|
-| `pulse-checkin` | VPUs (public) | `POST /checkin` stores check-ins; `GET /health`; daily cron posts to Slack when too few arrived |
-| `pulse-checkin-admin` | People, behind Cloudflare Access | `/` unit table, `/units.csv`, `/checkins.csv?days=30` |
+| `pulse-checkin` — https://pulse-checkin.pulse-checkin-worker.workers.dev | VPUs (public) | `POST /checkin` stores check-ins; `GET /health`; daily cron posts to Slack when too few arrived |
+| `pulse-checkin-admin` — https://pulse-checkin-admin.pulse-checkin-worker.workers.dev | People, behind Cloudflare Access | `/` unit table, `/units.csv`, `/checkins.csv?days=30` |
 
 They are separate Workers because Cloudflare Access on a `workers.dev`
 hostname covers the whole hostname, and VPUs have to POST without logging in.
@@ -67,7 +68,7 @@ Don't turn on Access for `pulse-checkin`. That would lock out every VPU.
 ## Checking it
 
 ```bash
-curl -s https://pulse-checkin.<subdomain>.workers.dev/health
+curl -s https://pulse-checkin.pulse-checkin-worker.workers.dev/health
 ```
 
 The alert runs daily at 13:00 UTC. `ALERT_WINDOW_HOURS` (default 24) and

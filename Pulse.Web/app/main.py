@@ -6455,7 +6455,7 @@ async def _remove_splashtop() -> None:
 # list. Fail-open in every branch: a blocked network or unreachable sink must
 # never slow or break launch. Stdlib urllib on purpose (no httpx): the beacon has
 # to work on any installed build, even one missing an optional pip dependency.
-_CHECKIN_URL    = "PASTE_WORKER_URL_HERE"
+_CHECKIN_URL    = "https://pulse-checkin.pulse-checkin-worker.workers.dev/checkin"
 _CHECKIN_SECRET = "d63a83e8a45f8bd71409ac2eef00dec2584a04d70abb962139e5e08f7ee6d93d"
 _CHECKIN_STATE_PATH = _os.path.join(_web_root, "pulse-checkin-queue.json")
 _CHECKIN_BATCH = 50

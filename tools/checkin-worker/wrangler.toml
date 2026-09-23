@@ -17,7 +17,7 @@ ALERT_MIN_CHECKINS = "1"
 [[d1_databases]]
 binding = "DB"
 database_name = "pulse-checkins"
-database_id = "REPLACE_WITH_ID_FROM_d1_create"
+database_id = "30ea63a8-dbec-494c-827b-ddb48e6dbaac"
 migrations_dir = "migrations"
 
 [[ratelimits]]
@@ -44,7 +44,7 @@ ACCESS_AUD = "REPLACE_WITH_APPLICATION_AUD_TAG"
 [[env.admin.d1_databases]]
 binding = "DB"
 database_name = "pulse-checkins"
-database_id = "REPLACE_WITH_ID_FROM_d1_create"
+database_id = "30ea63a8-dbec-494c-827b-ddb48e6dbaac"
 migrations_dir = "migrations"
 
 [env.admin.triggers]
