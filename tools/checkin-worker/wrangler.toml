@@ -1,0 +1,51 @@
+# Two Workers from one codebase, sharing one D1 database:
+#   pulse-checkin        public ingest for VPUs + the daily "no check-ins" Slack alert
+#   pulse-checkin-admin  read-only views, behind Cloudflare Access
+# They are split because Access on a workers.dev hostname covers the whole
+# hostname, and the VPUs must be able to POST without an Access login.
+
+name = "pulse-checkin"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+workers_dev = true
+
+[vars]
+ROLE = "ingest"
+ALERT_WINDOW_HOURS = "24"
+ALERT_MIN_CHECKINS = "1"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "pulse-checkins"
+database_id = "REPLACE_WITH_ID_FROM_d1_create"
+migrations_dir = "migrations"
+
+[[ratelimits]]
+name = "INGEST_LIMITER"
+namespace_id = "1001"
+simple = { limit = 30, period = 60 }
+
+# 13:00 UTC = 9 AM Eastern in summer, 8 AM in winter.
+[triggers]
+crons = ["0 13 * * *"]
+
+# Secrets (wrangler secret put): CHECKIN_SECRET, SLACK_WEBHOOK_URL
+
+[env.admin]
+name = "pulse-checkin-admin"
+workers_dev = true
+
+[env.admin.vars]
+ROLE = "admin"
+# From Zero Trust > Access > Applications > (this app) > Overview.
+ACCESS_TEAM_DOMAIN = "REPLACE_WITH_TEAM.cloudflareaccess.com"
+ACCESS_AUD = "REPLACE_WITH_APPLICATION_AUD_TAG"
+
+[[env.admin.d1_databases]]
+binding = "DB"
+database_name = "pulse-checkins"
+database_id = "REPLACE_WITH_ID_FROM_d1_create"
+migrations_dir = "migrations"
+
+[env.admin.triggers]
+crons = []
