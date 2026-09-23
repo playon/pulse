@@ -297,16 +297,6 @@ html.dark .splash-logo { filter: none; }
     color: var(--c-text);
     letter-spacing: -0.005em;
 }
-/* "opening Dashboard in 4s": visual only; the status line is announced. */
-.splash-countdown {
-    margin-left: 10px;
-    font-size: 0.85rem;
-    font-weight: 500;
-    letter-spacing: 0;
-    color: var(--c-muted);
-    font-variant-numeric: tabular-nums;
-}
-.splash-countdown:empty { display: none; }
 .splash-count {
     font-size: 0.82rem;
     font-weight: 500;
@@ -596,6 +586,43 @@ html.dark .splash-logo { filter: none; }
     color: var(--v-tone);
 }
 .sp-v-body { min-width: 0; }
+/* Skip control: the countdown drains along the button's bottom edge. */
+.splash-verdict.has-skip { grid-template-columns: auto minmax(0, 1fr) auto; }
+.splash-skip-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 5px;
+}
+.splash-skip {
+    position: relative;
+    overflow: hidden;
+    padding: 8px 16px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    background: var(--c-surface);
+    white-space: nowrap;
+}
+.splash-skip::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 3px;
+    background: var(--c-accent-blue);
+    transform-origin: left center;
+    animation: splash-drain var(--hold, 5000ms) linear forwards;
+}
+.splash-skip.is-held::after { animation: none; transform: scaleX(0); }
+.splash-skip:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--c-focus-ring); }
+.splash-skip-cd {
+    font-size: 0.74rem;
+    color: var(--c-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+@keyframes splash-drain { from { transform: scaleX(1); } to { transform: scaleX(0); } }
 .sp-v-tag { margin: 0; font-size: 0.9rem; font-weight: 550; color: var(--c-text); }
 .sp-v-gap { margin: 6px 0 0; font-size: 0.8rem; color: var(--c-muted); }
 
@@ -640,10 +667,13 @@ html.dark .splash-logo { filter: none; }
     .map-nodes { grid-template-columns: minmax(0, 1fr); grid-template-areas: "cams" "vpu" "net" "cloud" "stream" "score"; }
     .map-cells { grid-template-columns: minmax(0, 1fr); }
     .map-cell:nth-last-child(2) { border-bottom-color: var(--c-border); }
-    .splash-verdict { grid-template-columns: minmax(0, 1fr); }
+    .splash-verdict,
+    .splash-verdict.has-skip { grid-template-columns: minmax(0, 1fr); }
+    .splash-skip-wrap { align-items: stretch; }
 }
 @media (prefers-reduced-motion: reduce) {
     .splash-logo, [data-state="pending"] > .sp-mark, .map-link[data-flow="1"] .map-link-flow { animation: none; }
+    .splash-skip::after { animation: none; transform: scaleX(0); }
 }
 
 /* ── Theme toggle ───────────────────────────────────────────── */

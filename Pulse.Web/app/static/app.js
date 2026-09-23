@@ -552,6 +552,9 @@ const SPLASH_NOTE_DEFAULT = "Running a full diagnostic sweep. This can take a mo
 const SPLASH_NOTE_SLOW    = "Still working. Camera frames and the speed test take longer on slower units.";
 const SPLASH_NOTE_DONE    = "All checks complete.";
 const SPLASH_NOTE_TIMEOUT = "Some checks are still running. Their tabs will fill in when they finish.";
+// How long the verdict frame stays up before Pulse opens by itself. One preset
+// for every outcome, so the timing is predictable; the button skips it.
+const SPLASH_HOLD_MS = 5000;
 // The done note may only claim completeness when every check answered.
 function _splashDoneNote(t) {
   if (_splash.timedOut) return SPLASH_NOTE_TIMEOUT;
@@ -921,8 +924,6 @@ function _splashReset(verbText) {
   _splashView.build();
   _setSplashVerb(`${_splash.verb}…`);
   _setSplashNote(SPLASH_NOTE_DEFAULT);
-  const cd = document.getElementById("splash-countdown");
-  if (cd) cd.textContent = "";
   clearTimeout(_splash.pollTimer);
   _splash.gen++;
   _splashPoll(_splash.gen);
@@ -976,42 +977,51 @@ function hideSplash() {
   _setSplashNote(_splashDoneNote(t));
   try { _splashView.finish(rd, t); } catch (e) { console.error("splash finish", e); }
   splash.classList.add("splash-final");
-  // Hold the verdict long enough to read, counting down so the tech knows
-  // Pulse is about to open, then fade into the app. A clean PASS needs less
-  // reading than a frame with issues. Any key or click opens it now.
-  const hold = (rd && rd.status === "PASS" && !_splashGapPhrase(t) && !_splash.timedOut) ? 3000 : 5000;
+  // Hold the verdict for a preset time, counting down on a real button so
+  // the tech knows Pulse is about to open and can open it now instead.
   const page = PAGES.find((p) => p.id === currentPage);
   const dest = page ? page.label : "Pulse";
-  const cd = document.getElementById("splash-countdown");
+  const held = /[?&]splash=hold\b/.test(location.search);   // review only, never set by the app
+  const v = document.getElementById("splash-verdict");
   let gone = false, cdTimer = null, goTimer = null;
   const go = () => {
     if (gone) return; gone = true;
     clearInterval(cdTimer); clearTimeout(goTimer);
-    if (cd) cd.textContent = "";
-    window.removeEventListener("keydown", go, true);
-    splash.removeEventListener("pointerdown", go);
+    window.removeEventListener("keydown", onKey, true);
     splash.classList.add("splash-hidden");
     // Views with running animation stop it once the fade has finished.
     setTimeout(() => { if (_splash.closing && _splashView.stop) _splashView.stop(); }, 600);
   };
-  window.addEventListener("keydown", go, true);
-  splash.addEventListener("pointerdown", go);
-  _setSplashNote(_splashDoneNote(t) + " Click or press any key to open it now.");
-  // ?splash=hold keeps the verdict frame up until a click or key, for
-  // reviewing the splash itself. Never set by the app.
-  if (/[?&]splash=hold\b/.test(location.search)) {
-    if (cd) cd.textContent = "held for review";
-    _setSplashNote(_splashDoneNote(t) + " Click or press any key to open Pulse.");
+  const onKey = (e) => { if (e.key === "Escape") go(); };
+  window.addEventListener("keydown", onKey, true);
+  if (v) {
+    const wrap = document.createElement("div");
+    wrap.className = "splash-skip-wrap";
+    wrap.innerHTML = `<button type="button" class="btn-outline btn-ol-blue splash-skip" id="splash-skip">`
+      + `<span>Open ${esc(dest)} now</span></button>`
+      + `<span class="splash-skip-cd" id="splash-skip-cd" aria-hidden="true"></span>`;
+    v.appendChild(wrap);
+    v.classList.add("has-skip");
+    const btn = wrap.querySelector("button");
+    btn.style.setProperty("--hold", SPLASH_HOLD_MS + "ms");
+    btn.addEventListener("click", go);
+    if (held) btn.classList.add("is-held");
+    // Focus it so Enter opens Pulse; no scroll jump if the band is off-screen.
+    try { btn.focus({ preventScroll: true }); } catch (e) { btn.focus(); }
+  }
+  const cd = document.getElementById("splash-skip-cd");
+  if (held) {
+    if (cd) cd.textContent = "Held for review";
     return;
   }
-  const endAt = performance.now() + hold;
+  const endAt = performance.now() + SPLASH_HOLD_MS;
   const paint = () => {
     const left = Math.max(1, Math.ceil((endAt - performance.now()) / 1000));
-    if (cd) cd.textContent = `opening ${dest} in ${left}s`;
+    if (cd) cd.textContent = `Opening automatically in ${left}s`;
   };
   paint();
   cdTimer = setInterval(paint, 250);
-  goTimer = setTimeout(go, hold);
+  goTimer = setTimeout(go, SPLASH_HOLD_MS);
 }
 
 function preloadProgressive(opts) {
