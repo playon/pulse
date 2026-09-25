@@ -20,7 +20,7 @@ flow shows testers when a new build is available.
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 `Pulse.Web/VERSION`.
 
-## [Unreleased]
+## [1.3.2] - 2026-09-25
 
 ### Changed
 - The live scoreboard on the ScoreConnect page now labels every value (Away Score, Home Score, Quarter/Inning/Period, Time, Down & Distance, Ball On, Clock) and the home score lines up under its team name again.
