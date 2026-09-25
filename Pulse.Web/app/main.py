@@ -5203,6 +5203,7 @@ async def _send_checkin() -> None:
         cs   = ident.get("computerSystem") or {}
         bios = ident.get("bios") or {}
         px   = ident.get("pixellot") or {}
+        os_  = ident.get("operatingSystem") or {}
         payload = {
             "secret":       secret,
             "hostname":     cs.get("name"),
@@ -5212,7 +5213,17 @@ async def _send_checkin() -> None:
             "model":        cs.get("model"),
             "pulseVersion": APP_VERSION,
             "channel":      _update_channel(),
+            "osBuild":      os_.get("buildNumber"),
         }
+        # UBR tells an unpatched 17763.253 unit from a patched one; the build
+        # number alone can't. Fail-open: the check-in goes out without it.
+        try:
+            ubr = await run_ps("Get-WindowsUbr.ps1", timeout=10)
+            if isinstance(ubr, dict) and not ubr.get("error"):
+                payload["ubr"] = ubr.get("ubr")
+                payload["osBuild"] = payload["osBuild"] or ubr.get("currentBuild")
+        except Exception as e:
+            _server_log.info("Check-in UBR skipped (%s)", e)
         # Stream Readiness verdict on the beacon → a pre-game-readiness time
         # series at ~zero marginal cost (the beacon already fires on launch).
         # Fail-open like everything else here: a readiness error never blocks
