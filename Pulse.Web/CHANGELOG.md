@@ -20,6 +20,12 @@ flow shows testers when a new build is available.
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 `Pulse.Web/VERSION`.
 
+## [1.3.2] - 2026-09-25
+
+### Changed
+- The live scoreboard on the ScoreConnect page now labels every value (Away Score, Home Score, Quarter/Inning/Period, Time, Down & Distance, Ball On, Clock) and the home score lines up under its team name again.
+- The loading screen now shows each check's result as it finishes (Pass, Warning, Critical, or Couldn't check) on a map of the setup: cameras, VPU, venue network, Pixellot cloud and scoreboard. It lists every issue as it's found, shows which scripts are running, and ends on the stream readiness verdict before opening Pulse.
+
 ## [1.3.1] - 2026-09-22
 
 ### Added

@@ -515,17 +515,24 @@ function fetchSection(key) {
   return fetchPromises[key];
 }
 
-// ── Splash status helpers ──────────────────────────────────────────────
-// The splash shows, top to bottom: the verb (Loading/Running diagnostics),
-// an "X of N systems" count, a live checklist that ticks each section off in
-// boot order, an issue banner (critical/warning findings, surfaced as soon
-// as the dashboard lands), and a reassurance note that escalates if a slow
-// box runs long.
+// ── Splash: live diagnostic sweep ──────────────────────────────────────
+// The splash is the first thing a tech sees, and on a real VPU it is up for
+// 20-40 seconds. It used to show a checklist that ticked when data ARRIVED,
+// which said nothing about whether the check passed. Now every row settles
+// into the answer it actually produced, a ticker shows the PowerShell work
+// running behind it, and it ends on the Stream Readiness verdict.
 //
-// Section labels use the friendly nav title (e.g. "Disk & System Health")
-// rather than the API key (e.g. "disk-health") — we build the lookup from
-// NAV_SECTIONS on first use so it stays in sync with the sidebar even if
-// labels change later.
+// Honest-states contract (see .claude/skills/pulse-honest-states):
+//   - A collector that errored reads "Couldn't check", never Pass.
+//   - A row only reads Pass once something SCORED it: its own findings
+//     (network, cameras) or the Dashboard rollup for its categories. Until
+//     then it reads "Collected", which is not a verdict.
+//   - If the safety timeout fires, unfinished rows say "Still running";
+//     they are never ticked to make the last frame look complete.
+//
+// Model (_splash) and view (_splashView) are separate so the view can be
+// swapped without touching how state is derived.
+
 let _SECTION_LABELS_CACHE = null;
 function _sectionLabels() {
   if (_SECTION_LABELS_CACHE) return _SECTION_LABELS_CACHE;
@@ -533,45 +540,129 @@ function _sectionLabels() {
   NAV_SECTIONS.forEach((s) => s.pages.forEach((p) => { map[p.id] = p.label; }));
   HIDDEN_PAGES.forEach((p) => { map[p.id] = p.label; });
   // Retired ids still fetched during preload (their /api/* feeds the split
-  // tabs) — give them friendly splash labels instead of raw keys.
-  map.system = map.system || "System";
-  map["pixellot-config"] = map["pixellot-config"] || "Pixellot Configuration";
+  // tabs) — give them splash labels that say what they cover.
+  map.system = "Hardware & Windows";
+  map["pixellot-config"] = "Pixellot Configuration";
   _SECTION_LABELS_CACHE = map;
   return map;
 }
 
-function _setSplashVerb(text) {
-  const el = document.getElementById("splash-verb");
-  if (el) el.textContent = text;
-}
-
-// The reassurance line under the checklist. Defaults to the up-front
-// expectation; escalates to SLOW if a box runs long (see preloadProgressive).
 // SPLASH_NOTE_DEFAULT must match the static text in index.html.
 const SPLASH_NOTE_DEFAULT = "Running a full diagnostic sweep. This can take a moment.";
 const SPLASH_NOTE_SLOW    = "Still working. Camera frames and the speed test take longer on slower units.";
-// Shown on the last frame before the splash fades. Without it the note still
-// reads "this can take a moment" while the verb already says "Ready".
 const SPLASH_NOTE_DONE    = "All checks complete.";
+const SPLASH_NOTE_TIMEOUT = "Some checks are still running. Their tabs will fill in when they finish.";
+// How long the verdict frame stays up before Pulse opens by itself. One preset
+// for every outcome, so the timing is predictable; the button skips it.
+const SPLASH_HOLD_MS = 5000;
+// The done note may only claim completeness when every check answered.
+function _splashDoneNote(t) {
+  if (_splash.timedOut) return SPLASH_NOTE_TIMEOUT;
+  const gap = _splashGapPhrase(t);
+  return gap ? `Sweep finished, but ${gap}. The affected tabs say what's missing.` : SPLASH_NOTE_DONE;
+}
 
-// Splash reveal order — cheap local collectors first, network probes and the
-// Dashboard aggregate last. This mirrors how fast sections actually SETTLE:
-// the dashboard gathers every subsystem (it's always the slowest), and the
-// network sweep runs live port probes. With dashboard first, the strict
-// in-order reveal couldn't tick anything until the slowest section landed,
-// then flooded the other eleven checks in one frame. Fetch order is
-// unaffected — the dashboard is still requested first (see
-// preloadProgressive); this only orders the checklist.
+// Row order: cheap local collectors first, network probes and the Dashboard
+// aggregate last — roughly the order they settle in on a real box.
 const SPLASH_REVEAL_ORDER = [
   "settings", "system", "services", "events", "scoreconnect",
   "pixellot-config", "disk-health", "reboots", "audio", "cameras",
   "network", "dashboard",
 ];
 
-// Preload sections in splash-reveal order. Single source for both the
-// checklist and the X-of-Y count, so they can't drift from each other or
-// from what's actually fetched. A PAGE_API key missing from
-// SPLASH_REVEAL_ORDER (a new lane) still appears — appended at the end.
+// Dashboard finding categories each row answers for. A row with an entry
+// here reads Pass only once the Dashboard has scored it. Pixellot findings
+// belong to Pixellot Configuration only, so one finding never flags two rows.
+const SPLASH_SECTION_CATEGORIES = {
+  system: ["hardware", "performance", "software", "system"],
+  "pixellot-config": ["pixellot"],
+  services: ["services"],
+  "disk-health": ["storage"],
+  network: ["network"],
+  cameras: ["camera"],
+};
+
+// The Dashboard's sourceErrors names the collectors it gathered that died.
+// Some lanes discard that error before their own payload reaches the page
+// (_build_network turns a dead config collector into config:{}), so this is
+// the only place the splash can learn a row's data is incomplete.
+const SPLASH_SOURCE_ROW = {
+  "System identity": "system", "Performance": "system", "Hardware": "system",
+  "Installed software": "system", "Services": "services",
+  "Network adapters": "cameras", "Network config": "network", "Port connectivity": "network",
+};
+function _splashSourceGaps() {
+  const d = _splash.dash;
+  return d && !d.error && Array.isArray(d.sourceErrors) ? d.sourceErrors : [];
+}
+// Collectors the server log recorded as failed or timed out (on a real VPU
+// this is how a dead script shows up), one entry per script.
+function _splashFailedCollectors() {
+  const seen = new Set();
+  return _splash.finished.filter((x) => x.state !== "ok" && !seen.has(x.script) && seen.add(x.script));
+}
+// What the final frame must admit, as a phrase ("" when every part answered).
+function _splashList(items) {
+  return items.length < 2 ? items.join("") : items.slice(0, -1).join(", ") + " and " + items[items.length - 1];
+}
+function _splashGapPhrase(t) {
+  const gaps = _splashSourceGaps();
+  const failed = _splashFailedCollectors();
+  const bits = [];
+  if (t.error) bits.push(`${t.error} check${t.error === 1 ? "" : "s"} couldn't run`);
+  if (gaps.length) bits.push(`${_splashList(gaps)} didn't answer`);
+  else if (failed.length) bits.push(`${failed.length} collector${failed.length === 1 ? "" : "s"} failed (${_splashList(failed.map((x) => x.script))})`);
+  return bits.join("; ");
+}
+
+// Plain-English line for each collector, in a field tech's words. Anything
+// missing falls back to the script name split into words.
+const SPLASH_SCRIPT_LABELS = {
+  "Get-SystemIdentity.ps1": "Reading VPU identity and Windows version",
+  "Get-Hardware.ps1": "Reading CPU, memory and motherboard",
+  "Get-GpuInfo.ps1": "Checking the graphics card and driver",
+  "Get-Performance.ps1": "Sampling CPU and memory load",
+  "Get-PerfSample.ps1": "Sampling CPU and memory load",
+  "Get-InstalledSoftware.ps1": "Listing installed software",
+  "Get-Services.ps1": "Checking Pixellot services",
+  "Test-PixellotInstallState.ps1": "Checking the Pixellot install",
+  "Get-PixellotConfig.ps1": "Reading Pixellot camera configuration",
+  "Get-PixellotDependencies.ps1": "Checking Pixellot dependencies",
+  "Get-NicAdapters.ps1": "Reading camera ports and adapters",
+  "Get-NetworkConfig.ps1": "Reading IP, gateway and DNS settings",
+  "Get-NetworkHealth.ps1": "Measuring network link health",
+  "Get-WifiAdapters.ps1": "Checking Wi-Fi adapters",
+  "Test-NetworkPorts.ps1": "Probing streaming ports",
+  "Test-NetworkDomains.ps1": "Reaching Pixellot cloud services",
+  "Test-DnsResolution.ps1": "Testing name lookups (DNS)",
+  "Test-TlsInspection.ps1": "Checking for SSL inspection",
+  "Test-LocalNetwork.ps1": "Testing the local network",
+  "Test-NtpDrift.ps1": "Measuring clock drift",
+  "Get-NtpPeers.ps1": "Reading time sync sources",
+  "Get-LmiGatewayLog.ps1": "Reading the LogMeIn connection log",
+  "Get-CameraExpectations.ps1": "Reading the expected camera layout",
+  "Get-PoePower.ps1": "Measuring PoE power per port",
+  "Get-S1Cameras.ps1": "Detecting cameras",
+  "Get-DiskHealth.ps1": "Checking disk space and drive health",
+  "Get-EventLogs.ps1": "Reading the Windows error log",
+  "Get-EventWindowSignals.ps1": "Scanning events for known faults",
+  "Get-PixellotEvents.ps1": "Reading Pixellot event history",
+  "Get-RebootHistory.ps1": "Reading reboot history",
+  "Get-AudioDevices.ps1": "Listing audio devices",
+  "Get-ScoreConnectStatus.ps1": "Contacting ScoreConnect",
+  "Get-ScoreLinkStatus.ps1": "Checking the ScoreLink device",
+  "Get-UsersAndDomains.ps1": "Reading users and domain",
+  "Get-Peripherals.ps1": "Listing USB peripherals",
+  "Get-WindowsPatchStatus.ps1": "Checking Windows updates",
+};
+function _splashScriptLabel(script) {
+  if (SPLASH_SCRIPT_LABELS[script]) return SPLASH_SCRIPT_LABELS[script];
+  return String(script || "").replace(/\.ps1$/i, "").replace(/^[A-Z][a-z]+-/, "")
+    .replace(/([a-z])([A-Z])/g, "$1 $2");
+}
+
+// Preload sections in row order. A PAGE_API key missing from
+// SPLASH_REVEAL_ORDER (a new lane) still appears, appended at the end.
 function _splashSectionKeys() {
   return SPLASH_REVEAL_ORDER.filter((k) => k in PAGE_API)
     .concat(Object.keys(PAGE_API).filter((k) => !SPLASH_REVEAL_ORDER.includes(k)));
@@ -580,61 +671,273 @@ function _splashSectionLabel(key) {
   return _sectionLabels()[key] || key.charAt(0).toUpperCase() + key.slice(1);
 }
 
-// (Re)build the checklist with every section pending, and reset the count.
-function _buildSplashChecklist() {
-  const wrap = document.getElementById("splash-checklist");
-  if (wrap) {
-    wrap.innerHTML = _splashSectionKeys().map((key) =>
-      `<div class="splash-check" data-key="${esc(key)}">`
-      +   `<span class="splash-check-mark"></span>`
-      +   `<span class="splash-check-label">${esc(_splashSectionLabel(key))}</span>`
-      + `</div>`
-    ).join("");
+const _splash = {
+  t0: 0,            // performance.now() at sweep start
+  wall0: 0,         // Date.now() at sweep start (to filter the server log)
+  verb: "",
+  order: [],
+  landed: {},       // key -> { data, ms } once revealed
+  queue: [],        // sections that arrived, waiting for their paced reveal
+  draining: false,
+  paceMs: 90,
+  dash: null,       // dashboard payload once revealed (null = not yet)
+  tasks: new Map(), // task id -> { script, label, state, sec, seen }
+  finished: [],     // completed collector runs, newest first
+  seenLog: new Set(),
+  logCursor: 0,
+  pollTimer: null,
+  clockTimer: null,
+  done: false,      // every section revealed
+  timedOut: false,  // safety timeout fired first
+  closing: false,
+  drainWaiters: [],
+  gen: 0,
+};
+
+function _splashElapsed() {
+  return _splash.t0 ? (performance.now() - _splash.t0) / 1000 : 0;
+}
+
+// Worst non-info finding for a set of categories: 2 critical, 1 warning, 0 none.
+function _splashWorst(findings, cats) {
+  let worst = 0, top = null;
+  (findings || []).forEach((f) => {
+    const s = (f.severity || "").toLowerCase();
+    if (s === "info") return;
+    if (!cats.includes((f.category || "").toLowerCase())) return;
+    const rank = /^(critical|error)$/.test(s) ? 2 : 1;
+    if (rank > worst) { worst = rank; top = f; }
+  });
+  return { worst, top, count: (findings || []).filter((f) =>
+    (f.severity || "").toLowerCase() !== "info"
+    && cats.includes((f.category || "").toLowerCase())).length };
+}
+
+// A short fact for a clean row, so Pass says what was checked. Defensive:
+// payload shapes vary by box, and a missing field just means no detail.
+function _splashFact(key, d) {
+  try {
+    if (key === "cameras" && d.expectedMainCameras != null)
+      return `${d.detectedMainCameras || 0} of ${d.expectedMainCameras} main cameras found`;
+    // A count, not "N of M running": some services are meant to be idle, and
+    // "Pass - 6 of 8 running" reads as a contradiction.
+    if (key === "services" && Array.isArray(d.services))
+      return `${d.services.length} service${d.services.length === 1 ? "" : "s"} checked`;
+    if (key === "audio" && d.inputCount != null)
+      return `${d.inputCount} input${d.inputCount === 1 ? "" : "s"}, ${d.outputCount || 0} output${d.outputCount === 1 ? "" : "s"}`;
+    if (key === "events") return "No recent errors";
+    if (key === "reboots" && d.uptime) return `Up ${typeof d.uptime === "string" ? d.uptime : (d.uptime.display || "")}`.trim();
+    if (key === "disk-health" && Array.isArray(d.logicalDisks))
+      return `${d.logicalDisks.length} drive${d.logicalDisks.length === 1 ? "" : "s"} checked`;
+    if (key === "scoreconnect" && d.version) return `ScoreConnect ${d.version}`;
+  } catch (e) {}
+  return "";
+}
+
+// The one place a row's state is decided. Returns
+// { state, word, detail, ms } with state one of:
+//   pending · collected · pass · warn · crit · error · stalled
+function _splashRowState(key) {
+  const hit = _splash.landed[key];
+  if (!hit) {
+    if (_splash.timedOut) return { state: "stalled", word: "Still running", detail: "", ms: null };
+    return { state: "pending", word: "Checking", detail: "", ms: null };
   }
-  _setSplashCount(0, _splashSectionKeys().length);
+  const d = hit.data;
+  const ms = hit.ms;
+  // error:true is what run_ps and api() both produce for a dead collector; a
+  // bare {detail} is FastAPI's shape for an unhandled 500.
+  const serverFault = d && typeof d.detail === "string" && Object.keys(d).length === 1;
+  if (!d || d.error === true || serverFault) {
+    const msg = (d && (d.message || d.detail)) || "The collector did not answer.";
+    return { state: "error", word: "Couldn't check", detail: String(msg), ms };
+  }
+
+  if (key === "dashboard") {
+    const st = d.readiness && d.readiness.status;
+    if (st === "FAIL") return { state: "crit", word: "Fail", detail: "Something will stop tonight's stream", ms };
+    if (st === "WARN") return { state: "warn", word: "Warning", detail: "Streaming is at risk", ms };
+    if (st === "PASS") return { state: "pass", word: "Pass", detail: "Nothing puts the stream at risk", ms };
+    return { state: "collected", word: "Collected", detail: "No readiness verdict", ms };
+  }
+
+  if (key === "events") {
+    const n = (d.entries || []).filter((e) => /^(error|critical)$/i.test(e.level || "")).length;
+    return n
+      ? { state: "warn", word: "Warning", detail: `${n} recent Windows error${n === 1 ? "" : "s"} logged`, ms }
+      : { state: "pass", word: "Pass", detail: _splashFact(key, d), ms };
+  }
+
+  if (key === "scoreconnect" && d.reachable === false) {
+    return { state: "warn", word: "Warning", detail: "ScoreConnect isn't answering on this VPU", ms };
+  }
+
+  const cats = SPLASH_SECTION_CATEGORIES[key];
+  if (cats) {
+    // Own findings score the row the moment it lands; the Dashboard rollup
+    // scores the rest. Whichever is worse wins.
+    const own = Array.isArray(d.findings) ? _splashWorst(d.findings, cats) : null;
+    const dash = _splash.dash && !_splash.dash.error ? _splashWorst(_splash.dash.findings, cats) : null;
+    // Own findings may raise an issue early, but Pass waits for the rollup:
+    // the Dashboard adds findings a lane can't see (a slow camera port is a
+    // Dashboard finding), and a row that reads Pass then flips to Warning
+    // has told the tech something false for a few seconds.
+    let pick = [own, dash].filter(Boolean).sort((a, b) => b.worst - a.worst)[0];
+    if (pick && pick.worst === 0 && !dash) pick = null;
+    if (!pick) {
+      const dashFailed = _splash.dash && _splash.dash.error;
+      return { state: "collected", word: "Collected",
+        detail: dashFailed ? "Not scored: the Dashboard rollup didn't run" : "Waiting on the Dashboard", ms };
+    }
+    if (pick.worst === 2) return { state: "crit", word: "Critical", detail: pick.top.title, count: pick.count, ms };
+    if (pick.worst === 1) return { state: "warn", word: "Warning", detail: pick.top.title, count: pick.count, ms };
+    // Nothing flagged, but part of the data never arrived: not a Pass.
+    const missing = _splashSourceGaps().filter((n) => SPLASH_SOURCE_ROW[n] === key);
+    if (missing.length) return { state: "collected", word: "Collected", partial: true, detail: `Partly checked: ${_splashList(missing)} didn't answer`, ms };
+    return { state: "pass", word: "Pass", detail: _splashFact(key, d), ms };
+  }
+
+  // Sections with no verdict of their own: data came back, the tab shows it.
+  return { state: "collected", word: "Collected", detail: _splashFact(key, d), ms };
 }
 
-function _markSplashSectionDone(key) {
-  if (!key) return;
-  const wrap = document.getElementById("splash-checklist");
-  const row = wrap && wrap.querySelector(`.splash-check[data-key="${key}"]`);
-  if (row) row.classList.add("done");
+function _splashTally() {
+  const t = { pass: 0, issue: 0, error: 0, pending: 0, collected: 0, total: _splash.order.length };
+  _splash.order.forEach((k) => {
+    const s = _splashRowState(k).state;
+    if (s === "pass") t.pass++;
+    else if (s === "warn" || s === "crit") t.issue++;
+    else if (s === "error") t.error++;
+    else if (s === "collected") t.collected++;
+    else t.pending++;
+  });
+  t.settled = t.total - t.pending;
+  return t;
 }
 
-// Final frame before the splash fades: everything checked, count full.
-function _completeSplashChecklist() {
-  const wrap = document.getElementById("splash-checklist");
-  if (wrap) wrap.querySelectorAll(".splash-check").forEach((r) => r.classList.add("done"));
-  const total = _splashSectionKeys().length;
-  _setSplashCount(total, total);
+// ── Collector feed (what PowerShell is doing right now) ──────────────
+// /api/scripts/running lists in-flight collectors (queued behind the
+// 4-slot semaphore, or running); /api/logs records each one as it ends
+// with its status and duration. Polled only while the splash is up.
+async function _splashPoll(gen) {
+  // One poll loop per sweep: showSplash and preloadProgressive both reset,
+  // and a stale loop's in-flight fetch must not schedule a second chain.
+  if (_splash.closing || gen !== _splash.gen) return;
+  try {
+    const run = await fetch(`/api/scripts/running?since=${Math.max(0, _splash.logCursor - 40)}`)
+      .then((r) => r.json());
+    // A poll in flight when the sweep closed must not repopulate "running"
+    // under a frame that already says Ready.
+    if (_splash.closing || gen !== _splash.gen) return;
+    const logs = run;
+    const live = new Set();
+    (run.tasks || []).forEach((t) => {
+      live.add(t.id);
+      const prev = _splash.tasks.get(t.id);
+      _splash.tasks.set(t.id, {
+        script: t.script, label: _splashScriptLabel(t.script),
+        state: t.state || "running", sec: t.runningSec || 0,
+        at: prev ? prev.at : performance.now() - (t.runningSec || 0) * 1000,
+      });
+    });
+    for (const id of Array.from(_splash.tasks.keys())) if (!live.has(id)) _splash.tasks.delete(id);
+
+    _splash.logCursor = logs.total || _splash.logCursor;
+    (logs.logs || []).forEach((e) => {
+      if (!e || e.script === "server") return;
+      const at = Date.parse(e.ts);
+      if (isFinite(at) && at < _splash.wall0 - 1500) return;   // an earlier run
+      const id = e.ts + "|" + e.script;
+      if (_splash.seenLog.has(id)) return;
+      _splash.seenLog.add(id);
+      _splash.finished.unshift({
+        id, script: e.script, label: _splashScriptLabel(e.script),
+        state: e.status === "ok" ? "ok" : e.status === "timeout" ? "timeout" : "error",
+        ms: e.durationMs || 0, detail: e.status === "ok" ? "" : (e.detail || ""),
+      });
+    });
+    if (_splash.finished.length > 40) _splash.finished.length = 40;
+    if (gen === _splash.gen) _splashRender();
+  } catch (e) { /* the feed is extra; a failed poll just waits for the next */ }
+  if (!_splash.closing && gen === _splash.gen) _splash.pollTimer = setTimeout(() => _splashPoll(gen), 500);
 }
 
-function _setSplashCount(done, total) {
-  const el = document.getElementById("splash-count");
-  if (el) el.textContent = `Checked ${done} of ${total} system${total === 1 ? "" : "s"}`;
+// ── Paced reveal ──────────────────────────────────────────────────────
+// Sections arrive in bunches. Revealing them in ARRIVAL order (not a fixed
+// order) with a short gap means rows settle as the work really finishes,
+// while a bunch still reads as a sequence rather than one frame.
+function _splashArrive(key, data) {
+  if (!_splash.order.includes(key) || _splash.landed[key]) return;
+  if (_splash.queue.some((q) => q.key === key)) return;
+  _splash.queue.push({ key, data, ms: Math.round(_splashElapsed() * 1000) });
+  _splashDrain();
+}
+async function _splashDrain() {
+  if (_splash.draining) return;
+  _splash.draining = true;
+  while (_splash.queue.length) {
+    const next = _splash.queue.shift();
+    _splash.landed[next.key] = { data: next.data, ms: next.ms };
+    if (next.key === "dashboard") _splash.dash = next.data || { error: true };
+    _splashRender(next.key);
+    if (_splash.paceMs > 0) await new Promise((r) => setTimeout(r, _splash.paceMs));
+  }
+  _splash.draining = false;
+  if (_splash.order.every((k) => _splash.landed[k])) {
+    _splash.done = true;
+    _splash.drainWaiters.splice(0).forEach((r) => r());
+  }
+}
+function _splashAllRevealed() {
+  if (_splash.done) return Promise.resolve();
+  return new Promise((r) => _splash.drainWaiters.push(r));
 }
 
+let _splashRenderQueued = false;
+let _splashLastKey = null;
+function _splashRender(changedKey) {
+  if (changedKey) _splashLastKey = changedKey;
+  if (_splashRenderQueued) return;
+  _splashRenderQueued = true;
+  requestAnimationFrame(() => {
+    _splashRenderQueued = false;
+    const k = _splashLastKey; _splashLastKey = null;
+    try { _splashView.update(k); } catch (e) { console.error("splash render", e); }
+  });
+}
+
+function _splashReset(verbText) {
+  _splash.t0 = performance.now();
+  _splash.wall0 = Date.now();
+  _splash.verb = verbText || "Loading diagnostics";
+  _splash.order = _splashSectionKeys();
+  _splash.landed = {};
+  _splash.queue = [];
+  _splash.dash = null;
+  _splash.tasks = new Map();
+  _splash.finished = [];
+  _splash.seenLog = new Set();
+  _splash.done = false;
+  _splash.timedOut = false;
+  _splash.closing = false;
+  _splash.paceMs = (typeof window !== "undefined" && window.__PULSE_DEMO_MODE) ? 160 : 90;
+  _splashView.build();
+  _setSplashVerb(`${_splash.verb}…`);
+  _setSplashNote(SPLASH_NOTE_DEFAULT);
+  clearTimeout(_splash.pollTimer);
+  _splash.gen++;
+  _splashPoll(_splash.gen);
+  clearInterval(_splash.clockTimer);
+  _splash.clockTimer = setInterval(() => { try { _splashView.tick(_splashElapsed()); } catch (e) {} }, 100);
+}
+
+function _setSplashVerb(text) {
+  const el = document.getElementById("splash-verb");
+  if (el) el.textContent = text;
+}
 function _setSplashNote(text) {
   const el = document.getElementById("splash-note");
   if (el) el.textContent = text;
-}
-
-// Surface critical/warning findings on the splash. Driven by the dashboard
-// payload (fetched first), whose findings already aggregate every subsystem
-// — the same source the dashboard headline and nav health dots use. Hidden
-// on a clean box; pass a falsy/empty payload to clear it.
-function _setSplashIssues(dash) {
-  const el = document.getElementById("splash-issues");
-  if (!el) return;
-  const findings = (dash && dash.findings) || [];
-  const crit = findings.filter((f) => f.severity === "critical").length;
-  const warn = findings.filter((f) => f.severity === "warning").length;
-  if (!crit && !warn) { el.className = "splash-issues"; el.innerHTML = ""; return; }
-  const parts = [];
-  if (crit) parts.push(`${crit} Critical`);
-  if (warn) parts.push(`${warn} Warning${warn === 1 ? "" : "s"}`);
-  el.className = "splash-issues is-visible " + (crit ? "splash-issues-crit" : "splash-issues-warn");
-  el.innerHTML = `${svgIcon("triangle", 14)}<span>${parts.join(" · ")} found. Details on the Dashboard</span>`;
 }
 
 // "Still working" escalation timer. Armed only on real (non-demo) loads —
@@ -648,111 +951,91 @@ function _clearSplashSlowTimer() {
   if (_splashSlowTimer) { clearTimeout(_splashSlowTimer); _splashSlowTimer = null; }
 }
 
-let _splashPctAnim = null;
-function _setSplashPct(targetPct) {
-  const el = document.getElementById("splash-pct");
-  const fill = document.getElementById("splash-progress-fill");
-  if (!el && !fill) return;
-  const clamped = Math.max(0, Math.min(100, targetPct));
-  if (fill) fill.style.width = clamped + "%";
-  if (!el) return;
-  // Smoothly tween the displayed number from current → target over ~350ms
-  // so the percentage feels like it's growing instead of jumping.
-  if (_splashPctAnim) cancelAnimationFrame(_splashPctAnim);
-  const start = parseInt(el.textContent, 10) || 0;
-  const startTs = performance.now();
-  const duration = 350;
-  const step = (ts) => {
-    const t = Math.min(1, (ts - startTs) / duration);
-    const v = Math.round(start + (clamped - start) * t);
-    el.textContent = v + "%";
-    if (t < 1) _splashPctAnim = requestAnimationFrame(step);
-    else _splashPctAnim = null;
-  };
-  _splashPctAnim = requestAnimationFrame(step);
-}
-
 function showSplash(verbText) {
   const splash = document.getElementById("splash");
   if (!splash) return;
-  _setSplashVerb(verbText || "Loading diagnostics…");
-  _setSplashNote(SPLASH_NOTE_DEFAULT);   // reset any prior "still working" escalation
-  _setSplashIssues(null);                // clear a prior run's findings banner
-  _buildSplashChecklist();               // all sections pending, count 0 of N
-  _setSplashPct(0);
-  splash.classList.remove("splash-hidden");
+  _splashReset((verbText || "Loading diagnostics").replace(/…$/, ""));
+  splash.classList.remove("splash-hidden", "splash-final");
 }
 
+// The verdict frame, held long enough to read, then faded. Any key or click
+// skips the hold: the Dashboard behind it carries the same verdict.
 function hideSplash() {
   const splash = document.getElementById("splash");
-  if (!splash) return;
+  if (!splash || _splash.closing) return;
+  _splash.closing = true;
   _clearSplashSlowTimer();
-  _completeSplashChecklist();   // last visible frame: everything checked
-  _setSplashPct(100);
-  _setSplashVerb("Ready");
-  _setSplashNote(SPLASH_NOTE_DONE);
-  splash.classList.add("splash-hidden");
+  clearTimeout(_splash.pollTimer);
+  clearInterval(_splash.clockTimer);
+  if (!_splash.done) _splash.timedOut = true;
+  // The feed stops polling here; drop in-flight entries rather than freeze
+  // them as "running" under a frame that says Ready.
+  _splash.tasks.clear();
+  const t = _splashTally();
+  const rd = _splash.dash && !_splash.dash.error ? _splash.dash.readiness : null;
+  _setSplashVerb(_splash.timedOut ? "Still checking" : "Ready");
+  _setSplashNote(_splashDoneNote(t));
+  try { _splashView.finish(rd, t); } catch (e) { console.error("splash finish", e); }
+  splash.classList.add("splash-final");
+  // Hold the verdict for a preset time, counting down on a real button so
+  // the tech knows Pulse is about to open and can open it now instead.
+  const page = PAGES.find((p) => p.id === currentPage);
+  const dest = page ? page.label : "Pulse";
+  const held = /[?&]splash=hold\b/.test(location.search);   // review only, never set by the app
+  const v = document.getElementById("splash-verdict");
+  let gone = false, cdTimer = null, goTimer = null;
+  const go = () => {
+    if (gone) return; gone = true;
+    clearInterval(cdTimer); clearTimeout(goTimer);
+    window.removeEventListener("keydown", onKey, true);
+    splash.classList.add("splash-hidden");
+    // Views with running animation stop it once the fade has finished.
+    setTimeout(() => { if (_splash.closing && _splashView.stop) _splashView.stop(); }, 600);
+  };
+  const onKey = (e) => { if (e.key === "Escape") go(); };
+  window.addEventListener("keydown", onKey, true);
+  if (v) {
+    const wrap = document.createElement("div");
+    wrap.className = "splash-skip-wrap";
+    wrap.innerHTML = `<button type="button" class="btn-outline btn-ol-blue splash-skip" id="splash-skip">`
+      + `<span>Open ${esc(dest)} now</span></button>`
+      + `<span class="splash-skip-cd" id="splash-skip-cd" aria-hidden="true"></span>`;
+    v.appendChild(wrap);
+    v.classList.add("has-skip");
+    const btn = wrap.querySelector("button");
+    btn.style.setProperty("--hold", SPLASH_HOLD_MS + "ms");
+    btn.addEventListener("click", go);
+    if (held) btn.classList.add("is-held");
+    // Focus it so Enter opens Pulse; no scroll jump if the band is off-screen.
+    try { btn.focus({ preventScroll: true }); } catch (e) { btn.focus(); }
+  }
+  const cd = document.getElementById("splash-skip-cd");
+  if (held) {
+    if (cd) cd.textContent = "Held for review";
+    return;
+  }
+  const endAt = performance.now() + SPLASH_HOLD_MS;
+  const paint = () => {
+    const left = Math.max(1, Math.ceil((endAt - performance.now()) / 1000));
+    if (cd) cd.textContent = `Opening automatically in ${left}s`;
+  };
+  paint();
+  cdTimer = setInterval(paint, 250);
+  goTimer = setTimeout(go, SPLASH_HOLD_MS);
 }
 
 function preloadProgressive(opts) {
-  // Resolves when every preload section has settled. The splash waits on
-  // this Promise so the user sees a loading state through the whole cold
-  // start, not just the dashboard fetch.
-  //
-  // Concurrency is throttled server-side by a 4-slot PowerShell semaphore
-  // + a 25s result cache, so we fire everything in parallel here instead
-  // of staggering by 300ms — the stagger was hand-throttling on top of a
-  // throttle, adding 2–3s of pure waiting to the splash.
+  // Resolves when every preload section has settled AND the splash has
+  // revealed it. Concurrency is throttled server-side by a 4-slot PowerShell
+  // semaphore + a 25s result cache, so everything fires in parallel here.
   const o = opts || {};
   const verb = o.verb || "Loading diagnostics";
   const deferred = Object.keys(PAGE_API).filter((k) => k !== "dashboard");
-  // Pace each reveal with a small delay so the splash actually SHOWS each
-  // section being checked instead of flashing past. Real boxes need this as
-  // much as demo: sections settle in bunches (everything but the slow
-  // aggregates lands within a few seconds), and with no gap the in-order
-  // reveal ticks a bunch in one frame. Demo gets a longer gap (~280ms — its
-  // ~3s total mirrors the field UX); real boxes a short one, since theirs
-  // only spaces out bunched ticks on top of genuine load time.
-  // window.__PULSE_DEMO_MODE is injected into the HTML at render time so we
-  // know synchronously — relying on the /api/version response races with
-  // the first reveal and (in practice) loses.
-  const REAL_TICK_DELAY_MS = 150;
-  let _tickDelayMs = (typeof window !== "undefined" && window.__PULSE_DEMO_MODE) ? 280 : REAL_TICK_DELAY_MS;
 
-  // Sections are fetched in parallel below (fast — the server caps the real
-  // work with a 4-slot PowerShell semaphore), so they SETTLE in arbitrary
-  // order. The checklist, though, reveals strictly in SPLASH_REVEAL_ORDER
-  // (cheap sections first, network/dashboard last — roughly settle order)
-  // so it reads as steady top-to-bottom progress instead of checks popping
-  // in at random. We decouple "data arrived" (markReady) from "shown
-  // checked" (the reveal loop): each step is ticked off only once it AND
-  // every step before it has landed — a deterministic boot sequence without
-  // serializing (and thus slowing) the actual fetches.
-  const order = _splashSectionKeys();   // settings, system, … network, dashboard
-  const total = order.length;
-  const _resolveReady = {};
-  const _ready = {};
-  order.forEach((k) => { _ready[k] = new Promise((res) => { _resolveReady[k] = res; }); });
-  // Idempotent and failure-safe: a rejected fetch must still mark its step
-  // ready, or the in-order reveal would wait on it forever and the splash
-  // would never hide.
-  const markReady = (key) => { const r = _resolveReady[key]; if (r) { _resolveReady[key] = null; r(); } };
-  const _reveal = (async () => {
-    for (let i = 0; i < order.length; i++) {
-      const key = order[i];
-      await _ready[key];
-      if (_tickDelayMs > 0) await new Promise((r) => setTimeout(r, _tickDelayMs));
-      _markSplashSectionDone(key);
-      _setSplashCount(i + 1, total);
-      _setSplashPct(((i + 1) / total) * 100);
-    }
-  })();
-
-  _setSplashVerb(`${verb}…`);
-  _setSplashNote(SPLASH_NOTE_DEFAULT);
-  _setSplashIssues(null);
-  _buildSplashChecklist();
-  _setSplashPct(0);
+  _splashReset(verb);
+  // Arrivals from an earlier sweep (Run All mid-load) must not land in this one.
+  const gen = _splash.gen;
+  const arrive = (key, data) => { if (gen === _splash.gen) _splashArrive(key, data); };
   // Real boxes only: if the sweep runs long, soften the note so a slow
   // load never looks like a hang. Demo finishes in ~3s, so don't arm it.
   _armSplashSlowTimer(!(typeof window !== "undefined" && window.__PULSE_DEMO_MODE));
@@ -765,8 +1048,7 @@ function preloadProgressive(opts) {
       if (footer) footer.textContent = data.version;
       if (currentPage === "about") renderPage("about");
     }
-    // Engage the demo pacing for THIS preload (~2.5s total across 9 ticks).
-    if (data?.demoMode) _tickDelayMs = 280;
+    if (data?.demoMode) _splash.paceMs = 160;
     // One-shot notice: the server just moved this install off the retired
     // beta channel (see _migrate_retired_beta in main.py). Next launch is a
     // plain production install and the flag is gone, so this shows once.
@@ -781,36 +1063,404 @@ function preloadProgressive(opts) {
     }
   });
 
-  // Dashboard first — its result lets us start the WebSocket for live metric
-  // updates, and surfaces any critical/warning findings on the splash right
-  // away (its findings already aggregate every subsystem). The second
-  // (rejection) handler still markReady-s so a failed dashboard can't stall
-  // the in-order reveal.
+  // Dashboard first — its result starts the WebSocket for live metrics and
+  // scores every row that has no findings of its own. A rejected fetch still
+  // arrives (as an error) so the reveal can't wait on it forever.
   const dashboardPromise = fetchSection("dashboard").then((res) => {
-    markReady("dashboard");
-    try { _setSplashIssues(res); } catch (e) {}
+    arrive("dashboard", res);
     connectWS();
     return res;
-  }, () => { markReady("dashboard"); });
+  }, (e) => { arrive("dashboard", { error: true, message: String(e && e.message || e) }); });
 
-  // All other sections fire immediately. Identical-script requests dedupe
-  // server-side, so this doesn't trigger duplicate PS work. markReady on both
-  // outcomes, for the same no-stall reason as the dashboard above.
   const deferredPromises = deferred.map((key) =>
-    fetchSection(key).then((res) => { markReady(key); return res; }, () => { markReady(key); })
+    fetchSection(key).then(
+      (res) => { arrive(key, res); return res; },
+      (e) => { arrive(key, { error: true, message: String(e && e.message || e) }); })
   );
 
-  // allSettled so one failing endpoint can't trap the splash. Also wait on
-  // the reveal so the splash stays up until the paced checklist has
-  // actually FINISHED ticking through — not just when the fetches return.
   return Promise.allSettled([
     dashboardPromise, versionPromise, logsPromise, ...deferredPromises,
   ]).then(async (results) => {
-    await _reveal;
+    await _splashAllRevealed();
     _clearSplashSlowTimer();   // finished in time — no "still working" needed
     return results;
   });
 }
+
+// ── Splash view: system map ───────────────────────────────────────────
+// The rig as its signal chain: cameras into the VPU, out through the venue
+// network to the Pixellot cloud and on to tonight's stream, with the
+// scoreboard hanging off the VPU. Each node takes its check's answer; each
+// connector belongs to the check that tests that hop and carries moving
+// dashes until it answers; every issue lands in the findings list as it is
+// found. A tech sees WHERE the fault is before reading WHAT it is.
+
+// Glyphs drawn for an 18px status disc, one stroke weight, so a check, a
+// bang and a cross read as one family at this size.
+const SPLASH_GLYPH = {
+  pass: '<polyline points="5 12.5 10 17 19 7.5"/>',
+  warn: '<line x1="12" y1="6" x2="12" y2="13.5"/><line x1="12" y1="18" x2="12" y2="18.01"/>',
+  crit: '<line x1="7" y1="7" x2="17" y2="17"/><line x1="17" y1="7" x2="7" y2="17"/>',
+  error: '<line x1="6.5" y1="12" x2="17.5" y2="12"/>',
+  collected: '<circle cx="12" cy="12" r="2.6" fill="currentColor" stroke="none"/>',
+  stalled: '<polyline points="12 7 12 12 15.5 14"/>',
+};
+function _splashIcon(state) {
+  const g = SPLASH_GLYPH[state];
+  return g ? `<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${g}</svg>` : "";
+}
+function _splashSec(ms) {
+  return ms == null ? "" : (ms / 1000).toFixed(1) + "s";
+}
+function _splashReducedMotion() {
+  return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+}
+
+// Which checks each part of the rig answers for. The VPU groups everything
+// local to the box; a new lane with no home lands there too.
+const MAP_NODES = [
+  { id: "cams",   label: "Cameras",          icon: "camera",  keys: ["cameras"] },
+  { id: "vpu",    label: "VPU",              icon: "cpu",     keys: ["system", "disk-health", "services", "pixellot-config", "events", "reboots", "audio", "settings"], group: true },
+  { id: "net",    label: "Venue network",    icon: "wifi",    keys: ["network"] },
+  { id: "cloud",  label: "Pixellot cloud",   icon: "globe",   keys: ["cloud-events"] },
+  { id: "score",  label: "Scoreboard",       icon: "monitor", keys: ["scoreconnect"] },
+  { id: "stream", label: "Tonight's stream", icon: "play",    keys: ["dashboard"] },
+];
+// Each connector is owned by the check that tests that hop, and takes that
+// check's colour — so a full D: drive (a VPU cell) never paints the camera
+// link red.
+const MAP_LINKS = [
+  ["cams", "vpu", "cameras"],
+  ["vpu", "net", "network"],
+  ["net", "cloud", "cloud-events"],
+  ["cloud", "stream", "dashboard"],
+  ["vpu", "score", "scoreconnect"],
+];
+// Worst-first rank for rolling the VPU group up to one state.
+const MAP_RANK = { crit: 6, warn: 5, error: 4, stalled: 3, pending: 3, collected: 1, pass: 0 };
+// Short names: the VPU cells sit two to a row inside one node.
+const MAP_CELL_LABEL = { system: "Hardware & OS", "disk-health": "Disks", services: "Services",
+  "pixellot-config": "Pixellot config", events: "Win events", reboots: "Power events", audio: "Audio", settings: "Pulse settings" };
+// What each single node's check is called while it runs.
+const MAP_CHECK_LABEL = { cameras: "Camera Connectivity", network: "Network Test",
+  "cloud-events": "Event Streaming", scoreconnect: "ScoreConnect", dashboard: "Stream readiness" };
+// The findings list shows this many, then points at the Dashboard.
+const MAP_FINDINGS_MAX = 5;
+
+function _mapNodeState(node) {
+  const states = node.keys.filter((k) => _splash.order.includes(k)).map((k) => _splashRowState(k).state);
+  if (!states.length) return "collected";
+  if (states.some((s) => s === "pending")) {
+    // A group with an issue already found shows it while the rest runs.
+    const worst = states.filter((s) => s !== "pending").sort((a, b) => MAP_RANK[b] - MAP_RANK[a])[0];
+    return worst && MAP_RANK[worst] >= 4 ? worst : "pending";
+  }
+  return states.sort((a, b) => MAP_RANK[b] - MAP_RANK[a])[0];
+}
+
+const _splashView = {
+  build() {
+    const list = document.getElementById("splash-checklist");
+    const known = new Set(MAP_NODES.flatMap((n) => n.keys));
+    const extra = _splash.order.filter((k) => !known.has(k));
+    this._nodes = MAP_NODES.map((n) => (n.group ? Object.assign({}, n, { keys: n.keys.concat(extra) }) : n));
+    if (list) {
+      list.innerHTML = this._nodes.map((n) => {
+        const present = n.keys.filter((k) => _splash.order.includes(k));
+        const head = `<div class="map-node-head"><span class="map-node-icon">${svgIcon(n.icon, 16)}</span>`
+          + `<span class="map-node-label">${esc(n.label)}</span>`
+          + (n.group ? `<span class="map-node-host" id="map-vpu-host"></span>` : "") + `</div>`;
+        if (n.group) {
+          return `<li class="map-node" data-node="${n.id}" data-state="pending">${head}`
+            + `<ul class="map-cells">${present.map((k) =>
+                `<li class="sp-row map-cell" data-key="${esc(k)}" data-state="pending">`
+                + `<span class="sp-mark" aria-hidden="true"></span>`
+                + `<span class="sp-label">${esc(MAP_CELL_LABEL[k] || _splashSectionLabel(k))}</span>`
+                + `<span class="sp-word">Checking</span></li>`).join("")}</ul></li>`;
+        }
+        const k = present[0];
+        return `<li class="map-node" data-node="${n.id}" data-state="pending">${head}`
+          + (k ? `<div class="sp-row map-single" data-key="${esc(k)}" data-state="pending">`
+              + `<span class="sp-mark" aria-hidden="true"></span>`
+              + `<span class="sp-word">Checking</span>`
+              + `<span class="sp-time"></span></div>`
+              + `<p class="map-node-detail">${esc(MAP_CHECK_LABEL[k] || _splashSectionLabel(k))}</p>` : "")
+          + `</li>`;
+      }).join("");
+    }
+    const title = document.getElementById("map-findings-title");
+    if (title) title.textContent = "Found so far";
+    const f = document.getElementById("map-findings");
+    if (f) f.innerHTML = `<li class="map-f-empty">Nothing yet. Issues appear here the moment a check finds one.</li>`;
+    this._findNodes = new Map();
+    const tk = document.getElementById("splash-ticker");
+    if (tk) { tk.dataset.done = "0"; tk.dataset.sig = ""; }
+    const v = document.getElementById("splash-verdict");
+    if (v) { v.hidden = true; v.className = "splash-verdict"; v.innerHTML = ""; }
+    const fill = document.getElementById("splash-progress-fill");
+    if (fill) { fill.style.transform = "scaleX(0)"; fill.dataset.tone = ""; }
+    this._layoutLinks();
+    if (!this._ro && window.ResizeObserver) {
+      const map = document.getElementById("splash-map");
+      if (map) { this._ro = new ResizeObserver(() => this._layoutLinks()); this._ro.observe(map); }
+    }
+    this.update();
+  },
+
+  // Elbow connectors between node edges, recomputed from the laid-out rects
+  // so they follow the grid through every breakpoint.
+  _layoutLinks() {
+    const map = document.getElementById("splash-map");
+    const svg = document.getElementById("map-links");
+    if (!map || !svg) return;
+    const box = map.getBoundingClientRect();
+    if (!box.width) return;
+    svg.setAttribute("viewBox", `0 0 ${box.width} ${box.height}`);
+    const rect = (id) => {
+      const el = map.querySelector(`.map-node[data-node="${id}"]`);
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { l: r.left - box.left, r: r.right - box.left, t: r.top - box.top, b: r.bottom - box.top,
+        cx: (r.left + r.right) / 2 - box.left, cy: (r.top + r.bottom) / 2 - box.top };
+    };
+    svg.innerHTML = MAP_LINKS.map(([a, b, key]) => {
+      const A = rect(a), B = rect(b);
+      if (!A || !B) return "";
+      let d;
+      if (B.l >= A.r - 2) {                       // B to the right
+        // Leave at the height of B's centre when it lines up with A, so a
+        // straight run stays straight; otherwise elbow through the gap.
+        const sy = B.cy >= A.t && B.cy <= A.b ? B.cy : A.cy;
+        const ey = sy >= B.t && sy <= B.b ? sy : B.cy;
+        const mx = (A.r + B.l) / 2;
+        d = `M${A.r} ${sy} H${mx} V${ey} H${B.l}`;
+      } else if (B.t >= A.b - 2) {                // B below
+        const x = B.cx >= A.l && B.cx <= A.r ? B.cx : (A.l + A.r) / 2;
+        const ex = x >= B.l && x <= B.r ? x : B.cx;
+        const my = (A.b + B.t) / 2;
+        d = `M${x} ${A.b} V${my} H${ex} V${B.t}`;
+      } else {
+        d = `M${A.cx} ${A.cy} L${B.cx} ${B.cy}`;
+      }
+      return `<g class="map-link" data-key="${esc(key)}"><path class="map-link-base" d="${d}"/><path class="map-link-flow" d="${d}"/></g>`;
+    }).join("");
+    this._paintLinks();
+  },
+
+  _paintLinks() {
+    const svg = document.getElementById("map-links");
+    if (!svg) return;
+    svg.querySelectorAll(".map-link").forEach((g) => {
+      const key = g.dataset.key;
+      const st = _splash.order.includes(key) ? _splashRowState(key).state : "collected";
+      g.dataset.flow = st === "pending" && !_splash.closing ? "1" : "0";
+      g.dataset.state = st;
+    });
+  },
+
+  update(changedKey) {
+    const t = _splashTally();
+    const reduce = _splashReducedMotion();
+    document.querySelectorAll("#splash-checklist .sp-row").forEach((row) => {
+      const key = row.dataset.key;
+      const s = _splashRowState(key);
+      if (row.dataset.state !== s.state) {
+        row.dataset.state = s.state;
+        row.querySelector(".sp-mark").innerHTML = _splashIcon(s.state);
+      }
+      row.querySelector(".sp-word").textContent = s.count > 1 ? `${s.count} issues` : s.word;
+      const tm = row.querySelector(".sp-time");
+      if (tm && s.ms != null) tm.textContent = _splashSec(s.ms);
+      // The full finding on hover: nodes clamp it to two lines.
+      row.title = s.detail ? `${_splashSectionLabel(key)}: ${s.detail}` : "";
+      const det = row.classList.contains("map-single") && row.parentElement.querySelector(".map-node-detail");
+      if (det) {
+        const text = s.state === "pending" ? (MAP_CHECK_LABEL[key] || _splashSectionLabel(key)) : (s.detail || MAP_CHECK_LABEL[key] || _splashSectionLabel(key));
+        if (det.textContent !== text) { det.textContent = text; det.title = text; }
+      }
+    });
+    (this._nodes || []).forEach((n) => {
+      const el = document.querySelector(`.map-node[data-node="${n.id}"]`);
+      if (!el) return;
+      const st = _mapNodeState(n);
+      if (el.dataset.state !== st) {
+        el.dataset.state = st;
+        if (n.keys.includes(changedKey) && st !== "pending" && el.animate && !reduce) {
+          el.animate([{ transform: "scale(1.035)" }, { transform: "scale(1)" }],
+            { duration: 520, easing: "cubic-bezier(0.16, 1, 0.3, 1)" });
+        }
+      }
+    });
+    const host = document.getElementById("map-vpu-host");
+    if (host && !host.textContent) {
+      const sys = _splash.landed.system && _splash.landed.system.data;
+      const cs = sys && sys.identity && sys.identity.computerSystem;
+      if (cs && cs.name) { host.textContent = cs.name; host.title = cs.name; }
+    }
+    this._paintLinks();
+    this._renderFindings();
+
+    const fill = document.getElementById("splash-progress-fill");
+    if (fill) fill.style.transform = `scaleX(${t.total ? t.settled / t.total : 0})`;
+    const count = document.getElementById("splash-count");
+    if (count) {
+      const parts = [`${t.settled} of ${t.total} checked`];
+      if (t.pass) parts.push(`${t.pass} pass`);
+      if (t.issue) parts.push(`${t.issue} with issues`);
+      if (t.error) parts.push(`${t.error} couldn't check`);
+      count.textContent = parts.join(" · ");
+    }
+    this._renderTicker();
+  },
+
+  // Every check with an issue or no answer, worst first. The Dashboard row is
+  // left out: its answer is the verdict, and the band says it.
+  _renderFindings() {
+    const list = document.getElementById("map-findings");
+    if (!list) return;
+    const rank = { crit: 0, warn: 1, error: 2, collected: 3 };
+    const all = _splash.order.filter((k) => k !== "dashboard")
+      .map((k) => ({ k, s: _splashRowState(k) }))
+      .filter((x) => x.s.state in rank && (x.s.state !== "collected" || x.s.partial))
+      .sort((a, b) => rank[a.s.state] - rank[b.s.state]);
+    const items = all.slice(0, MAP_FINDINGS_MAX);
+    const cnt = document.getElementById("map-findings-count");
+    if (cnt) cnt.textContent = all.length ? `${all.length} check${all.length === 1 ? "" : "s"}` : "";
+    const empty = list.querySelector(".map-f-empty");
+    if (all.length && empty) empty.remove();
+    const keep = new Set(items.map((x) => x.k));
+    for (const [k, node] of this._findNodes) if (!keep.has(k)) { node.remove(); this._findNodes.delete(k); }
+    const reduce = _splashReducedMotion();
+    let prev = null;
+    items.forEach(({ k, s }) => {
+      let node = this._findNodes.get(k);
+      const fresh = !node;
+      if (fresh) {
+        node = document.createElement("li");
+        node.className = "map-f";
+        node.innerHTML = `<span class="sp-mark" aria-hidden="true"></span><span class="map-f-word"></span>`
+          + `<span class="map-f-where"></span><span class="map-f-what"></span>`;
+        this._findNodes.set(k, node);
+      }
+      if (node.dataset.state !== s.state) {
+        node.dataset.state = s.state;
+        node.querySelector(".sp-mark").innerHTML = _splashIcon(s.state);
+      }
+      node.querySelector(".map-f-word").textContent = s.partial ? "Incomplete" : s.word;
+      node.querySelector(".map-f-where").textContent = _splashSectionLabel(k);
+      const what = node.querySelector(".map-f-what");
+      what.textContent = s.detail || "";
+      what.title = s.detail || "";
+      const ref = prev ? prev.nextSibling : list.firstChild;
+      if (ref !== node) list.insertBefore(node, ref);
+      if (fresh && node.animate && !reduce) {
+        node.animate([{ opacity: 0, transform: "translateX(-8px)" }, { opacity: 1, transform: "none" }],
+          { duration: 360, easing: "cubic-bezier(0.16, 1, 0.3, 1)" });
+      }
+      prev = node;
+    });
+    let more = list.querySelector(".map-f-more");
+    const hidden = all.length - items.length;
+    if (hidden > 0) {
+      if (!more) { more = document.createElement("li"); more.className = "map-f-more"; }
+      more.textContent = `+${hidden} more on the Dashboard`;
+      list.appendChild(more);
+    } else if (more) {
+      more.remove();
+    }
+  },
+
+  // One line of what PowerShell is doing now; on the final frame, a summary.
+  _renderTicker(final) {
+    const el = document.getElementById("splash-ticker");
+    if (!el) return;
+    if (_splash.closing) final = true;
+    const failed = _splash.finished.filter((x) => x.state !== "ok").length;
+    const done = `${_splash.finished.length} collector${_splash.finished.length === 1 ? "" : "s"} ran`
+      + (failed ? `, <em>${failed} failed</em>` : "");
+    if (final) {
+      // A timed-out sweep stopped watching; the collectors didn't stop.
+      el.dataset.done = "1";
+      el.innerHTML = _splash.timedOut
+        ? `<span class="map-tk-k">Still running</span><span class="map-tk-more">${done} so far</span>`
+        : `<span class="map-tk-k">Done</span><span class="map-tk-more">${done}</span>`;
+      return;
+    }
+    const live = Array.from(_splash.tasks.values());
+    const running = live.filter((x) => x.state === "running").sort((a, b) => a.at - b.at);
+    const queued = live.length - running.length;
+    const html = (running.length
+        ? `<span class="map-tk-k">Running</span>` + running.slice(0, 3).map((x) =>
+            `<span class="map-tk-job">${esc(x.label)} <b data-at="${x.at}"></b></span>`).join("")
+        : `<span class="map-tk-k">Waiting</span><span class="map-tk-job">on results</span>`)
+      + (queued ? `<span class="map-tk-more">+${queued} queued</span>` : "")
+      + `<span class="map-tk-more">${done}</span>`;
+    const sig = running.map((x) => x.label).join("|") + queued + "|" + _splash.finished.length + "|" + failed;
+    if (el.dataset.sig !== sig) { el.dataset.sig = sig; el.innerHTML = html; }
+  },
+
+  tick(sec) {
+    const clock = document.getElementById("splash-clock");
+    if (clock) clock.textContent = sec.toFixed(1) + "s";
+    const now = performance.now();
+    document.querySelectorAll("#splash-ticker b[data-at]").forEach((b) => {
+      b.textContent = ((now - Number(b.dataset.at)) / 1000).toFixed(1) + "s";
+    });
+    document.querySelectorAll('#splash-checklist .map-single[data-state="pending"] .sp-time')
+      .forEach((el) => { el.textContent = sec.toFixed(1) + "s"; });
+  },
+
+  stop() {
+    const svg = document.getElementById("map-links");
+    if (svg) svg.querySelectorAll(".map-link").forEach((g) => { g.dataset.flow = "0"; });
+  },
+
+  finish(rd, t) {
+    this.update();
+    this._renderTicker(true);
+    const title = document.getElementById("map-findings-title");
+    if (title) title.textContent = _splash.timedOut ? "Found so far" : "Issues";
+    const empty = document.querySelector("#map-findings .map-f-empty");
+    if (empty && _splash.timedOut) empty.textContent = "Nothing flagged so far.";
+    if (empty && !_splash.timedOut) {
+      // Only a finished sweep with every check answered may say "none".
+      const complete = !t.pending && !_splashGapPhrase(t);
+      empty.dataset.final = complete ? "1" : "0";
+      empty.textContent = complete ? "No issues found." : "Nothing flagged in the checks that ran.";
+    }
+    const v = document.getElementById("splash-verdict");
+    const fill = document.getElementById("splash-progress-fill");
+    if (!v) return;
+    let tone, word, tag;
+    if (_splash.timedOut) {
+      tone = "muted"; word = "Still checking";
+      tag = `${t.pending} check${t.pending === 1 ? " is" : "s are"} still running. The Dashboard verdict will update when ${t.pending === 1 ? "it finishes" : "they finish"}.`;
+    } else if (!rd || !rd.status) {
+      tone = "muted"; word = "No verdict";
+      tag = "The Dashboard rollup couldn't run, so there is no readiness verdict. Check each tab.";
+    } else {
+      const meta = _RDY_META[rd.status] || _RDY_META.WARN;
+      tone = meta.tone; word = meta.word; tag = meta.tag;
+      // A verdict counts what ran: PASS with a dead collector is not
+      // "Game-ready", it is clean as far as it could see.
+      if (rd.status === "PASS" && _splashGapPhrase(t)) tag = "Nothing found that puts a game's stream at risk in the checks that ran.";
+    }
+    const gapText = _splash.timedOut ? "" : _splashGapPhrase(t);
+    const gap = gapText
+      ? `<p class="sp-v-gap">${esc(gapText.charAt(0).toUpperCase() + gapText.slice(1))}, so this verdict doesn't cover ${t.error + _splashSourceGaps().length === 1 ? "it" : "them"}.</p>`
+      : "";
+    // The findings list names every issue; the band carries the call.
+    v.className = "splash-verdict sp-v-" + tone;
+    v.innerHTML = `<div class="sp-v-word">${esc(word)}</div>`
+      + `<div class="sp-v-body"><p class="sp-v-tag">${esc(tag)}</p>${gap}</div>`;
+    v.hidden = false;
+    if (fill) { fill.dataset.tone = tone; if (!_splash.timedOut) fill.style.transform = "scaleX(1)"; }
+    if (v.animate && !_splashReducedMotion()) {
+      v.animate([{ clipPath: "inset(0 100% 0 0)", opacity: 0.4 }, { clipPath: "inset(0 0 0 0)", opacity: 1 }],
+        { duration: 520, easing: "cubic-bezier(0.16, 1, 0.3, 1)" });
+    }
+  },
+};
 
 async function refreshAll() {
   // Full re-run: clear local + server caches, drop the live WS, then
@@ -7825,21 +8475,39 @@ function renderScoreConnect() {
     ${showScoreboard ? `
     <div class="sc-board sc-board-hero" id="sc3-hero-board">
       <div class="sc-header">
-        <div class="sc-team-home" style="min-width:0">
-          <div class="sc-team-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:18ch;margin:0 auto">${esc(visitorLabel)}</div>
+        <div class="sc-score-col">
+          <div class="sc-cap">Away Score</div>
+          <div class="sc-team-label sc-team-clip" title="${esc(visitorLabel)}">${esc(_sc3TeamName(visitorLabel)) || "&nbsp;"}</div>
           <div class="sc-score" id="sc3-guest">${rtdShown && rtdShown.guestScore != null ? esc(String(rtdShown.guestScore)) : "—"}</div>
         </div>
         <div class="sc-center">
-          <div class="sc-period-label" id="sc3-period">${rtdShown && rtdShown.period ? "Q" + rtdShown.period : "GAME CLOCK"}</div>
+          <div class="sc-cap" id="sc3-period-cap">${esc(_sc3PeriodLabel(config.sport))}</div>
+          <div class="sc-period-label" id="sc3-period">${esc(_sc3PeriodText(rtdShown, config.sport))}</div>
+          <div class="sc-cap sc-cap-gap">Time</div>
           <div class="sc-clock" id="sc3-clock">${rtdShown && rtdShown.clock ? esc(rtdShown.clock) : "--:--"}</div>
-          <div class="sc-data-desc" id="sc3-down">${rtdShown ? _sc3DownText(rtdShown) : ""}</div>
           <div id="sc3-live-badge" style="margin-top:0.4rem;font-size:0.62rem;letter-spacing:0.1em;color:${dataReceiving ? "var(--c-board-ok)" : "var(--c-board-bad)"};display:flex;align-items:center;justify-content:center;gap:0.3rem">
             ${_sc3StageBadge(dataReceiving ? "live" : "disconnected", 0)}
           </div>
         </div>
-        <div class="sc-team-away" style="min-width:0">
-          <div class="sc-team-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:18ch;margin:0 auto">${esc(homeLabel)}</div>
+        <div class="sc-score-col">
+          <div class="sc-cap">Home Score</div>
+          <div class="sc-team-label sc-team-clip" title="${esc(homeLabel)}">${esc(_sc3TeamName(homeLabel)) || "&nbsp;"}</div>
           <div class="sc-score" id="sc3-home">${rtdShown && rtdShown.homeScore != null ? esc(String(rtdShown.homeScore)) : "—"}</div>
+        </div>
+      </div>
+      <div class="sc-stats">
+        ${_sc3HasDownDistance(config.sport) ? `
+        <div class="sc-stat">
+          <div class="sc-stat-lbl">Down &amp; Distance</div>
+          <div class="sc-stat-val" id="sc3-down">${esc(_sc3DownText(rtdShown))}</div>
+        </div>
+        <div class="sc-stat">
+          <div class="sc-stat-lbl">Ball On</div>
+          <div class="sc-stat-val" id="sc3-ballon">${esc(_sc3BallOnText(rtdShown))}</div>
+        </div>` : ""}
+        <div class="sc-stat">
+          <div class="sc-stat-lbl">Clock</div>
+          <div class="sc-stat-val" id="sc3-clockstate">${esc(_sc3ClockStateText(rtdShown))}</div>
         </div>
       </div>
     </div>
@@ -7987,13 +8655,59 @@ var _sc3LivePoll = null;
 var _sc3PollGen = 0;   // bumped on every stop/start so an in-flight tick that
                        // resolves after being superseded can detect it and bail
 
+// Down & distance only; ball-on has its own labelled stat. "—" when the
+// controller has no down set, so the label never sits over an empty slot.
 function _sc3DownText(p) {
-  if (!p || !p.down) return "";
+  if (!p || !p.down) return "—";
   var ord = { 1: "1ST", 2: "2ND", 3: "3RD", 4: "4TH" }[p.down] || (p.down + "");
   var t = ord;
   if (p.toGo != null) t += " & " + (p.toGo === 0 ? "GOAL" : p.toGo);
-  if (p.ballOn != null) t += " ON " + p.ballOn;
   return t;
+}
+
+// What the period field is called for this sport. SC III's CG layout carries
+// one period digit for every sport; only its name changes. For volleyball it
+// is the current set number, not sets won (no sets-won field is decoded).
+function _sc3PeriodLabel(sport) {
+  var s = (sport || "").toLowerCase();
+  if (s.indexOf("football") >= 0 || s.indexOf("basketball") >= 0 || s.indexOf("lacrosse") >= 0) return "Quarter";
+  if (s.indexOf("baseball") >= 0 || s.indexOf("softball") >= 0) return "Inning";
+  if (s.indexOf("soccer") >= 0 || s.indexOf("rugby") >= 0) return "Half";
+  if (s.indexOf("volleyball") >= 0) return "Set";
+  return "Period";
+}
+
+function _sc3PeriodText(p, sport) {
+  if (!p || !p.period) return "—";
+  var s = (sport || "").toLowerCase();
+  // Quarter 5 is overtime; _maxPeriodForSport already allows exactly one OT.
+  if ((s.indexOf("football") >= 0 || s.indexOf("basketball") >= 0) && p.period === 5) return "OT";
+  return String(p.period);
+}
+
+// Down/distance/ball-on only exist for football. Auto-detect and unnamed
+// sports keep them, since the board might be a football board.
+function _sc3HasDownDistance(sport) {
+  var s = (sport || "").toLowerCase();
+  if (!s || s.indexOf("football") >= 0 || s.indexOf("auto") >= 0 || s.indexOf("generic") >= 0) return true;
+  return false;
+}
+
+function _sc3BallOnText(p) {
+  return p && p.ballOn != null ? String(p.ballOn) : "—";
+}
+
+// Clock run-state from the "R:S"/"S:S" token. null = the feed didn't say.
+function _sc3ClockStateText(p) {
+  if (!p || p.clockRunning == null) return "—";
+  return p.clockRunning ? "RUNNING" : "STOPPED";
+}
+
+// SC III's placeholder team names carry no information; the caption above
+// already says which side is home, so show nothing rather than repeat it.
+function _sc3TeamName(name) {
+  var n = (name || "").trim();
+  return /^(home|visitor|guest|away)$/i.test(n) ? "" : n;
 }
 
 // Status dot: green + flashing when active, grey + static when off. Pass an
@@ -8182,10 +8896,12 @@ function _sc3StartLivePoll(vendor, sport, showScoreboard) {
       var p = parseRtdScores(live.rawData, vendor, sport);
       if (p) {
         _sc3SetText("sc3-clock", p.clock || "--:--");
-        _sc3SetText("sc3-period", p.period ? "Q" + p.period : "GAME CLOCK");
+        _sc3SetText("sc3-period", _sc3PeriodText(p, sport));
         if (p.guestScore != null) _sc3SetText("sc3-guest", String(p.guestScore));
         if (p.homeScore != null)  _sc3SetText("sc3-home", String(p.homeScore));
         _sc3SetText("sc3-down", _sc3DownText(p));
+        _sc3SetText("sc3-ballon", _sc3BallOnText(p));
+        _sc3SetText("sc3-clockstate", _sc3ClockStateText(p));
       }
     }
     // In stale/disconnected/offline we keep the LAST known scores on screen
@@ -8201,7 +8917,7 @@ function _sc3StartLivePoll(vendor, sport, showScoreboard) {
     // When the data is dead, dim ONLY the score cluster (scores/clock/period/
     // down) — never the badge, so the failure indicator stays fully legible.
     var dead = (st.stage === "disconnected" || st.stage === "offline");
-    ["sc3-guest", "sc3-home", "sc3-clock", "sc3-period", "sc3-down"].forEach(function(id) {
+    ["sc3-guest", "sc3-home", "sc3-clock", "sc3-period", "sc3-down", "sc3-ballon", "sc3-clockstate"].forEach(function(id) {
       var el = document.getElementById(id);
       if (el) el.style.opacity = dead ? "0.4" : "";
     });
@@ -9672,6 +10388,66 @@ function renderAbout() {
       if (el && d?.version) el.textContent = d.version + " · Web Edition";
     }).catch(() => {});
   }
+}
+
+// Hidden UBR modal: typing the sequence anywhere on the About tab opens it.
+// Deliberately has no visible affordance; documented in docs/HOW-TO-USE.md.
+const _UBR_SEQUENCE = "jessejessejesse";
+let _ubrKeys = "";
+
+document.addEventListener("keydown", (e) => {
+  if (currentPage !== "about") { _ubrKeys = ""; return; }
+  if (e.key === "Escape") { _closeUbrModal(); return; }
+  if (e.ctrlKey || e.metaKey || e.altKey || e.key.length !== 1) return;
+  if (e.target.closest && e.target.closest("input, textarea, [contenteditable]")) return;
+  _ubrKeys = (_ubrKeys + e.key.toLowerCase()).slice(-_UBR_SEQUENCE.length);
+  if (_ubrKeys === _UBR_SEQUENCE) {
+    _ubrKeys = "";
+    _openUbrModal();
+  }
+});
+
+function _closeUbrModal() {
+  document.getElementById("ubr-modal")?.classList.remove("open");
+}
+
+function _renderUbrModalBody(body) {
+  const el = document.getElementById("ubr-modal");
+  if (!el) return;
+  el.innerHTML = `
+    <div class="sc3-modal-box" role="dialog" aria-modal="true" aria-label="Windows build revision">
+      <div class="sc3-modal-header">
+        <span class="sc3-modal-title">${svgIcon("info", 16)} Windows Build Revision</span>
+        <button class="sc3-modal-close" onclick="_closeUbrModal()" title="Close" aria-label="Close">${svgIcon("x", 16)}</button>
+      </div>
+      <div class="sc3-modal-body">${body}</div>
+    </div>`;
+}
+
+async function _openUbrModal() {
+  let el = document.getElementById("ubr-modal");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "ubr-modal";
+    el.className = "sc3-modal";
+    el.addEventListener("click", (e) => { if (e.target === el) _closeUbrModal(); });
+    document.body.appendChild(el);
+  }
+  _renderUbrModalBody(`<p class="text-sm" style="color:var(--c-muted)">Reading the registry…</p>`);
+  el.classList.add("open");
+
+  const d = await api("/api/system/ubr");
+  if (!d || d.error || d.ubr == null) {
+    const why = (d && d.message) ? esc(d.message) : "The collector returned no UBR value.";
+    _renderUbrModalBody(`<p class="text-sm">Couldn't read the UBR: ${why}</p>`);
+    return;
+  }
+  _renderUbrModalBody(`
+    <div class="kv-grid">
+      ${kvRow("UBR", String(d.ubr))}
+      ${kvRow("Full build", d.fullBuild || "—")}
+      ${kvRow("Source", (d.registryKey || "") + " → UBR")}
+    </div>`);
 }
 
 // ── Init ─────────────────────────────────────────────────────

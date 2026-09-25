@@ -3803,8 +3803,16 @@ async def api_server_log(tail: int = Query(default=200)):
 
 
 @app.get("/api/scripts/running")
-async def api_scripts_running():
-    return {"tasks": get_running_tasks()}
+async def api_scripts_running(since: Optional[int] = Query(default=None)):
+    """In-flight collectors. With `since`, also the script log from that index,
+    so the splash feed costs one request per poll: during a cold start the
+    browser's six connections per host are already busy with the sweep."""
+    out = {"tasks": get_running_tasks()}
+    if since is not None:
+        logs = list(LOG_BUFFER)
+        out["logs"] = logs[max(0, since):]
+        out["total"] = len(logs)
+    return out
 
 
 @app.post("/api/scripts/cancel")
@@ -4577,6 +4585,13 @@ async def api_dependencies():
     return await run_ps("Get-PixellotDependencies.ps1", timeout=10)
 
 
+@app.get("/api/system/ubr")
+async def api_windows_ubr():
+    """Hidden: Windows UBR for the About-tab key sequence (see
+    docs/HOW-TO-USE.md). Not in the nav or any tab on purpose."""
+    return await run_ps("Get-WindowsUbr.ps1", timeout=10)
+
+
 @app.get("/api/disk-health")
 async def api_disk_health():
     return await run_ps("Get-DiskHealth.ps1")
@@ -5196,6 +5211,7 @@ async def _send_checkin() -> None:
         cs   = ident.get("computerSystem") or {}
         bios = ident.get("bios") or {}
         px   = ident.get("pixellot") or {}
+        os_  = ident.get("operatingSystem") or {}
         payload = {
             "secret":       secret,
             "hostname":     cs.get("name"),
@@ -5205,7 +5221,17 @@ async def _send_checkin() -> None:
             "model":        cs.get("model"),
             "pulseVersion": APP_VERSION,
             "channel":      _update_channel(),
+            "osBuild":      os_.get("buildNumber"),
         }
+        # UBR tells an unpatched 17763.253 unit from a patched one; the build
+        # number alone can't. Fail-open: the check-in goes out without it.
+        try:
+            ubr = await run_ps("Get-WindowsUbr.ps1", timeout=10)
+            if isinstance(ubr, dict) and not ubr.get("error"):
+                payload["ubr"] = ubr.get("ubr")
+                payload["osBuild"] = payload["osBuild"] or ubr.get("currentBuild")
+        except Exception as e:
+            _server_log.info("Check-in UBR skipped (%s)", e)
         # Stream Readiness verdict on the beacon → a pre-game-readiness time
         # series at ~zero marginal cost (the beacon already fires on launch).
         # Fail-open like everything else here: a readiness error never blocks
