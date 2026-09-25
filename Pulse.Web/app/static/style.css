@@ -2742,6 +2742,53 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
 }
 .sc-team-home, .sc-team-away { display: flex; flex-direction: column; gap: 2px; }
 .sc-team-away { text-align: right; align-items: flex-end; }
+/* Live-score columns: caption, team name and score share one centre line on
+   both sides, so the two scores mirror each other across the clock. */
+.sc-score-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 2px;
+    min-width: 0;
+}
+.sc-team-clip {
+    max-width: 18ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+/* Field caption on the board ("Home Score", "Quarter", "Time") */
+.sc-cap {
+    font-size: 0.55rem;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    color: var(--c-board-muted);
+    text-transform: uppercase;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.sc-score-col .sc-cap { margin-bottom: 0.2rem; }
+.sc-cap-gap { margin-top: 0.5rem; }
+.sc-score-col .sc-team-label { color: var(--c-board-text-2); }
+
+/* Secondary stat row under the scores (down & distance, ball on, clock) */
+.sc-stats {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.5rem 2.5rem;
+    border-top: 1px solid var(--c-board-line);
+}
+.sc-stat { display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 7rem; }
+.sc-stat-lbl {
+    font-size: 0.5rem;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    color: var(--c-board-muted);
+    text-transform: uppercase;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.sc-stat-val { font-size: 1rem; font-weight: 700; color: var(--c-board-text); letter-spacing: 0.04em; }
 .sc-team-label {
     font-size: 0.55rem;
     font-weight: 700;

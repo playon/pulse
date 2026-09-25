@@ -22,6 +22,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 
 ## [Unreleased]
 
+### Changed
+- The live scoreboard on the ScoreConnect page now labels every value (Away Score, Home Score, Quarter/Inning/Period, Time, Down & Distance, Ball On, Clock) and the home score lines up under its team name again.
+
 ## [1.3.1] - 2026-09-22
 
 ### Added

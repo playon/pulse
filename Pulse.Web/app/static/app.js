@@ -7825,21 +7825,39 @@ function renderScoreConnect() {
     ${showScoreboard ? `
     <div class="sc-board sc-board-hero" id="sc3-hero-board">
       <div class="sc-header">
-        <div class="sc-team-home" style="min-width:0">
-          <div class="sc-team-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:18ch;margin:0 auto">${esc(visitorLabel)}</div>
+        <div class="sc-score-col">
+          <div class="sc-cap">Away Score</div>
+          <div class="sc-team-label sc-team-clip" title="${esc(visitorLabel)}">${esc(_sc3TeamName(visitorLabel)) || "&nbsp;"}</div>
           <div class="sc-score" id="sc3-guest">${rtdShown && rtdShown.guestScore != null ? esc(String(rtdShown.guestScore)) : "—"}</div>
         </div>
         <div class="sc-center">
-          <div class="sc-period-label" id="sc3-period">${rtdShown && rtdShown.period ? "Q" + rtdShown.period : "GAME CLOCK"}</div>
+          <div class="sc-cap" id="sc3-period-cap">${esc(_sc3PeriodLabel(config.sport))}</div>
+          <div class="sc-period-label" id="sc3-period">${esc(_sc3PeriodText(rtdShown, config.sport))}</div>
+          <div class="sc-cap sc-cap-gap">Time</div>
           <div class="sc-clock" id="sc3-clock">${rtdShown && rtdShown.clock ? esc(rtdShown.clock) : "--:--"}</div>
-          <div class="sc-data-desc" id="sc3-down">${rtdShown ? _sc3DownText(rtdShown) : ""}</div>
           <div id="sc3-live-badge" style="margin-top:0.4rem;font-size:0.62rem;letter-spacing:0.1em;color:${dataReceiving ? "var(--c-board-ok)" : "var(--c-board-bad)"};display:flex;align-items:center;justify-content:center;gap:0.3rem">
             ${_sc3StageBadge(dataReceiving ? "live" : "disconnected", 0)}
           </div>
         </div>
-        <div class="sc-team-away" style="min-width:0">
-          <div class="sc-team-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:18ch;margin:0 auto">${esc(homeLabel)}</div>
+        <div class="sc-score-col">
+          <div class="sc-cap">Home Score</div>
+          <div class="sc-team-label sc-team-clip" title="${esc(homeLabel)}">${esc(_sc3TeamName(homeLabel)) || "&nbsp;"}</div>
           <div class="sc-score" id="sc3-home">${rtdShown && rtdShown.homeScore != null ? esc(String(rtdShown.homeScore)) : "—"}</div>
+        </div>
+      </div>
+      <div class="sc-stats">
+        ${_sc3HasDownDistance(config.sport) ? `
+        <div class="sc-stat">
+          <div class="sc-stat-lbl">Down &amp; Distance</div>
+          <div class="sc-stat-val" id="sc3-down">${esc(_sc3DownText(rtdShown))}</div>
+        </div>
+        <div class="sc-stat">
+          <div class="sc-stat-lbl">Ball On</div>
+          <div class="sc-stat-val" id="sc3-ballon">${esc(_sc3BallOnText(rtdShown))}</div>
+        </div>` : ""}
+        <div class="sc-stat">
+          <div class="sc-stat-lbl">Clock</div>
+          <div class="sc-stat-val" id="sc3-clockstate">${esc(_sc3ClockStateText(rtdShown))}</div>
         </div>
       </div>
     </div>
@@ -7987,13 +8005,59 @@ var _sc3LivePoll = null;
 var _sc3PollGen = 0;   // bumped on every stop/start so an in-flight tick that
                        // resolves after being superseded can detect it and bail
 
+// Down & distance only; ball-on has its own labelled stat. "—" when the
+// controller has no down set, so the label never sits over an empty slot.
 function _sc3DownText(p) {
-  if (!p || !p.down) return "";
+  if (!p || !p.down) return "—";
   var ord = { 1: "1ST", 2: "2ND", 3: "3RD", 4: "4TH" }[p.down] || (p.down + "");
   var t = ord;
   if (p.toGo != null) t += " & " + (p.toGo === 0 ? "GOAL" : p.toGo);
-  if (p.ballOn != null) t += " ON " + p.ballOn;
   return t;
+}
+
+// What the period field is called for this sport. SC III's CG layout carries
+// one period digit for every sport; only its name changes. For volleyball it
+// is the current set number, not sets won (no sets-won field is decoded).
+function _sc3PeriodLabel(sport) {
+  var s = (sport || "").toLowerCase();
+  if (s.indexOf("football") >= 0 || s.indexOf("basketball") >= 0 || s.indexOf("lacrosse") >= 0) return "Quarter";
+  if (s.indexOf("baseball") >= 0 || s.indexOf("softball") >= 0) return "Inning";
+  if (s.indexOf("soccer") >= 0 || s.indexOf("rugby") >= 0) return "Half";
+  if (s.indexOf("volleyball") >= 0) return "Set";
+  return "Period";
+}
+
+function _sc3PeriodText(p, sport) {
+  if (!p || !p.period) return "—";
+  var s = (sport || "").toLowerCase();
+  // Quarter 5 is overtime; _maxPeriodForSport already allows exactly one OT.
+  if ((s.indexOf("football") >= 0 || s.indexOf("basketball") >= 0) && p.period === 5) return "OT";
+  return String(p.period);
+}
+
+// Down/distance/ball-on only exist for football. Auto-detect and unnamed
+// sports keep them, since the board might be a football board.
+function _sc3HasDownDistance(sport) {
+  var s = (sport || "").toLowerCase();
+  if (!s || s.indexOf("football") >= 0 || s.indexOf("auto") >= 0 || s.indexOf("generic") >= 0) return true;
+  return false;
+}
+
+function _sc3BallOnText(p) {
+  return p && p.ballOn != null ? String(p.ballOn) : "—";
+}
+
+// Clock run-state from the "R:S"/"S:S" token. null = the feed didn't say.
+function _sc3ClockStateText(p) {
+  if (!p || p.clockRunning == null) return "—";
+  return p.clockRunning ? "RUNNING" : "STOPPED";
+}
+
+// SC III's placeholder team names carry no information; the caption above
+// already says which side is home, so show nothing rather than repeat it.
+function _sc3TeamName(name) {
+  var n = (name || "").trim();
+  return /^(home|visitor|guest|away)$/i.test(n) ? "" : n;
 }
 
 // Status dot: green + flashing when active, grey + static when off. Pass an
@@ -8182,10 +8246,12 @@ function _sc3StartLivePoll(vendor, sport, showScoreboard) {
       var p = parseRtdScores(live.rawData, vendor, sport);
       if (p) {
         _sc3SetText("sc3-clock", p.clock || "--:--");
-        _sc3SetText("sc3-period", p.period ? "Q" + p.period : "GAME CLOCK");
+        _sc3SetText("sc3-period", _sc3PeriodText(p, sport));
         if (p.guestScore != null) _sc3SetText("sc3-guest", String(p.guestScore));
         if (p.homeScore != null)  _sc3SetText("sc3-home", String(p.homeScore));
         _sc3SetText("sc3-down", _sc3DownText(p));
+        _sc3SetText("sc3-ballon", _sc3BallOnText(p));
+        _sc3SetText("sc3-clockstate", _sc3ClockStateText(p));
       }
     }
     // In stale/disconnected/offline we keep the LAST known scores on screen
@@ -8201,7 +8267,7 @@ function _sc3StartLivePoll(vendor, sport, showScoreboard) {
     // When the data is dead, dim ONLY the score cluster (scores/clock/period/
     // down) — never the badge, so the failure indicator stays fully legible.
     var dead = (st.stage === "disconnected" || st.stage === "offline");
-    ["sc3-guest", "sc3-home", "sc3-clock", "sc3-period", "sc3-down"].forEach(function(id) {
+    ["sc3-guest", "sc3-home", "sc3-clock", "sc3-period", "sc3-down", "sc3-ballon", "sc3-clockstate"].forEach(function(id) {
       var el = document.getElementById(id);
       if (el) el.style.opacity = dead ? "0.4" : "";
     });
