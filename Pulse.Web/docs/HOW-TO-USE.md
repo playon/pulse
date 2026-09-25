@@ -281,6 +281,16 @@ powershell -ExecutionPolicy Bypass -File Get-SystemIdentity.ps1
 
 Output is always JSON. Useful for grabbing a single piece of data without firing up Pulse.
 
+### Hidden: Windows build revision (UBR)
+
+On the **About** tab, type `jessejessejesse` (no text box; just type it while the page is open). A modal opens showing the Windows Update Build Revision, read from:
+
+```powershell
+(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').UBR
+```
+
+Nothing in the UI points to it on purpose. It is backed by `scripts/Get-WindowsUbr.ps1` and `GET /api/system/ubr`. Why it matters: `17763` alone doesn't tell you which pktmon a unit has. `17763.253` is the unpatched 1809 RTM build, and packet capture is impossible there; a patched unit reads something like `17763.8880`. Esc or a click outside closes the modal.
+
 ### Demo mode
 
 If you run Pulse on a non-Windows machine (Mac or Linux), it boots in **DEMO_MODE**. PowerShell calls return canned data from `app/demo_data.py` instead of erroring out. A yellow "DEMO DATA" banner appears in the sidebar so you know.

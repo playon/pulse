@@ -1255,6 +1255,13 @@ DEMO = {
         "nvidiaSmiAvailable": True,
         "nvidiaSmiError": None,
     },
+    # 17763.253 is the unpatched 1809 RTM state most of the fleet sits in.
+    "Get-WindowsUbr.ps1": lambda **kw: {
+        "ubr": 253,
+        "currentBuild": "17763",
+        "fullBuild": "17763.253",
+        "registryKey": "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+    },
     "Get-PixellotDependencies.ps1": lambda **kw: {
         # Demo shows an outdated 4.8.0 install so the "outdated" badge state
         # is visible in demo mode. A VPU on the latest deps would report

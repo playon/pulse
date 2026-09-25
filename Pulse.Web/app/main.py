@@ -4577,6 +4577,13 @@ async def api_dependencies():
     return await run_ps("Get-PixellotDependencies.ps1", timeout=10)
 
 
+@app.get("/api/system/ubr")
+async def api_windows_ubr():
+    """Hidden: Windows UBR for the About-tab key sequence (see
+    docs/HOW-TO-USE.md). Not in the nav or any tab on purpose."""
+    return await run_ps("Get-WindowsUbr.ps1", timeout=10)
+
+
 @app.get("/api/disk-health")
 async def api_disk_health():
     return await run_ps("Get-DiskHealth.ps1")

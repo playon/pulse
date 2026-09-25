@@ -9674,6 +9674,66 @@ function renderAbout() {
   }
 }
 
+// Hidden UBR modal: typing the sequence anywhere on the About tab opens it.
+// Deliberately has no visible affordance; documented in docs/HOW-TO-USE.md.
+const _UBR_SEQUENCE = "jessejessejesse";
+let _ubrKeys = "";
+
+document.addEventListener("keydown", (e) => {
+  if (currentPage !== "about") { _ubrKeys = ""; return; }
+  if (e.key === "Escape") { _closeUbrModal(); return; }
+  if (e.ctrlKey || e.metaKey || e.altKey || e.key.length !== 1) return;
+  if (e.target.closest && e.target.closest("input, textarea, [contenteditable]")) return;
+  _ubrKeys = (_ubrKeys + e.key.toLowerCase()).slice(-_UBR_SEQUENCE.length);
+  if (_ubrKeys === _UBR_SEQUENCE) {
+    _ubrKeys = "";
+    _openUbrModal();
+  }
+});
+
+function _closeUbrModal() {
+  document.getElementById("ubr-modal")?.classList.remove("open");
+}
+
+function _renderUbrModalBody(body) {
+  const el = document.getElementById("ubr-modal");
+  if (!el) return;
+  el.innerHTML = `
+    <div class="sc3-modal-box" role="dialog" aria-modal="true" aria-label="Windows build revision">
+      <div class="sc3-modal-header">
+        <span class="sc3-modal-title">${svgIcon("info", 16)} Windows Build Revision</span>
+        <button class="sc3-modal-close" onclick="_closeUbrModal()" title="Close" aria-label="Close">${svgIcon("x", 16)}</button>
+      </div>
+      <div class="sc3-modal-body">${body}</div>
+    </div>`;
+}
+
+async function _openUbrModal() {
+  let el = document.getElementById("ubr-modal");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "ubr-modal";
+    el.className = "sc3-modal";
+    el.addEventListener("click", (e) => { if (e.target === el) _closeUbrModal(); });
+    document.body.appendChild(el);
+  }
+  _renderUbrModalBody(`<p class="text-sm" style="color:var(--c-muted)">Reading the registry…</p>`);
+  el.classList.add("open");
+
+  const d = await api("/api/system/ubr");
+  if (!d || d.error || d.ubr == null) {
+    const why = (d && d.message) ? esc(d.message) : "The collector returned no UBR value.";
+    _renderUbrModalBody(`<p class="text-sm">Couldn't read the UBR: ${why}</p>`);
+    return;
+  }
+  _renderUbrModalBody(`
+    <div class="kv-grid">
+      ${kvRow("UBR", String(d.ubr))}
+      ${kvRow("Full build", d.fullBuild || "—")}
+      ${kvRow("Source", (d.registryKey || "") + " → UBR")}
+    </div>`);
+}
+
 // ── Init ─────────────────────────────────────────────────────
 
 async function init() {
