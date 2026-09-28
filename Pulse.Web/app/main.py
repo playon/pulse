@@ -2999,8 +2999,9 @@ def _compute_readiness(findings, performance=None, disk_health=None,
             "category": category,
         }
         # The venue-IT line, the evidence and the per-row detail ride along so
-        # Copy for ticket can paste the whole finding, not just its body.
-        for k in ("it", "evidence", "details"):
+        # Copy for ticket can paste the whole finding, not just its body; the
+        # severity lets it label an info-class problem "Fix soon".
+        for k in ("it", "evidence", "details", "severity"):
             if source and source.get(k):
                 entry[k] = source[k]
         {"blocker": blockers, "risk": risks}.get(cls, info).append(entry)

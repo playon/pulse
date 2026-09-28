@@ -401,6 +401,12 @@ function statusBadge(status) {
 var VERDICT = {
   critical: { word: "Stops tonight's game", tone: "critical" },
   warning:  { word: "Risk tonight",         tone: "warning"  },
+  // A real problem that readiness has already judged harmless for tonight:
+  // support-plane findings (LogMeIn, installer, update channel) and the like.
+  // It used to print "Risk tonight" above copy saying "Tonight's broadcast is
+  // unaffected" -- the policy must never demote a problem to an FYI, and this
+  // was the only word left. Ian's call, 2026-09-28.
+  soon:     { word: "Fix soon",             tone: "soon"     },
   info:     { word: "Worth knowing",        tone: "info"     },
 };
 // Collector synonyms. main.py emits "warning" 25 times and "warn" once
@@ -2394,6 +2400,7 @@ function _findingExtrasHtml(f, listCls) {
 //   - the fix, the IT line and the evidence one click away;
 //   - "Worth knowing" notes folded into a single line when anything more
 //     urgent is on screen, because they are context, not work.
+// "Fix soon" rows (a problem, but not tonight's) stay in the main list.
 // A finding that stops tonight's game opens on its own: that is the one case
 // where the agent must read the fix before anything else.
 var _findingOpen = {};  // "<scope>:<title>" -> true/false, survives re-renders
@@ -2408,12 +2415,12 @@ var _RDY_TONE = { blocker: "critical", risk: "warning", info: "info" };
 function _findingTone(f) {
   var own = verdictFor(f.severity).tone;
   var cls = _RDY_TONE[f.readinessClass];
-  if (cls) return (cls === "info" && own !== "info") ? "warning" : cls;
+  if (cls) return (cls === "info" && own !== "info") ? "soon" : cls;
   if (f.code) return own === "info" ? "info" : "warning";
   return own;
 }
 
-var _TONE_ORDER = { critical: 0, warning: 1, info: 2 };
+var _TONE_ORDER = { critical: 0, warning: 1, soon: 2, info: 3 };
 function _sortByTone(items, toneOf) {
   return items.map(function(f, i) { return { f: f, t: toneOf(f), i: i }; })
     .sort(function(a, b) {
@@ -2425,11 +2432,12 @@ function _sortByTone(items, toneOf) {
 
 // "1 stops tonight's game · 2 risks tonight · 2 worth knowing"
 function _findingsSummaryHtml(rows) {
-  var n = { critical: 0, warning: 0, info: 0 };
+  var n = { critical: 0, warning: 0, soon: 0, info: 0 };
   rows.forEach(function(r) { if (n[r.t] != null) n[r.t]++; });
   var parts = [];
   if (n.critical) parts.push('<span class="finding-cat-critical">' + n.critical + (n.critical === 1 ? " stops" : " stop") + " tonight's game</span>");
   if (n.warning) parts.push('<span class="finding-cat-warning">' + n.warning + (n.warning === 1 ? " risk" : " risks") + " tonight</span>");
+  if (n.soon) parts.push('<span class="finding-cat-soon">' + n.soon + " to fix soon</span>");
   if (n.info) parts.push('<span class="finding-cat-info">' + n.info + " worth knowing</span>");
   return '<span class="findings-summary">' + parts.join('<span class="findings-sep" aria-hidden="true">&middot;</span>') + "</span>";
 }
@@ -2805,7 +2813,9 @@ function renderDashboard() {
     }
     // The policy may ESCALATE -- deciding what stops tonight's game is its
     // job -- but it must never silently DEMOTE a finding to an FYI.
-    if (policy === "info" && own !== "info") return "warning";
+    // Demoting in words is still wrong ("Worth knowing"), but so is claiming
+    // tonight is at risk when the policy decided it isn't: "Fix soon".
+    if (policy === "info" && own !== "info") return "soon";
     return policy;
   };
 
@@ -2818,7 +2828,7 @@ function renderDashboard() {
   // The sort is stable, so each group keeps its original ordering.
   // Cap at 10 to keep the panel from sprawling; surface a "+N more" hint
   // when there are more.
-  const _TONE_RANK = { critical: 0, warning: 1, info: 2 };
+  const _TONE_RANK = { critical: 0, warning: 1, soon: 2, info: 3 };
   const sortedFindings = findings
     .map((f, i) => [f, i])  // decorate with index for a stable sort
     .sort((a, b) => {
@@ -2928,7 +2938,11 @@ function renderDashboard() {
       lines.push("No findings.");
     } else {
       items.forEach(function (pair) {
-        var v = VERDICT[pair[0]] || VERDICT.info, e = pair[1];
+        // Same rule as the list: a problem readiness judged harmless for
+        // tonight is "Fix soon", not "Worth knowing".
+        var tone = pair[0], e = pair[1];
+        if (tone === "info" && e.severity && verdictFor(e.severity).tone !== "info") tone = "soon";
+        var v = VERDICT[tone] || VERDICT.info;
         lines.push("[" + v.word + "] " + (e.title || ""));
         var rec = (e.recommendation || "").trim();
         if (rec) lines.push("    " + rec);

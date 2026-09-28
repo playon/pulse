@@ -1184,6 +1184,7 @@ html.dark .channel-moved-banner {
 }
 .finding-dot-critical { background: var(--c-accent-red); box-shadow: 0 0 6px rgba(239, 68, 68, 0.4); }
 .finding-dot-warning  { background: var(--c-accent-amber); box-shadow: 0 0 6px rgba(234, 179, 8, 0.3); }
+.finding-dot-soon     { background: var(--c-accent-purple); }
 .finding-dot-info     { background: var(--c-accent-blue); }
 .finding-cat {
     font-size: 0.72rem;
@@ -1196,6 +1197,7 @@ html.dark .channel-moved-banner {
 /* The chip carries the verdict phrase (VERDICT in app.js), colored to match. */
 .finding-cat-critical { color: var(--c-accent-red); }
 .finding-cat-warning  { color: var(--c-accent-amber); }
+.finding-cat-soon     { color: var(--c-accent-purple); }
 .finding-cat-info     { color: var(--c-accent-blue); }
 .finding-title {
     flex: 1;
