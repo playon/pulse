@@ -770,8 +770,20 @@ function _splashRowState(key) {
       : { state: "pass", word: "Pass", detail: _splashFact(key, d), ms };
   }
 
-  if (key === "scoreconnect" && d.reachable === false) {
-    return { state: "warn", word: "Warning", detail: "ScoreConnect isn't answering on this VPU", ms };
+  // Only the score source in use matters: an OCR camera reading the board
+  // makes ScoreConnect optional (Ian, Armstrong IL 2026-09-28).
+  // scoreboardSource comes from main.py's _scoreboard_source.
+  if (key === "scoreconnect") {
+    const src = d.scoreboardSource;
+    if (src && src.source === "ocr") {
+      return src.ok
+        ? { state: "pass", word: "Pass", detail: "The OCR camera reads the score" + (src.ocrPort ? " (" + src.ocrPort + ")" : "") + ", so ScoreConnect isn't needed", ms }
+        : { state: "warn", word: "Warning", detail: "The OCR camera that reads the score isn't connected", ms };
+    }
+    const running = src ? src.scoreConnectRunning : d.reachable !== false;
+    if (!running) {
+      return { state: "warn", word: "Warning", detail: "ScoreConnect isn't answering on this VPU", ms };
+    }
   }
 
   const cats = SPLASH_SECTION_CATEGORIES[key];
@@ -8389,6 +8401,21 @@ function parseRtdScores(rawData, vendor, sport) {
   return null;
 }
 
+// What the empty ScoreConnect hero says. With an OCR camera reading the
+// score, a missing ScoreConnect is expected, not a fault (Armstrong IL).
+function _scNoServiceText(data) {
+  var src = data.scoreboardSource || {};
+  if (src.source === "ocr" && src.ok) {
+    return "No ScoreConnect service on this VPU. That's expected: the OCR camera"
+      + (src.ocrPort ? " on " + src.ocrPort : "") + " reads the score.";
+  }
+  if (src.source === "ocr") {
+    return "No ScoreConnect service on this VPU, and the OCR camera that reads the score isn't connected. Check Camera Connectivity.";
+  }
+  if (data.error) return typeof data.error === "string" ? data.error : "No ScoreConnect service detected";
+  return "No ScoreConnect service detected";
+}
+
 function renderScoreConnect() {
   const data = cached("scoreconnect");
   if (!data) { $page().innerHTML = sectionLoading("ScoreConnect"); fetchSection("scoreconnect"); return; }
@@ -8550,7 +8577,7 @@ function renderScoreConnect() {
         </div>
       </div>
     </div>
-    ` : !(sc2 && sc2.reachable) ? `<div class="sc-board sc-board-hero sc-board-empty">${data.error ? esc(typeof data.error === "string" ? data.error : "No ScoreConnect service detected") : "No ScoreConnect service detected"}</div>` : ""}
+    ` : !(sc2 && sc2.reachable) ? `<div class="sc-board sc-board-hero sc-board-empty">${esc(_scNoServiceText(data))}</div>` : ""}
 
     <!-- ScoreLink USB device — directly below the scoreboard hero -->
     ${slCard}

@@ -1450,6 +1450,45 @@ class TestSupportOnlyTlsFindings(unittest.TestCase):
         self.assertEqual(f[0]["severity"], "warning")
 
 
+# ── Score source: OCR camera or ScoreConnect (Armstrong IL, 2026-09-28) ──
+# Pulse warned "ScoreConnect not running" on a unit whose OCR camera was
+# connected and reading the board. Only the source in use matters.
+class TestScoreboardSource(unittest.TestCase):
+    SC_DOWN = {"reachable": False, "sc2": {"reachable": False}}
+    SC_UP = {"reachable": True}
+    OCR_UP = {"configured": True, "connected": True, "port": "Port 3"}
+    OCR_DOWN = {"configured": True, "connected": False, "port": None}
+
+    def test_ocr_connected_makes_scoreconnect_optional(self):
+        r = main._scoreboard_source(self.SC_DOWN, self.OCR_UP)
+        self.assertEqual((r["source"], r["ok"], r["issue"]), ("ocr", True, None))
+        self.assertEqual(r["ocrPort"], "Port 3")
+
+    def test_ocr_detected_without_config_counts(self):
+        r = main._scoreboard_source(self.SC_DOWN, {"configured": False, "connected": True, "port": "Port 2"})
+        self.assertTrue(r["ok"])
+
+    def test_ocr_configured_but_disconnected_is_an_issue(self):
+        # Even with ScoreConnect running: the unit is set up to read the
+        # score with the camera.
+        r = main._scoreboard_source(self.SC_UP, self.OCR_DOWN)
+        self.assertEqual((r["source"], r["ok"], r["issue"]), ("ocr", False, "ocr-not-connected"))
+
+    def test_no_ocr_needs_scoreconnect(self):
+        r = main._scoreboard_source(self.SC_DOWN, None)
+        self.assertEqual((r["source"], r["ok"], r["issue"]), ("scoreconnect", False, "scoreconnect-down"))
+        self.assertTrue(main._scoreboard_source(self.SC_UP, None)["ok"])
+
+    def test_legacy_scoreconnect_counts_as_running(self):
+        r = main._scoreboard_source({"reachable": False, "sc2": {"reachable": True}}, None)
+        self.assertTrue(r["ok"])
+
+    def test_camera_read_failed_judges_scoreconnect_alone(self):
+        r = main._scoreboard_source(self.SC_DOWN, "unknown")
+        self.assertEqual(r["source"], "scoreconnect")
+        self.assertFalse(r["ocrKnown"])
+
+
 # Finding codes emitted with severity "critical" by _compute_findings. Kept
 # explicit rather than scraped so adding a critical is a deliberate two-line
 # change: emit it, then classify it.
