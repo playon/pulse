@@ -22,6 +22,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 
 ## [Unreleased]
 
+### Added
+- Pulse now checks the last week of games for missing graphics. It flags a VPU where the Pixellot software never passed the scorebug to the video (the "missing graphics" bug: the scoreboard and network are fine, but games stream with no graphics), and a VPU with no scoreboard type selected, which turns graphics off for every game.
+
+### Fixed
+- A web filter blocking LogMeIn's website is no longer reported as SSL inspection or as a Stream Readiness failure. Pulse now says it's a category block, and when LogMeIn is connected it says remote support works.
+- Pulse now warns when the VPU is on Wi-Fi even if a cable is plugged into the main network port, and no longer tells you to fix the switch's duplex setting for a Wi-Fi connection.
+- Pulse no longer says the venue is blocking LogMeIn when LogMeIn is connected. It was reading an old block in LogMeIn's log as a current one, even while a tech was on the unit through LogMeIn.
+
 ## [1.3.2] - 2026-09-25
 
 ### Changed

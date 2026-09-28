@@ -845,10 +845,11 @@ DEMO = {
     # connection" warning (field log 2026-08-28: a VPU dark in LMI ~16 hours),
     # set sslFailures ~201, handshakeFailures ~60, gatewayFailures ~141,
     # attempts ~142, logins 0, firstSslFailure/lastSslFailure spanning the
-    # day, lastLogin None, blockedNow True, recoveredAt None. To DEMO the
-    # recovered/info variant (packet inspection disabled while you watch),
-    # keep the failures but set logins 1, lastLogin/recoveredAt a few minutes
-    # after lastSslFailure, and blockedNow False.
+    # day, lastLogin None, connectedNow False, blockedNow True, recoveredAt
+    # None. To DEMO the recovered/info variant (packet inspection disabled
+    # while you watch), keep the failures but set logins 1,
+    # lastLogin/lastConnected/recoveredAt a few minutes after lastSslFailure,
+    # connectedNow True, and blockedNow False.
     "Get-LmiGatewayLog.ps1": lambda **kw: {
         "installed": True,
         "logsFound": True,
@@ -863,9 +864,50 @@ DEMO = {
         "firstSslFailure": None,
         "lastSslFailure": None,
         "lastLogin": (datetime.now() - timedelta(days=2, hours=5)).strftime("%Y-%m-%d %H:%M:%S"),
+        "lastConnected": (datetime.now() - timedelta(days=2, hours=5)).strftime("%Y-%m-%d %H:%M:%S"),
+        "lastSession": None,
+        "sessionActive": False,
+        "gatewayConnected": True,
+        "connectedNow": True,
+        "minutesSinceSslFailure": None,
+        "staleMinutes": 120,
         "blockedNow": False,
         "recoveredAt": None,
         "gatewayHosts": ["control.lmi-app25-04.logmein.com", "control.lmi-app25-10.logmein.com"],
+    },
+    # Graphics delivery scan - the healthy shape: two recent events, one
+    # normal cold-start timeout each, then steady hand-offs VPU.exe received.
+    # To DEMO the 5.37.x missing-scorebug fault (Tanque Verde / MacLaren),
+    # set the newest event's delivered 0, deadlineFails ~127, maxAttempt
+    # ~127, vpuReceived 0. To DEMO the no-scoreboard-type case (Merrol Hyde),
+    # set config.graphicEngineType "NONE_SELECTED" and engineDisabled.lines
+    # ~120 with first/last during an event.
+    "Get-GraphicsDelivery.ps1": lambda **kw: {
+        "logsFound": True,
+        "logDir": "C:\\Pixellot\\Data\\Log",
+        "daysBack": 7,
+        "zipSupport": True,
+        "truncated": False,
+        "readErrors": 0,
+        "elapsedMs": 940,
+        "filesScanned": {"graphicsManager": 8, "vpu": 8, "agent": 8},
+        "config": {"graphicEngineType": "CGENGINE", "graphicsEnabled": "true",
+                   "graphicsModeOnInit": "LOGOS_ONLY"},
+        "events": [
+            {"eventId": "6ab698d77272ca41617bfb8d",
+             "firstSeen": (datetime.utcnow() - timedelta(days=1, hours=2)).strftime("%Y-%m-%dT%H:%M:%S"),
+             "lastSeen": (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S"),
+             "delivered": 241, "deadlineFails": 1, "unavailableFails": 3, "otherFails": 0,
+             "maxAttempt": 4, "vpuReceived": 241},
+            {"eventId": "6a906eefa895efc9e24118c1",
+             "firstSeen": (datetime.utcnow() - timedelta(days=3, hours=2)).strftime("%Y-%m-%dT%H:%M:%S"),
+             "lastSeen": (datetime.utcnow() - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%S"),
+             "delivered": 238, "deadlineFails": 1, "unavailableFails": 0, "otherFails": 0,
+             "maxAttempt": 1, "vpuReceived": 238},
+        ],
+        "engineDisabled": {"lines": 0, "first": None, "last": None,
+                           "lastSetScoreboardType": None, "lastSetAt": None},
+        "scoreboardData": {"noDataLines": 0, "invalidDataLines": 0, "last": None},
     },
     "Test-NtpDrift.ps1": lambda **kw: {"offsetSeconds": round(random.uniform(-0.3, 0.5), 3), "status": "ok", "source": "0.us.pool.ntp.org", "configuredSource": "0.us.pool.ntp.org", "networkSynced": True},
     "Get-NtpPeers.ps1": lambda **kw: {

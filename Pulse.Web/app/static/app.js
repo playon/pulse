@@ -590,6 +590,7 @@ const SPLASH_SOURCE_ROW = {
   "System identity": "system", "Performance": "system", "Hardware": "system",
   "Installed software": "system", "Services": "services",
   "Network adapters": "cameras", "Network config": "network", "Port connectivity": "network",
+  "Graphics delivery": "pixellot-config",
 };
 function _splashSourceGaps() {
   const d = _splash.dash;
@@ -640,6 +641,7 @@ const SPLASH_SCRIPT_LABELS = {
   "Test-NtpDrift.ps1": "Measuring clock drift",
   "Get-NtpPeers.ps1": "Reading time sync sources",
   "Get-LmiGatewayLog.ps1": "Reading the LogMeIn connection log",
+  "Get-GraphicsDelivery.ps1": "Checking recent games for missing graphics",
   "Get-CameraExpectations.ps1": "Reading the expected camera layout",
   "Get-PoePower.ps1": "Measuring PoE power per port",
   "Get-S1Cameras.ps1": "Detecting cameras",
@@ -4235,7 +4237,8 @@ function _lmiLogNote(lmi) {
   if (lmi.sslFailures > 0) {
     return '<p class="text-xs mt-2 status-warn">LogMeIn service log: ' + lmi.sslFailures
       + " secure handshakes were killed between " + esc(lmi.firstSslFailure || "?") + " and " + esc(lmi.lastSslFailure || "?")
-      + ", then it logged in" + (lmi.recoveredAt ? " at " + esc(lmi.recoveredAt) : "")
+      + (lmi.recoveredAt ? ", then it connected at " + esc(lmi.recoveredAt)
+         : lmi.connectedNow ? ", and it is connected now" : ", and none since")
       + " — the venue lifted its block. If remote access drops again, start with the web filter.</p>";
   }
   return '<p class="text-pulse-muted text-xs mt-2">LogMeIn service log: no killed handshakes in the last ' + days + " days.</p>";
@@ -4625,13 +4628,22 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
     if (!lmiLog.blockedNow) {
       issues.push({
         severity: "info",
-        title: "LogMeIn was being blocked on this network until " + (lmiLog.recoveredAt || lmiLog.lastLogin || "recently"),
+        // The last cut-off connection, not the first login seen after it:
+        // Armstrong's block ended 9/23 but LogMeIn's next login line was 9/28.
+        title: "LogMeIn was being blocked on this network until " + (lmiLog.lastSslFailure || lmiLog.recoveredAt || "recently"),
         body: "LogMeIn was blocked here, then connected"
           + (lmiLog.recoveredAt ? " at " + lmiLog.recoveredAt : "")
-          + ", so the venue likely changed its filter. Remote support works now. If this VPU drops out of LogMeIn again, check the venue's web filter first.",
+          + ", so the venue likely changed its filter. "
+          + (lmiLog.connectedNow ? "LogMeIn is connected right now. " : "")
+          + "If this VPU drops out of LogMeIn again, check the venue's web filter first.",
+        // The Armstrong IL false positive (2026-09-28): old kills with no
+        // login line after them read as a live block while the tech was on
+        // the unit through LogMeIn. Say which evidence cleared it.
         evidence: "LogMeIn's own log shows " + lmiLog.sslFailures + " connections cut off between "
           + (lmiLog.firstSslFailure || "?") + " and " + (lmiLog.lastSslFailure || "?")
-          + ", then a successful login.",
+          + (lmiLog.recoveredAt ? ", then a successful connection."
+             : lmiLog.connectedNow ? ". LogMeIn has a live connection now."
+             : ", and none since."),
       });
     }
   }
@@ -4732,8 +4744,12 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
   }
 
   // ── Adapter: half-duplex ─────────────────────────────────
+  // Wi-Fi is half-duplex by nature, so on a Wi-Fi uplink this would send
+  // the tech to a switch port that isn't in the path (Armstrong IL,
+  // 2026-09-28). The wifi-uplink finding covers that case.
   var uStats = cfg.uplinkStats || {};
-  if (uStats.fullDuplex === false)
+  var uplinkOnWifi = !!(wifi && !wifi.error && wifi.uplinkIsWifi);
+  if (uStats.fullDuplex === false && !uplinkOnWifi)
     issues.push({ severity: "warning", title: "Uplink adapter running in half-duplex",
       body: "The uplink is running half-duplex, which slows every connection. Set both the VPU's network port and the switch port to auto-negotiate, or hard-set both to 1 Gbps full duplex." });
 
