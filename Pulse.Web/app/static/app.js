@@ -249,7 +249,7 @@ function _findFindingTarget(title) {
   } catch (e) { /* invalid selector — ignore */ }
   // 2. A finding/issue row whose text contains the full finding title.
   //    Pick the smallest match so we land on the row, not its container.
-  const rows = page.querySelectorAll(".finding-item, .net-issue-row, .cam-finding-row, .dh-event-row, li, tr");
+  const rows = page.querySelectorAll(".finding-item, .dh-event-row, li, tr");
   let best = null;
   rows.forEach((el) => {
     const txt = (el.textContent || "").trim().toLowerCase();
@@ -268,6 +268,14 @@ function _applyFindingHighlight(attempt) {
   const el = _findFindingTarget(_pendingFindingTitle);
   if (el) {
     _pendingFindingTitle = null;  // one-shot
+    // Landing on a folded row: open it (and the notes group around it), so
+    // the jump shows the fix, not just a flashing title.
+    const row = el.closest ? (el.closest(".finding-row") || el) : el;
+    const btn = row.querySelector && row.querySelector(".finding-item");
+    const group = row.closest && row.closest(".finding-notes");
+    const gbtn = group && group.querySelector(".finding-notes-btn");
+    if (gbtn && gbtn.getAttribute("aria-expanded") !== "true") toggleFinding(gbtn);
+    if (btn && btn.getAttribute("aria-expanded") !== "true") toggleFinding(btn);
     try { el.scrollIntoView({ behavior: "smooth", block: "center" }); }
     catch (e) { el.scrollIntoView(); }
     el.classList.add("finding-flash");
@@ -2338,13 +2346,16 @@ function _pageLabel(pageId) {
 // was a tab switch away. Most agents never made the trip. The jump is still
 // here, as a named link inside the panel, but reading what to do no longer
 // costs you your place.
-function toggleFinding(i) {
-  var btn = document.getElementById("finding-btn-" + i);
-  var panel = document.getElementById("finding-detail-" + i);
-  if (!btn || !panel) return;
+function toggleFinding(btn) {
+  if (!btn) return;
+  var panel = document.getElementById(btn.getAttribute("aria-controls"));
+  if (!panel) return;
   var open = btn.getAttribute("aria-expanded") === "true";
   btn.setAttribute("aria-expanded", open ? "false" : "true");
   panel.hidden = open;
+  // Remembered by title, so a live re-render (Camera Connectivity redraws
+  // every few seconds) doesn't snap a row the agent is reading shut.
+  if (btn.dataset.fkey) _findingOpen[btn.dataset.fkey] = !open;
 }
 
 // Everything a ticket needs, as text: the unit, the verdict, and every finding
@@ -2369,6 +2380,115 @@ function _findingExtrasHtml(f, listCls) {
       esc(f.evidence) + "</p></details>";
   }
   return html;
+}
+
+// ── One findings list for every tab ─────────────────────────
+// The Dashboard, Network Test and Camera Connectivity all list findings, and
+// the two lane tabs used to print every one fully open in its own tinted box:
+// four findings was a screen of paragraphs, and an agent had to read all of it
+// to learn which one mattered (Armstrong IL, 2026-09-28: two warnings and two
+// notes filled the viewport). Now every tab shows the same thing:
+//   - a one-line summary of what's there, in the verdict words;
+//   - one line per finding (verdict + title), most urgent first; the title
+//     already says cause and effect, so it is the scan;
+//   - the fix, the IT line and the evidence one click away;
+//   - "Worth knowing" notes folded into a single line when anything more
+//     urgent is on screen, because they are context, not work.
+// A finding that stops tonight's game opens on its own: that is the one case
+// where the agent must read the fix before anything else.
+var _findingOpen = {};  // "<scope>:<title>" -> true/false, survives re-renders
+
+// Verdict tone for a finding on any tab: the readiness class main.py stamps
+// on it (_tag_readiness), with the Dashboard's rules. A blocker stops the
+// game; a risk is a risk; the policy never demotes a problem to an FYI; a
+// coded finding with no class caps at a risk (a collector's "critical" is not
+// a verdict). A client-side check (no code) keeps its own severity: those are
+// computed from the raw tests on the page ("no internet", "gateway down").
+var _RDY_TONE = { blocker: "critical", risk: "warning", info: "info" };
+function _findingTone(f) {
+  var own = verdictFor(f.severity).tone;
+  var cls = _RDY_TONE[f.readinessClass];
+  if (cls) return (cls === "info" && own !== "info") ? "warning" : cls;
+  if (f.code) return own === "info" ? "info" : "warning";
+  return own;
+}
+
+var _TONE_ORDER = { critical: 0, warning: 1, info: 2 };
+function _sortByTone(items, toneOf) {
+  return items.map(function(f, i) { return { f: f, t: toneOf(f), i: i }; })
+    .sort(function(a, b) {
+      var ra = _TONE_ORDER[a.t], rb = _TONE_ORDER[b.t];
+      ra = ra == null ? 3 : ra; rb = rb == null ? 3 : rb;
+      return ra !== rb ? ra - rb : a.i - b.i;
+    });
+}
+
+// "1 stops tonight's game · 2 risks tonight · 2 worth knowing"
+function _findingsSummaryHtml(rows) {
+  var n = { critical: 0, warning: 0, info: 0 };
+  rows.forEach(function(r) { if (n[r.t] != null) n[r.t]++; });
+  var parts = [];
+  if (n.critical) parts.push('<span class="finding-cat-critical">' + n.critical + (n.critical === 1 ? " stops" : " stop") + " tonight's game</span>");
+  if (n.warning) parts.push('<span class="finding-cat-warning">' + n.warning + (n.warning === 1 ? " risk" : " risks") + " tonight</span>");
+  if (n.info) parts.push('<span class="finding-cat-info">' + n.info + " worth knowing</span>");
+  return '<span class="findings-summary">' + parts.join('<span class="findings-sep" aria-hidden="true">&middot;</span>') + "</span>";
+}
+
+function _findingRowHtml(r, scope, i, opts) {
+  var f = r.f;
+  var v = VERDICT[r.t] || verdictFor(f.severity);
+  var key = scope + ":" + (f.title || "");
+  var remembered = _findingOpen[key];
+  var open = remembered == null ? (i === 0 && r.t === "critical") : remembered;
+  var id = "fd-" + scope + "-" + i;
+  var rec = (f.recommendation || f.body || "").trim();
+  var extra = opts.detailExtra ? opts.detailExtra(f) : "";
+  return '<div class="finding-row">' +
+    '<button class="finding-item" type="button" aria-expanded="' + open + '" aria-controls="' + id + '"' +
+      ' data-fkey="' + esc(key) + '" onclick="toggleFinding(this)">' +
+      '<span class="finding-dot finding-dot-' + esc(v.tone) + '" aria-hidden="true"></span>' +
+      '<span class="finding-cat finding-cat-' + esc(v.tone) + '">' + esc(v.word) + '</span>' +
+      '<span class="finding-title">' + esc(f.title) + '</span>' +
+      '<span class="finding-arrow">' + svgIcon("chevron", 14) + '</span>' +
+    '</button>' +
+    '<div class="finding-detail" id="' + id + '"' + (open ? "" : " hidden") + '>' +
+      (rec ? '<p class="finding-rec">' + esc(rec) + '</p>' : (opts.noRec ? opts.noRec(f) : "")) +
+      _findingExtrasHtml(f) + extra +
+    '</div>' +
+  '</div>';
+}
+
+// items: finding records (main.py's, or a tab's own checks).
+// opts.scope names the list (one per tab); opts.toneOf overrides the tone
+// (the Dashboard passes its readiness-aware one); opts.detailExtra(f) and
+// opts.noRec(f) add tab-specific markup inside the open panel.
+function findingListHtml(items, opts) {
+  opts = opts || {};
+  var scope = opts.scope || "list";
+  var rows = _sortByTone(items || [], opts.toneOf || _findingTone);
+  var act = rows.filter(function(r) { return r.t !== "info"; });
+  var notes = rows.filter(function(r) { return r.t === "info"; });
+  var html = act.map(function(r, i) { return _findingRowHtml(r, scope, i, opts); }).join("");
+  if (notes.length && act.length) {
+    // Folded: context, not work. Opened, the notes are ordinary rows.
+    var nkey = scope + ":__notes";
+    var nopen = !!_findingOpen[nkey];
+    var nid = "fn-" + scope;
+    html += '<div class="finding-notes">' +
+      '<button class="finding-notes-btn" type="button" aria-expanded="' + nopen + '" aria-controls="' + nid + '"' +
+        ' data-fkey="' + esc(nkey) + '" onclick="toggleFinding(this)">' +
+        '<span class="finding-dot finding-dot-info" aria-hidden="true"></span>' +
+        '<span>' + notes.length + " more worth knowing</span>" +
+        '<span class="finding-arrow">' + svgIcon("chevron", 14) + '</span>' +
+      '</button>' +
+      '<div id="' + nid + '"' + (nopen ? "" : " hidden") + '>' +
+        notes.map(function(r, i) { return _findingRowHtml(r, scope, act.length + i, opts); }).join("") +
+      '</div>' +
+    '</div>';
+  } else {
+    html += notes.map(function(r, i) { return _findingRowHtml(r, scope, act.length + i, opts); }).join("");
+  }
+  return { html: html, summary: _findingsSummaryHtml(rows), rows: rows };
 }
 
 function copyFindingsForTicket() {
@@ -2710,6 +2830,15 @@ function renderDashboard() {
   const _MAX_FINDINGS_INLINE = 10;
   const visibleFindings = sortedFindings.slice(0, _MAX_FINDINGS_INLINE);
   const overflowCount = Math.max(0, sortedFindings.length - _MAX_FINDINGS_INLINE);
+  const dashList = findingListHtml(visibleFindings, {
+    scope: "dash",
+    toneOf: toneOf,
+    detailExtra: (f) => {
+      const fp = _findingPageFor(f.category);
+      return `<a class="finding-open" href="#${esc(fp)}" onclick="event.preventDefault();findingJump('${esc(fp)}','${encodeURIComponent(f.title || "")}')">Open ${esc(_pageLabel(fp))}${svgIcon("chevron", 13)}</a>`;
+    },
+    noRec: (f) => `<p class="finding-rec finding-rec-none">No fix recorded for this finding yet. Open ${esc(_pageLabel(_findingPageFor(f.category)))} for the full detail.</p>`,
+  });
   const subsystems = _subsystemHealth(findings);
   const now = new Date();
   const timeStr = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
@@ -2889,43 +3018,18 @@ function renderDashboard() {
     </div>` : ""}
 
     ${totalFindings > 0 ? `
-    <!-- Findings — lightweight list of the active warnings/criticals -->
+    <!-- Findings: one line each, most urgent first (findingListHtml) -->
     <div class="card dash-findings-card">
-      <div class="flex justify-between items-center mb-2">
+      <div class="findings-hdr">
         <div class="dash-card-hdr mb-0">
           <span class="dash-hdr-icon">${svgIcon("clipboard-list", 16)}</span>
           <h3 class="card-label mb-0">FINDINGS</h3>
         </div>
-        <div class="cc-findings-actions">
-          <span class="cc-findings-count">${totalFindings} issue${totalFindings === 1 ? "" : "s"}</span>
-          <button class="finding-copy" id="finding-copy-btn" aria-live="polite" onclick="copyFindingsForTicket()" title="Copy the unit, the verdict and every finding with its fix, ready to paste into a ticket">Copy for ticket</button>
-        </div>
+        ${dashList.summary}
+        <button class="finding-copy" id="finding-copy-btn" aria-live="polite" onclick="copyFindingsForTicket()" title="Copy the unit, the verdict and every finding with its fix, ready to paste into a ticket">Copy for ticket</button>
       </div>
       <div class="cc-findings-list">
-        ${visibleFindings.map((f, i) => {
-          const prev = visibleFindings[i - 1];
-          const groupBreak = i > 0 && toneOf(prev) !== toneOf(f) ? `<div class="cc-findings-divider"></div>` : "";
-          const fp = _findingPageFor(f.category);
-          const encTitle = encodeURIComponent(f.title || "");
-          const v = VERDICT[toneOf(f)] || verdictFor(f.severity);
-          const rec = (f.recommendation || "").trim();
-          return groupBreak + `
-        <div class="finding-row">
-          <button class="finding-item" id="finding-btn-${i}" type="button"
-                  aria-expanded="false" aria-controls="finding-detail-${i}"
-                  onclick="toggleFinding(${i})">
-            <span class="finding-dot finding-dot-${esc(v.tone)}"></span>
-            <span class="finding-cat finding-cat-${esc(v.tone)}">${esc(v.word)}</span>
-            <span class="finding-title">${esc(f.title)}</span>
-            <span class="finding-arrow">${svgIcon("chevron", 14)}</span>
-          </button>
-          <div class="finding-detail" id="finding-detail-${i}" hidden>
-            ${rec ? `<p class="finding-rec">${esc(rec)}</p>` : `<p class="finding-rec finding-rec-none">No fix recorded for this finding yet. Open ${esc(_pageLabel(fp))} for the full detail.</p>`}
-            ${_findingExtrasHtml(f)}
-            <a class="finding-open" href="#${esc(fp)}" onclick="event.preventDefault();findingJump('${esc(fp)}','${encTitle}')">Open ${esc(_pageLabel(fp))}${svgIcon("chevron", 13)}</a>
-          </div>
-        </div>`;
-        }).join("")}
+        ${dashList.html}
         ${overflowCount > 0 ? `<div class="cc-findings-overflow">+${overflowCount} more. Open the relevant tab for the full list</div>` : ""}
       </div>
     </div>` : ""}
@@ -5015,27 +5119,17 @@ function renderNetwork() {
       </tbody></table>
     </div>` : "";
 
+  const netList = findingListHtml(issues, { scope: "net" });
   const issuesPanel = issues.length ? `
     <div class="card">
-      <div class="af-header">
-        ${svgIcon("triangle", 16)}
-        <span class="af-label">ISSUES & RECOMMENDATIONS</span>
-        <span class="af-count-badge">${issues.length} item${issues.length !== 1 ? "s" : ""}</span>
+      <div class="findings-hdr">
+        <div class="af-header mb-0">
+          ${svgIcon("triangle", 16)}
+          <span class="af-label">ISSUES & RECOMMENDATIONS</span>
+        </div>
+        ${netList.summary}
       </div>
-      <div class="net-issues-list">
-        ${issues.map(function(item) {
-          var sc = item.severity === "critical" ? "sev-chip-crit" : item.severity === "warning" ? "sev-chip-warn" : item.severity === "info" ? "sev-chip-info" : "sev-chip-ok";
-          var borderCls = item.severity === "critical" ? "net-issue-critical" : item.severity === "warning" ? "net-issue-warn" : "net-issue-info";
-          return '<div class="net-issue-row ' + borderCls + '">' +
-            '<span class="sev-chip ' + sc + '">' + esc(item.severity.toUpperCase()) + '</span>' +
-            '<div class="net-issue-text">' +
-              '<div class="net-issue-title">' + esc(item.title) + '</div>' +
-              '<div class="net-issue-body">' + esc(item.body) + '</div>' +
-              _findingExtrasHtml(item, "net-issue-details") +
-            '</div>' +
-          '</div>';
-        }).join("")}
-      </div>
+      <div class="net-issues-list">${netList.html}</div>
     </div>` : "";
 
   $page().innerHTML = `
@@ -5502,17 +5596,13 @@ function _camDownGuidanceHtml(p, ctx) {
 
 function _camFindingsHtml(findings) {
   if (!findings.length) return "";
+  var list = findingListHtml(findings, { scope: "cam" });
   return `<div class="card" id="cam-findings">
-    ${sectionTitle("alert", findings.length + " finding" + (findings.length !== 1 ? "s need" : " needs") + " attention")}
-    ${findings.map(f => `
-      <div class="cam-finding-row cam-finding-row-${esc(f.severity)}">
-        <div class="cam-finding-header">
-          <span class="cam-finding-pill cam-finding-pill-${esc(f.severity)}">${esc(f.severity.toUpperCase())}</span>
-          <span class="font-semibold text-sm">${esc(f.title)}</span>
-        </div>
-        <div class="cam-finding-body">${esc(f.body)}</div>
-        ${_findingExtrasHtml(f)}
-      </div>`).join("")}
+    <div class="findings-hdr">
+      ${sectionTitle("alert", "Findings")}
+      ${list.summary}
+    </div>
+    ${list.html}
   </div>`;
 }
 

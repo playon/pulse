@@ -2942,6 +2942,18 @@ def _readiness_class(code: str) -> str:
     return _READINESS_POLICY.get(code or "", "info")
 
 
+def _tag_readiness(findings) -> list:
+    """Stamp each coded finding with its readiness class, so every tab that
+    lists findings can say "Stops tonight's game / Risk tonight / Worth
+    knowing" exactly as the Dashboard does (app.js _findingTone). The
+    Network and Camera tabs used to print the raw collector severity
+    (CRITICAL/WARNING/INFO), so one finding had two names on two tabs."""
+    for f in findings or []:
+        if isinstance(f, dict) and f.get("code"):
+            f["readinessClass"] = _readiness_class(f["code"])
+    return findings
+
+
 def _disk_used_by_letter(disk_health, performance):
     """Return (cPct, dPct) used-percent for C:/D: from the disk-health
     collection — the same per-volume source the System Disk gauge uses
@@ -3967,7 +3979,7 @@ def _build_network(config, domains, ports, ntp, local=None, ntp_peers=None, dns_
     return {"config": net, "domains": domains, "ports": ports, "ntp": ntp,
             "local": local, "ntpPeers": ntp_peers,
             "dnsResolution": dns_resolution, "wifi": wifi, "tls": tls,
-            "lmiLog": lmi_log, "findings": net_findings}
+            "lmiLog": lmi_log, "findings": _tag_readiness(net_findings)}
 
 
 # ─── Routes ───────────────────────────────────────────────────
@@ -4465,7 +4477,7 @@ async def api_cameras(refresh: bool = False):
     return {
         "ports": ports,
         "pixellotConfig": pix_config,
-        "findings": count_findings + _compute_camera_findings(ports, poe),
+        "findings": _tag_readiness(count_findings + _compute_camera_findings(ports, poe)),
         "systemType": system_type,
         "expectedMainCameras": expected_main,
         # The same count the camera-count finding uses, for the camera-head
