@@ -4974,12 +4974,62 @@ async def api_audio_volume(request: Request):
     return await run_ps("Set-AudioVolume.ps1", {"DeviceId": device_id, "Volume": volume}, use_cache=False)
 
 
+def _scoreboard_source(sc, ocr) -> dict:
+    """Where this VPU gets its score, and whether that source is working.
+
+    A VPU reads the score EITHER with an OCR camera pointed at the board OR
+    from the scoreboard controller through ScoreConnect. Only the one in use
+    matters (Ian, Armstrong IL 2026-09-28: Pulse warned "ScoreConnect not
+    running" on a unit whose OCR camera was connected and doing the job):
+      - OCR configured or detected: fine while the camera is connected,
+        whatever ScoreConnect is doing; an issue when it isn't connected.
+      - no OCR: ScoreConnect (III, or legacy I/II) must be running.
+    `ocr` is _scoreboard_camera_state()'s answer; None means no OCR camera
+    is configured or seen. ocrKnown False means the camera read itself
+    failed, so the OCR half is unknown and ScoreConnect is judged alone."""
+    sc = sc if isinstance(sc, dict) else {}
+    sc_running = bool(not sc.get("error") and (
+        sc.get("reachable") or (sc.get("sc2") or {}).get("reachable")))
+    ocr_known = ocr != "unknown"
+    ocr = ocr if isinstance(ocr, dict) else None
+    if ocr and (ocr.get("configured") or ocr.get("connected")):
+        connected = bool(ocr.get("connected"))
+        return {"source": "ocr", "ok": connected,
+                "issue": None if connected else "ocr-not-connected",
+                "ocrConnected": connected, "ocrPort": ocr.get("port"),
+                "scoreConnectRunning": sc_running, "ocrKnown": True}
+    return {"source": "scoreconnect", "ok": sc_running,
+            "issue": None if sc_running else "scoreconnect-down",
+            "ocrConnected": False, "ocrPort": None,
+            "scoreConnectRunning": sc_running, "ocrKnown": ocr_known}
+
+
 @app.get("/api/scoreconnect")
 async def api_scoreconnect():
     settings = load_settings()
     url = settings.get("scoreConnectUrl", "http://localhost:5000")
     # 15s timeout — SC III REST probes ~2-4s, SC II file-based probe < 2s.
-    return await _run_sc_status(url, timeout=15)
+    # The camera reads ride along (both cached, and the CGI probe is usually
+    # warm from preload) so the page and the splash know whether an OCR
+    # camera makes ScoreConnect optional on this unit.
+    result, nics, pix_config = await asyncio.gather(
+        _run_sc_status(url, timeout=15),
+        run_ps("Get-NicAdapters.ps1"),
+        run_ps("Get-PixellotConfig.ps1"),
+    )
+    ocr = "unknown"
+    try:
+        if nics and not nics.get("error"):
+            ocr_ips, _ = _build_ocr_sets(pix_config)
+            # block=False: cached probes (warm from preload) or default-IP /
+            # cameras.cfg identity; never hold the page on a slow camera.
+            probes = await _probe_all_cameras(nics.get("ports", []), ocr_ips, block=False)
+            ocr = _scoreboard_camera_state(_enrich_ports(nics, pix_config, probes), pix_config)
+    except Exception as e:
+        _server_log.warning("ScoreConnect OCR check failed: %s", e)
+    if isinstance(result, dict):
+        result["scoreboardSource"] = _scoreboard_source(result, ocr)
+    return result
 
 
 @app.get("/api/scoreconnect/history")
