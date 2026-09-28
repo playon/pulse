@@ -22,6 +22,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 
 ## [Unreleased]
 
+### Fixed
+- Pulse no longer says the venue is blocking LogMeIn when LogMeIn is connected. It was reading an old block in LogMeIn's log as a current one, even while a tech was on the unit through LogMeIn.
+
 ## [1.3.2] - 2026-09-25
 
 ### Changed

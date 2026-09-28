@@ -845,10 +845,11 @@ DEMO = {
     # connection" warning (field log 2026-08-28: a VPU dark in LMI ~16 hours),
     # set sslFailures ~201, handshakeFailures ~60, gatewayFailures ~141,
     # attempts ~142, logins 0, firstSslFailure/lastSslFailure spanning the
-    # day, lastLogin None, blockedNow True, recoveredAt None. To DEMO the
-    # recovered/info variant (packet inspection disabled while you watch),
-    # keep the failures but set logins 1, lastLogin/recoveredAt a few minutes
-    # after lastSslFailure, and blockedNow False.
+    # day, lastLogin None, connectedNow False, blockedNow True, recoveredAt
+    # None. To DEMO the recovered/info variant (packet inspection disabled
+    # while you watch), keep the failures but set logins 1,
+    # lastLogin/lastConnected/recoveredAt a few minutes after lastSslFailure,
+    # connectedNow True, and blockedNow False.
     "Get-LmiGatewayLog.ps1": lambda **kw: {
         "installed": True,
         "logsFound": True,
@@ -863,6 +864,13 @@ DEMO = {
         "firstSslFailure": None,
         "lastSslFailure": None,
         "lastLogin": (datetime.now() - timedelta(days=2, hours=5)).strftime("%Y-%m-%d %H:%M:%S"),
+        "lastConnected": (datetime.now() - timedelta(days=2, hours=5)).strftime("%Y-%m-%d %H:%M:%S"),
+        "lastSession": None,
+        "sessionActive": False,
+        "gatewayConnected": True,
+        "connectedNow": True,
+        "minutesSinceSslFailure": None,
+        "staleMinutes": 120,
         "blockedNow": False,
         "recoveredAt": None,
         "gatewayHosts": ["control.lmi-app25-04.logmein.com", "control.lmi-app25-10.logmein.com"],

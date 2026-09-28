@@ -1255,6 +1255,14 @@ class TestLmiGatewayLogFinding(unittest.TestCase):
             [x for x in self._findings(self._lmi(blocked=False))
              if x["code"] == "lmi-ssl-blocked"], [])
 
+    def test_live_connection_overrides_log_history(self):
+        # Armstrong IL 2026-09-28: Pulse said LogMeIn was blocked while the
+        # tech was on the unit through LogMeIn. A live connection wins.
+        live = self._lmi(blocked=True)
+        live["connectedNow"] = True
+        self.assertEqual(
+            [x for x in self._findings(live) if x["code"] == "lmi-ssl-blocked"], [])
+
     def test_clean_log_is_quiet(self):
         clean = self._lmi(blocked=False)
         clean.update({"sslFailures": 0, "handshakeFailures": 0,

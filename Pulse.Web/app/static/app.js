@@ -4235,7 +4235,8 @@ function _lmiLogNote(lmi) {
   if (lmi.sslFailures > 0) {
     return '<p class="text-xs mt-2 status-warn">LogMeIn service log: ' + lmi.sslFailures
       + " secure handshakes were killed between " + esc(lmi.firstSslFailure || "?") + " and " + esc(lmi.lastSslFailure || "?")
-      + ", then it logged in" + (lmi.recoveredAt ? " at " + esc(lmi.recoveredAt) : "")
+      + (lmi.recoveredAt ? ", then it connected at " + esc(lmi.recoveredAt)
+         : lmi.connectedNow ? ", and it is connected now" : ", and none since")
       + " — the venue lifted its block. If remote access drops again, start with the web filter.</p>";
   }
   return '<p class="text-pulse-muted text-xs mt-2">LogMeIn service log: no killed handshakes in the last ' + days + " days.</p>";
@@ -4625,13 +4626,20 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
     if (!lmiLog.blockedNow) {
       issues.push({
         severity: "info",
-        title: "LogMeIn was being blocked on this network until " + (lmiLog.recoveredAt || lmiLog.lastLogin || "recently"),
+        title: "LogMeIn was being blocked on this network until " + (lmiLog.recoveredAt || lmiLog.lastSslFailure || "recently"),
         body: "LogMeIn was blocked here, then connected"
           + (lmiLog.recoveredAt ? " at " + lmiLog.recoveredAt : "")
-          + ", so the venue likely changed its filter. Remote support works now. If this VPU drops out of LogMeIn again, check the venue's web filter first.",
+          + ", so the venue likely changed its filter. "
+          + (lmiLog.connectedNow ? "LogMeIn is connected right now. " : "")
+          + "If this VPU drops out of LogMeIn again, check the venue's web filter first.",
+        // The Armstrong IL false positive (2026-09-28): old kills with no
+        // login line after them read as a live block while the tech was on
+        // the unit through LogMeIn. Say which evidence cleared it.
         evidence: "LogMeIn's own log shows " + lmiLog.sslFailures + " connections cut off between "
           + (lmiLog.firstSslFailure || "?") + " and " + (lmiLog.lastSslFailure || "?")
-          + ", then a successful login.",
+          + (lmiLog.recoveredAt ? ", then a successful connection."
+             : lmiLog.connectedNow ? ". LogMeIn has a live connection now."
+             : ", and none since."),
       });
     }
   }

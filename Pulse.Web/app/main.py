@@ -1877,7 +1877,12 @@ def _lmi_findings(lmi_log) -> list:
     # as it is right now; the log carries the timeline. Field origin: a VPU
     # dark in LMI for 16 hours, 2026-08-28. Only a CURRENT block becomes a
     # finding; a recovered one is history and stays on the Network tab.
-    if not lmi_log or lmi_log.get("error") or not lmi_log.get("blockedNow"):
+    # "Current" is the collector's call: it clears blockedNow when LogMeIn is
+    # connected right now or the failures stopped hours ago (Armstrong IL
+    # 2026-09-28 false positive, see Get-LmiGatewayLog.ps1). connectedNow is
+    # checked here too, so a live connection can never show as a block.
+    if (not lmi_log or lmi_log.get("error") or not lmi_log.get("blockedNow")
+            or lmi_log.get("connectedNow")):
         return []
     n = lmi_log.get("sslFailures") or 0
     since = (lmi_log.get("firstSslFailure") or "")[:10]
