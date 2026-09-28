@@ -1437,6 +1437,9 @@ class TestSupportOnlyTlsFindings(unittest.TestCase):
         self.assertEqual(len(f), 1)
         text = _finding_text(f[0])
         self.assertIn("remote support works", f[0]["recommendation"])
+        # Nothing is broken, so it's a note, not a warning (Ian, 2026-09-28).
+        self.assertEqual(f[0]["severity"], "info")
+        self.assertIn("Remote support still works", f[0]["title"])
         self.assertIn("block page", text)
         self.assertNotIn("can't reach the VPU", text)
 
@@ -1444,6 +1447,7 @@ class TestSupportOnlyTlsFindings(unittest.TestCase):
         tls = self._tls([self._row("secure.logmein.com", "filtered", failureKind="block-page")])
         f = [x for x in self._findings(tls) if x["code"] == "tls-filtered-support"]
         self.assertIn("remote support and installer downloads will fail", f[0]["recommendation"])
+        self.assertEqual(f[0]["severity"], "warning")
 
 
 # Finding codes emitted with severity "critical" by _compute_findings. Kept

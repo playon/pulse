@@ -1791,9 +1791,11 @@ def _tls_findings(tls_inspection, lmi_log=None) -> list:
         issuers = [i for i in (tls_inspection.get("interceptorIssuers") or []) if i]
         who = f", {', '.join(issuers)}," if issuers else ""
         n = len(intercepted)
+        lmi_site_only = lmi_connected and all(
+            "logmein.com" in (r.get("domain") or "") for r in intercepted)
         out.append({
             "code": "ssl-inspection-support",
-            "severity": "warning",
+            "severity": "info" if lmi_site_only else "warning",
             "category": "Network",
             "title": f"The venue firewall is inspecting {n} support service{'s' if n != 1 else ''}",
             "recommendation": (
@@ -1916,18 +1918,28 @@ def _tls_findings(tls_inspection, lmi_log=None) -> list:
                 }
             )
         else:
+            # LogMeIn connected and only its website blocked: nothing is
+            # broken (the website is where techs sign in, not how the VPU is
+            # reached), so it's a note that explains the Secure Connections
+            # row, not a warning. Ian, Armstrong IL 2026-09-28.
+            lmi_site_only = lmi_connected and all(
+                "logmein.com" in (r.get("domain") or "") for r in filtered)
             out.append(
                 {
                     "code": "tls-filtered-support",
-                    "severity": "warning",
+                    "severity": "info" if lmi_site_only else "warning",
                     "category": "Network",
-                    "title": f"{who} is blocking {n} support service{'s' if n != 1 else ''}",
+                    "title": (
+                        f"{who} blocks LogMeIn's website. Remote support still works"
+                        if lmi_site_only else
+                        f"{who} is blocking {n} support service{'s' if n != 1 else ''}"
+                    ),
                     "recommendation": (
                         f"{who_lower} is blocking LogMeIn's website. Tonight's broadcast is "
                         f"unaffected, and LogMeIn on this VPU is connected, so remote support "
                         f"works. If LogMeIn drops off, ask venue IT to add a category exception "
                         f"for it."
-                        if lmi_connected and all("logmein.com" in (r.get("domain") or "") for r in filtered)
+                        if lmi_site_only
                         else
                         f"{who_lower} is blocking the support services below. Tonight's "
                         f"broadcast is unaffected, but remote support and installer downloads "
