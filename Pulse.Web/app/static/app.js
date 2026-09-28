@@ -590,6 +590,7 @@ const SPLASH_SOURCE_ROW = {
   "System identity": "system", "Performance": "system", "Hardware": "system",
   "Installed software": "system", "Services": "services",
   "Network adapters": "cameras", "Network config": "network", "Port connectivity": "network",
+  "Graphics delivery": "pixellot-config",
 };
 function _splashSourceGaps() {
   const d = _splash.dash;
@@ -640,6 +641,7 @@ const SPLASH_SCRIPT_LABELS = {
   "Test-NtpDrift.ps1": "Measuring clock drift",
   "Get-NtpPeers.ps1": "Reading time sync sources",
   "Get-LmiGatewayLog.ps1": "Reading the LogMeIn connection log",
+  "Get-GraphicsDelivery.ps1": "Checking recent games for missing graphics",
   "Get-CameraExpectations.ps1": "Reading the expected camera layout",
   "Get-PoePower.ps1": "Measuring PoE power per port",
   "Get-S1Cameras.ps1": "Detecting cameras",

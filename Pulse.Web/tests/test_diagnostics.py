@@ -1287,6 +1287,92 @@ class TestLmiGatewayLogFinding(unittest.TestCase):
         self.assertEqual(verdict["status"], "PASS")
 
 
+# ── Graphics delivery (Get-GraphicsDelivery) ─────────────────────────
+# Counts are the field bundles: MacLaren CO 2026-09-23 (127/127 hand-offs to
+# VPU.exe timed out, none delivered, VPU.exe received none) and the healthy
+# Tanque Verde control (one cold-start timeout, then steady deliveries).
+class TestGraphicsDeliveryFinding(unittest.TestCase):
+    BAD = {"eventId": "6a983c489175897b10f5097f", "firstSeen": "2026-09-23T15:49:41",
+           "lastSeen": "2026-09-23T17:55:07", "delivered": 0, "deadlineFails": 127,
+           "unavailableFails": 0, "otherFails": 0, "maxAttempt": 127, "vpuReceived": 0}
+    GOOD = {"eventId": "5fb394c2aaaaaaaaaaaaaaaa", "firstSeen": "2026-09-08T18:00:00",
+            "lastSeen": "2026-09-08T20:00:00", "delivered": 413, "deadlineFails": 1,
+            "unavailableFails": 0, "otherFails": 0, "maxAttempt": 1, "vpuReceived": 414}
+
+    def _gd(self, events, **kw):
+        gd = {"logsFound": True, "events": events,
+              "config": {"graphicEngineType": "CGENGINE"},
+              "engineDisabled": {"lines": 0}}
+        gd.update(kw)
+        return gd
+
+    def _codes(self, gd):
+        return [f for f in main._compute_findings(
+            identity={}, performance={}, services={}, nics={}, graphics_delivery=gd)
+            if f["code"].startswith("graphics-")]
+
+    def test_latest_event_failed_is_critical(self):
+        f = self._codes(self._gd([self.GOOD, self.BAD]))
+        self.assertEqual([x["code"] for x in f], ["graphics-handoff-failed"])
+        self.assertEqual(f[0]["severity"], "critical")
+        self.assertIn("1 of the last 2", f[0]["title"])
+        self.assertIn("127 failed hand-offs", _finding_text(f[0]))
+        self.assertIn("never received", _finding_text(f[0]))
+
+    def test_earlier_failure_latest_fine_is_warning(self):
+        good_later = dict(self.GOOD, eventId="6b0000000000000000000001",
+                          lastSeen="2026-09-25T20:00:00")
+        f = self._codes(self._gd([self.BAD, good_later]))
+        self.assertEqual(f[0]["severity"], "warning")
+
+    def test_one_cold_start_timeout_is_normal(self):
+        self.assertEqual(self._codes(self._gd([self.GOOD])), [])
+
+    def test_startup_refusals_are_not_the_bug(self):
+        # Connection refused before VPU.exe is up, then deliveries: healthy.
+        race = dict(self.GOOD, deadlineFails=0, unavailableFails=40)
+        self.assertEqual(self._codes(self._gd([race])), [])
+        # Refusals only, never delivered: VPU.exe never came up. Not this
+        # finding (the stream itself is the problem there).
+        down = dict(race, delivered=0, vpuReceived=0)
+        self.assertEqual(self._codes(self._gd([down])), [])
+
+    def test_too_few_attempts_is_inconclusive(self):
+        short = dict(self.BAD, deadlineFails=3, maxAttempt=3)
+        self.assertEqual(self._codes(self._gd([short])), [])
+
+    def test_idle_box_and_dead_collector_are_quiet(self):
+        self.assertEqual(self._codes(self._gd([])), [])
+        self.assertEqual(self._codes({"logsFound": False}), [])
+        self.assertEqual(self._codes({"error": True, "message": "boom"}), [])
+
+    def test_engine_none_selected_warns_while_still_set(self):
+        dis = {"lines": 120, "first": "2026-08-17 19:02:00", "last": "2026-08-17 19:32:00",
+               "lastSetScoreboardType": None, "lastSetAt": None}
+        f = self._codes(self._gd([], config={"graphicEngineType": "NONE_SELECTED"},
+                                 engineDisabled=dis))
+        self.assertEqual([x["code"] for x in f], ["graphics-engine-none"])
+        # Fixed since: an engine is selected now, or was set after the last
+        # graphics-off line.
+        self.assertEqual(self._codes(self._gd([], config={"graphicEngineType": "CGENGINE"},
+                                              engineDisabled=dis)), [])
+        fixed = dict(dis, lastSetScoreboardType="CGENGINE", lastSetAt="2026-08-17 19:33:00")
+        self.assertEqual(self._codes(self._gd([], config={"graphicEngineType": "NONE_SELECTED"},
+                                              engineDisabled=fixed)), [])
+
+    def test_none_selected_config_alone_is_quiet(self):
+        # VPU2's bench config is NONE_SELECTED; only its daily test ran, and
+        # the test's own graphics-off line isn't counted.
+        self.assertEqual(self._codes(self._gd([], config={"graphicEngineType": "NONE_SELECTED"})), [])
+
+    def test_graphics_findings_warn_not_fail_readiness(self):
+        for code in ("graphics-handoff-failed", "graphics-engine-none"):
+            verdict = main._compute_readiness(
+                [{"code": code, "severity": "critical", "category": "Pixellot",
+                  "title": "t", "recommendation": "r"}])
+            self.assertEqual(verdict["status"], "WARN", code)
+
+
 # Finding codes emitted with severity "critical" by _compute_findings. Kept
 # explicit rather than scraped so adding a critical is a deliberate two-line
 # change: emit it, then classify it.
@@ -1309,6 +1395,7 @@ _CRITICAL_FINDING_CODES = {
     "temp-critical",
     "tz-non-us",
     "uplink-on-camera-port",
+    "graphics-handoff-failed",
     # port-dns-blocked / port-required-blocked share one emit site.
     "port-dns-blocked",
     "port-required-blocked",

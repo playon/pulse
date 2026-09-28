@@ -1912,7 +1912,121 @@ def _lmi_findings(lmi_log) -> list:
     }]
 
 
-def _compute_findings(identity, performance, services, nics, hardware=None, installed_sw=None, network_config=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, probe_results=None, tls_inspection=None, lmi_log=None) -> list:
+# ── Graphics delivery (Get-GraphicsDelivery) ──────────────────────────────
+# Pulse's network checks can't see a scorebug that never reaches the video:
+# the hand-off from GraphicsManager to VPU.exe is localhost gRPC, so a unit
+# can air a whole game with no graphics and pass every check (Tanque Verde AZ
+# 2026-09-14, Thomas MacLaren CO 2026-09-23, Armstrong IL 2026-09-28, all
+# 5.37.x). The collector counts, per event, the hand-offs that succeeded and
+# the ones that failed; the verdict lives here so it can be tested.
+GRAPHICS_FAILED_MIN_TIMEOUTS = 5  # one per event is normal (CEF ~6s vs a 5s deadline)
+
+
+def _graphics_event_status(ev) -> str:
+    """delivered | failed | vpu-unreachable | inconclusive for one event."""
+    if (ev.get("delivered") or 0) > 0:
+        return "delivered"
+    timeouts = (ev.get("deadlineFails") or 0) + (ev.get("otherFails") or 0)
+    if timeouts >= GRAPHICS_FAILED_MIN_TIMEOUTS:
+        return "failed"
+    # Connection refused on VPU.exe's port and nothing else: GraphicsManager
+    # retrying before VPU.exe came up. Sustained, VPU.exe never started for
+    # the event, which is a different fault (the stream itself is at risk)
+    # that the service and event lanes own.
+    if (ev.get("unavailableFails") or 0) >= GRAPHICS_FAILED_MIN_TIMEOUTS:
+        return "vpu-unreachable"
+    return "inconclusive"
+
+
+def _gm_local_time(ts) -> str:
+    """GraphicsManager stamps UTC ("2026-09-23T17:42:02"); show VPU local."""
+    try:
+        from datetime import datetime, timezone
+        t = datetime.strptime((ts or "")[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        return t.astimezone().strftime("%a %b %d %H:%M")
+    except (TypeError, ValueError):
+        return ts or "?"
+
+
+def _graphics_findings(gd) -> list:
+    if not gd or gd.get("error") or not gd.get("logsFound"):
+        return []
+    out = []
+
+    events = [e for e in (gd.get("events") or []) if e.get("eventId") not in (None, "", "unknown")]
+    judged = [dict(e, status=_graphics_event_status(e)) for e in events]
+    judged = [e for e in judged if e["status"] in ("delivered", "failed")]
+    judged.sort(key=lambda e: e.get("lastSeen") or "", reverse=True)
+    failed = [e for e in judged if e["status"] == "failed"]
+    if failed:
+        latest_failed = judged[0]["status"] == "failed"
+        n, m = len(failed), len(judged)
+        title = (
+            f"Graphics didn't reach the broadcast on {n} of the last {m} event{'s' if m != 1 else ''}, "
+            "so those games streamed with no scorebug"
+            if latest_failed else
+            f"Graphics failed on {n} of the last {m} events, so some games streamed with no scorebug"
+        )
+        received = [e.get("vpuReceived") for e in failed]
+        out.append({
+            "code": "graphics-handoff-failed",
+            "severity": "critical" if latest_failed else "warning",
+            "category": "Pixellot",
+            "title": title,
+            "recommendation": (
+                "The Pixellot software on this VPU isn't passing the scorebug to the video, so "
+                "games go out with no graphics even though the scoreboard and the network are "
+                "fine. Nothing at the school needs to change. Support: reset graphics or restart "
+                "the Pixellot software during the next event, and if it keeps happening, roll the "
+                "VPU back to the previous Pixellot version."
+            ),
+            "evidence": (
+                "GraphicsManager's log (C:\\Pixellot\\Data\\Log) shows every attempt to hand the "
+                "graphics to VPU.exe timing out, with no successful hand-off, for each event below"
+                + ("; VPU.exe's own log shows it never received them" if all(r == 0 for r in received) else "")
+                + ". The hand-off never leaves the VPU, so the venue network can't cause it. One "
+                "failed try per event is normal."
+            ),
+            "details": [
+                f"{_gm_local_time(e.get('firstSeen'))}: "
+                f"{(e.get('deadlineFails') or 0) + (e.get('otherFails') or 0)} failed hand-offs, none delivered "
+                f"(event {e.get('eventId')})"
+                for e in failed
+            ],
+        })
+
+    # The agent switches graphics off for an event when no scoreboard engine
+    # is selected (Merrol Hyde, 2026-08-17): GraphicsManager is never even
+    # told about the event. The daily test logs its own graphics-off line,
+    # which the collector doesn't count. Only while the setting is still
+    # NONE_SELECTED: choosing an engine fixes it within seconds, mid-game.
+    dis = gd.get("engineDisabled") or {}
+    engine = ((gd.get("config") or {}).get("graphicEngineType") or "").upper()
+    fixed_after = dis.get("lastSetAt") and dis.get("last") and dis["lastSetAt"] > dis["last"]
+    if (dis.get("lines") or 0) > 0 and engine in ("", "NONE_SELECTED") and not fixed_after:
+        out.append({
+            "code": "graphics-engine-none",
+            "severity": "warning",
+            "category": "Pixellot",
+            "title": "No scoreboard type is selected on this VPU, so it turns graphics off for every game",
+            "recommendation": (
+                "The VPU has no scoreboard type selected, so it switches graphics off when each "
+                "game starts and the stream goes out with no scorebug. Support: set the scoreboard "
+                "type (CG engine) on the VPU and save. Graphics come on within seconds, even "
+                "mid-game."
+            ),
+            "evidence": (
+                f"The Pixellot agent log shows graphics switched off for a real event "
+                f"{dis.get('lines')} times between {dis.get('first') or '?'} and {dis.get('last') or '?'} "
+                "because the scoreboard type is NONE_SELECTED"
+                + (", and agentsetup.cfg still has GraphicEngineType = NONE_SELECTED." if engine
+                   else ".")
+            ),
+        })
+    return out
+
+
+def _compute_findings(identity, performance, services, nics, hardware=None, installed_sw=None, network_config=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None) -> list:
     findings = []
 
     # None vs {} matters for probe_results: None means the caller never
@@ -2561,6 +2675,9 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
     findings.extend(_tls_findings(tls_inspection))
     findings.extend(_lmi_findings(lmi_log))
 
+    # ── Scorebug never reached the broadcast (on-box, not network) ──
+    findings.extend(_graphics_findings(graphics_delivery))
+
     # ── Missing / under-count main cameras ─────────────────────
     # One helper for the Dashboard, readiness, the ticket and Camera
     # Connectivity; see _camera_count_findings.
@@ -2670,6 +2787,15 @@ _READINESS_POLICY = {
     "ram-insufficient":      "risk",     # F21 <32 GB host
     "ntp-unapproved":        "risk",     # F22 drift can break signed-URL stream
     "wifi-uplink":           "risk",     # F24 Wi-Fi uplink — latency/loss
+    "graphics-handoff-failed": "risk",   # F40 scorebug never reached VPU.exe on recent
+                                         #     events (Pixellot 5.37.x on-box fault).
+                                         #     The game still airs, without graphics,
+                                         #     and it recurs, so WARN. Field: Tanque
+                                         #     Verde, MacLaren, Armstrong IL (2026-09).
+    "graphics-engine-none":  "risk",     # F41 agent turns graphics off because no
+                                         #     scoreboard type is selected. Airs clean
+                                         #     of graphics every game until fixed.
+                                         #     Field: Merrol Hyde, 2026-08-17.
     # F14 temp≥90, F15b D:>90, F17 CPU sustained, F19 mem sustained are computed
     # below (readiness-specific thresholds the dashboard findings don't surface).
 
@@ -3624,7 +3750,7 @@ def _compute_camera_findings(ports: list, poe=None) -> list:
 # ─── Data-building helpers (shared by per-page and preload) ──
 
 
-def _build_dashboard(identity, performance, services, nics, network_config=None, hardware=None, installed_sw=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, perf_sample=None, probe_results=None, tls_inspection=None, lmi_log=None):
+def _build_dashboard(identity, performance, services, nics, network_config=None, hardware=None, installed_sw=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, perf_sample=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None):
     # Tag adapter roles (motherboard / camera / wifi) so both the findings and
     # the embedded "Network config" the dashboard ships carry them.
     _classify_network_adapters(network_config)
@@ -3680,13 +3806,14 @@ def _build_dashboard(identity, performance, services, nics, network_config=None,
         "Hardware": hardware,
         "Installed software": installed_sw,
         "Port connectivity": port_tests,
+        "Graphics delivery": graphics_delivery,
     }
     source_errors = [
         name for name, data in _sources.items()
         if isinstance(data, dict) and data.get("error")
     ]
 
-    findings = _compute_findings(identity, performance, services, nics, hardware, installed_sw, network_config, install_state, port_tests, gpu_info, wifi, pixellot_config=pixellot_config, expectations=expectations, disk_health=disk_health, probe_results=probe_results, tls_inspection=tls_inspection, lmi_log=lmi_log)
+    findings = _compute_findings(identity, performance, services, nics, hardware, installed_sw, network_config, install_state, port_tests, gpu_info, wifi, pixellot_config=pixellot_config, expectations=expectations, disk_health=disk_health, probe_results=probe_results, tls_inspection=tls_inspection, lmi_log=lmi_log, graphics_delivery=graphics_delivery)
 
     return {
         "identity": flat_identity,
@@ -3848,7 +3975,7 @@ async def _collect_dashboard() -> dict:
     launch check-in beacon so both score readiness with identical inputs."""
     (identity, performance, services, nics, net_config, hardware, installed_sw,
      install_state, port_tests, gpu_info, wifi, pixellot_config, expectations,
-     disk_health, perf_sample, tls_inspection, lmi_log) = await asyncio.gather(
+     disk_health, perf_sample, tls_inspection, lmi_log, graphics_delivery) = await asyncio.gather(
         run_ps("Get-SystemIdentity.ps1"),
         run_ps("Get-Performance.ps1"),
         run_ps("Get-Services.ps1"),
@@ -3880,6 +4007,10 @@ async def _collect_dashboard() -> dict:
         # LogMeIn's own service log — the historical half of the middlebox
         # story (feeds the "venue is killing LogMeIn's connection" warning).
         run_ps("Get-LmiGatewayLog.ps1", timeout=20),
+        # GraphicsManager / VPU / agent logs from the last week of events:
+        # did the scorebug ever reach the video? ~1s on VPU2; the collector
+        # stops itself at 25s and says so.
+        run_ps("Get-GraphicsDelivery.ps1", timeout=40),
     )
     # CGI probe (cached 30s; usually already warm from preload) so the
     # slow-port finding identifies the OCR by its actual camera model, not a
@@ -3918,7 +4049,7 @@ async def _collect_dashboard() -> dict:
         pixellot_config=pixellot_config, expectations=expectations,
         disk_health=disk_health, perf_sample=perf_sample,
         probe_results=probe_results, tls_inspection=tls_inspection,
-        lmi_log=lmi_log,
+        lmi_log=lmi_log, graphics_delivery=graphics_delivery,
     )
 
 
