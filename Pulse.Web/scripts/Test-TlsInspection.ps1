@@ -35,7 +35,9 @@ $FilterVendorPatterns = @(
     @{ pattern = 'lightspeedsystems|lightspeed';           name = 'Lightspeed Systems' }
     @{ pattern = 'goguardian';                             name = 'GoGuardian' }
     @{ pattern = 'contentkeeper';                          name = 'ContentKeeper' }
-    @{ pattern = 'fortiguard|fortinet|fortigate';          name = 'FortiGuard (Fortinet)' }
+    # "Web Filter Violation" is the FortiGate replacement page's <title>; the
+    # FortiGuard wording sits far down a page of inline CSS (Armstrong IL).
+    @{ pattern = 'fortiguard|fortinet|fortigate|web filter violation'; name = 'FortiGuard (Fortinet)' }
     @{ pattern = 'paloaltonetworks';                       name = 'Palo Alto Networks' }
     @{ pattern = 'umbrella|opendns';                       name = 'Cisco Umbrella (OpenDNS)' }
     @{ pattern = 'meraki';                                 name = 'Cisco Meraki' }
@@ -98,8 +100,11 @@ function Get-FilterBlockSignal {
         $stream = $resp.GetResponseStream()
         if ($stream) {
             $reader = New-Object System.IO.StreamReader($stream)
-            $buffer = New-Object char[] 4000
-            $read = $reader.Read($buffer, 0, 4000)
+            # ReadBlock, not Read: one Read returns only the first chunk that
+            # arrived, which on a FortiGate block page is all CSS. The 2.5s
+            # ReadWriteTimeout still bounds a hung connection.
+            $buffer = New-Object char[] 65536
+            $read = $reader.ReadBlock($buffer, 0, 65536)
             if ($read -gt 0) { $body = -join $buffer[0..($read - 1)] }
         }
 
@@ -367,6 +372,14 @@ try {
         if ($probedIntercepted -ge 3) { break }
         $probedIntercepted++
         $signal = Get-FilterBlockSignal -Domain $row.domain
+        # The vendor can come from the block page itself or from the cert the
+        # middlebox minted for this host (issuer O=Fortinet at Armstrong).
+        if (-not $signal.filterVendor) {
+            $issuerText = ("$($row.issuer) $($row.issuerOrg)").ToLower()
+            foreach ($v in $FilterVendorPatterns) {
+                if ($issuerText -match $v.pattern) { $signal.filterVendor = $v.name; break }
+            }
+        }
         $isBlockPage = $signal.filterVendor -and ($signal.blockPageHost -or ($signal.httpStatus -ge 400))
         if ($isBlockPage) {
             $row.status        = 'filtered'

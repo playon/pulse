@@ -1528,6 +1528,10 @@ def _uplink_findings(network_config, wifi) -> list:
             a for a in (wifi.get("adapters") or [])
             if a.get("isUp") and a.get("hasDefaultRoute") and not a.get("isVirtual")
         ]
+        # A cable can be in the network port and still unused: Armstrong IL
+        # (2026-09-28) had the motherboard port up on 192.168.10.x while
+        # Windows sent everything over the faculty Wi-Fi.
+        wired = [w for w in (wifi.get("wiredDefaultRoutes") or []) if w]
         out.append(
             {
                 "code": "wifi-uplink",
@@ -1535,14 +1539,27 @@ def _uplink_findings(network_config, wifi) -> list:
                 "category": "Network",
                 "title": "VPU is using Wi-Fi for its internet connection. Switch to wired Ethernet",
                 "recommendation": (
-                    "The VPU is reaching the internet over Wi-Fi, which adds lag and dropouts "
-                    "during a stream. Plug the motherboard network port into the venue network. "
-                    "Wi-Fi is only for the Pixellot Connect app."
+                    (
+                        "The VPU is reaching the internet over Wi-Fi, which adds lag and dropouts "
+                        "during a stream, even though a cable is connected to its network port. "
+                        "Get that cable onto the venue's internet network, and once it works, "
+                        "disconnect the VPU from the venue Wi-Fi. Wi-Fi is only for the Pixellot "
+                        "Connect app."
+                    ) if wired else (
+                        "The VPU is reaching the internet over Wi-Fi, which adds lag and dropouts "
+                        "during a stream. Plug the motherboard network port into the venue network. "
+                        "Wi-Fi is only for the Pixellot Connect app."
+                    )
                 ),
                 "details": [
                     (a.get("interfaceDescription") or a.get("name") or "Wi-Fi")
                     + (f", SSID {a.get('ssid')}" if a.get("ssid") else "")
                     for a in uplink_wifi
+                ] + [
+                    f"{w.get('name') or 'Wired port'} ({w.get('interfaceDescription') or 'Ethernet'}) "
+                    f"is connected{', gateway ' + w['nextHop'] if w.get('nextHop') else ''}, "
+                    "but Windows isn't using it for internet."
+                    for w in wired
                 ],
             }
         )
@@ -1994,11 +2011,12 @@ def _graphics_event_status(ev) -> str:
 
 
 def _gm_local_time(ts) -> str:
-    """GraphicsManager stamps UTC ("2026-09-23T17:42:02"); show VPU local."""
+    """GraphicsManager stamps "2026-09-23T17:42:02...z". The z is a lie: it
+    is VPU local time (Armstrong IL matched its agent log and the Slack
+    timeline to the minute only read as local), so format it, don't shift."""
     try:
-        from datetime import datetime, timezone
-        t = datetime.strptime((ts or "")[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
-        return t.astimezone().strftime("%a %b %d %H:%M")
+        from datetime import datetime
+        return datetime.strptime((ts or "")[:19], "%Y-%m-%dT%H:%M:%S").strftime("%a %b %d %H:%M")
     except (TypeError, ValueError):
         return ts or "?"
 
@@ -2034,6 +2052,14 @@ def _graphics_findings(gd) -> list:
                 "fine. Nothing at the school needs to change. Support: reset graphics or restart "
                 "the Pixellot software during the next event, and if it keeps happening, roll the "
                 "VPU back to the previous Pixellot version."
+                if latest_failed else
+                # Armstrong IL: four games without graphics, then the retest
+                # after the rollback delivered.
+                "The Pixellot software on this VPU didn't pass the scorebug to the video on the "
+                "games below, so they streamed with no graphics. The most recent game had "
+                "graphics. If the scorebug goes missing again, reset graphics or restart the "
+                "Pixellot software during the event, or roll the VPU back to the previous "
+                "Pixellot version."
             ),
             "evidence": (
                 "GraphicsManager's log (C:\\Pixellot\\Data\\Log) shows every attempt to hand the "

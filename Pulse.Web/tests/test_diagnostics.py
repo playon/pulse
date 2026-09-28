@@ -1325,6 +1325,27 @@ class TestGraphicsDeliveryFinding(unittest.TestCase):
         f = self._codes(self._gd([self.BAD, good_later]))
         self.assertEqual(f[0]["severity"], "warning")
 
+    def test_armstrong_payload(self):
+        # Armstrong IL, 2026-09-28, verbatim counts: four events with zero
+        # hand-offs, then the retest after the rollback delivered 52.
+        ev = lambda i, first, d, f: {"eventId": i, "firstSeen": first, "lastSeen": first,
+                                     "delivered": d, "deadlineFails": f, "unavailableFails": 0,
+                                     "otherFails": 0, "maxAttempt": f, "vpuReceived": d}
+        events = [ev("6ababbc449aa737eb0da963b", "2026-09-28T14:11:29", 52, 40),
+                  ev("6abab3d14f50111eeaea77b3", "2026-09-28T13:37:30", 0, 17),
+                  ev("6abaa5405ba3a09f72a70568", "2026-09-28T12:35:21", 0, 37),
+                  ev("6a7d2200271c403aec9c4a3a", "2026-09-24T17:49:56", 0, 180),
+                  ev("6a7d21c36ecc42b7e65134c1", "2026-09-21T17:49:31", 0, 181)]
+        f = self._codes(self._gd(events, config={"graphicEngineType": "NONE_SELECTED"},
+                                 engineDisabled={"lines": 0, "lastSetScoreboardType": "CGENGINE",
+                                                 "lastSetAt": "2026-09-28 12:33:30"}))
+        self.assertEqual([x["code"] for x in f], ["graphics-handoff-failed"])
+        self.assertEqual(f[0]["severity"], "warning")
+        self.assertIn("4 of the last 5", f[0]["title"])
+        self.assertIn("most recent game had graphics", f[0]["recommendation"])
+        # Local time, not shifted: Jesse's test started 13:37 CDT.
+        self.assertIn("Mon Sep 28 13:37", _finding_text(f[0]))
+
     def test_one_cold_start_timeout_is_normal(self):
         self.assertEqual(self._codes(self._gd([self.GOOD])), [])
 

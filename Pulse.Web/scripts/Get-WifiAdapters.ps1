@@ -84,13 +84,21 @@ try {
         catch { }
     }
 
-    # Does a wired adapter hold the default route? If so, Wi-Fi (even if up)
-    # is not the primary internet path and we should not warn.
+    # Does a wired adapter hold a default route? Only the fallback when the
+    # route lookup above fails. The rows go to the Wi-Fi finding, so it can
+    # say a cable IS connected but unused (Armstrong: I219-LM up with a
+    # 192.168.10.x gateway on metric 256 while Wi-Fi carried the internet).
     $ethernetHasDefaultRoute = $false
+    $wiredRoutes = New-Object 'System.Collections.Generic.List[object]'
+    $routeRows = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue)
     foreach ($a in $allAdapters) {
         if ($a.Status -eq 'Up' -and -not (Test-IsWifi $a) -and ($defaultRouteIdx -contains $a.ifIndex)) {
             $ethernetHasDefaultRoute = $true
-            break
+            $hop = @($routeRows | Where-Object { $_.ifIndex -eq $a.ifIndex } | Select-Object -ExpandProperty NextHop)[0]
+            $wiredRoutes.Add([pscustomobject]@{
+                ifIndex = $a.ifIndex; name = $a.Name
+                interfaceDescription = $a.InterfaceDescription; nextHop = $hop
+            })
         }
     }
 
@@ -161,6 +169,7 @@ try {
         anyActive               = ($activeCount -gt 0)
         activeCount             = $activeCount
         ethernetHasDefaultRoute = [bool]$ethernetHasDefaultRoute
+        wiredDefaultRoutes      = $wiredRoutes.ToArray()
         uplinkIsWifi            = [bool]$uplinkIsWifi
         uplinkIfIndex           = $uplinkIdx
         uplinkSource            = $uplinkSource

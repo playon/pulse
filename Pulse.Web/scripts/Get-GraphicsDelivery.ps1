@@ -43,8 +43,11 @@
     scoreProvider.txt" (every healthy boot) and "Recieved graphics engine
     type from CG: []" (healthy control too).
 
-    Read-only. Outputs JSON to stdout. Timestamps: GraphicsManager logs UTC
-    ("...z"), VPU and agent logs local time; both are emitted as logged.
+    Read-only. Outputs JSON to stdout. Timestamps are emitted as logged, and
+    all three logs are VPU local time. GraphicsManager's carry a trailing "z"
+    but are NOT UTC: at Armstrong IL (CDT) its event windows matched the
+    agent's local SetScoreboardType line and the Slack timeline to the
+    minute only when read as local.
 #>
 [CmdletBinding()]
 param(
