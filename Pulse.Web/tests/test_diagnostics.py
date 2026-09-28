@@ -1373,6 +1373,58 @@ class TestGraphicsDeliveryFinding(unittest.TestCase):
             self.assertEqual(verdict["status"], "WARN", code)
 
 
+# ── Armstrong IL (2026-09-28): FortiGate blocking LogMeIn's website ──────
+# The FortiGate answered secure.logmein.com with a 2-day cert of its own
+# (issuer FG200FT922937326) to show its FortiGuard "Remote Access" block
+# page, and port 80 returned that page as a 403. Every broadcast host had a
+# genuine cert, and the tech was on the unit over LogMeIn the whole time.
+class TestSupportOnlyTlsFindings(unittest.TestCase):
+    def _row(self, domain, status, **kw):
+        r = {"domain": domain, "status": status}
+        r.update(kw)
+        return r
+
+    def _tls(self, rows, issuers=None):
+        return {"results": rows, "interceptorIssuers": issuers or [], "filterVendors": []}
+
+    def _findings(self, tls, lmi=None):
+        return main._compute_findings(identity={}, performance={}, services={}, nics={},
+                                      tls_inspection=tls, lmi_log=lmi)
+
+    def test_support_only_interception_is_not_a_blocker(self):
+        tls = self._tls([self._row("singular.live", "pass"),
+                         self._row("secure.logmein.com", "intercepted", issuerCn="FG200FT922937326")],
+                        ["FG200FT922937326 (Fortinet)"])
+        codes = [f["code"] for f in self._findings(tls)]
+        self.assertIn("ssl-inspection-support", codes)
+        self.assertNotIn("ssl-inspection", codes)
+        self.assertEqual(main._readiness_class("ssl-inspection-support"), "info")
+
+    def test_broadcast_interception_still_blocks(self):
+        tls = self._tls([self._row("api.singular.live", "intercepted"),
+                         self._row("secure.logmein.com", "intercepted")])
+        codes = [f["code"] for f in self._findings(tls)]
+        self.assertIn("ssl-inspection", codes)
+        self.assertNotIn("ssl-inspection-support", codes)
+
+    def test_block_page_with_lmi_connected_says_support_works(self):
+        tls = self._tls([self._row("secure.logmein.com", "filtered", failureKind="block-page",
+                                   filterVendor="FortiGuard (Fortinet)")])
+        tls["filterVendors"] = ["FortiGuard (Fortinet)"]
+        f = [x for x in self._findings(tls, {"connectedNow": True, "logsFound": True})
+             if x["code"] == "tls-filtered-support"]
+        self.assertEqual(len(f), 1)
+        text = _finding_text(f[0])
+        self.assertIn("remote support works", f[0]["recommendation"])
+        self.assertIn("block page", text)
+        self.assertNotIn("can't reach the VPU", text)
+
+    def test_block_page_without_live_lmi_keeps_the_warning(self):
+        tls = self._tls([self._row("secure.logmein.com", "filtered", failureKind="block-page")])
+        f = [x for x in self._findings(tls) if x["code"] == "tls-filtered-support"]
+        self.assertIn("remote support and installer downloads will fail", f[0]["recommendation"])
+
+
 # Finding codes emitted with severity "critical" by _compute_findings. Kept
 # explicit rather than scraped so adding a critical is a deliberate two-line
 # change: emit it, then classify it.

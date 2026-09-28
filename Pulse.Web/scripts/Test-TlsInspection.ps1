@@ -69,7 +69,7 @@ function Get-FilterBlockSignal {
     #>
     param([string]$Domain)
 
-    $signal = [ordered]@{ blockPageHost = $null; blockPageUrl = $null; filterVendor = $null }
+    $signal = [ordered]@{ blockPageHost = $null; blockPageUrl = $null; filterVendor = $null; httpStatus = $null }
     $resp = $null
     $reader = $null
 
@@ -88,6 +88,7 @@ function Get-FilterBlockSignal {
             if ($_.Exception.Response) { $resp = $_.Exception.Response } else { throw }
         }
 
+        try { $signal.httpStatus = [int]$resp.StatusCode } catch { }
         $location = [string]$resp.Headers['Location']
         $server   = [string]$resp.Headers['Server']
 
@@ -347,6 +348,33 @@ try {
         $row.blockPageHost = $signal.blockPageHost
         $row.blockPageUrl  = $signal.blockPageUrl
         $row.filterVendor  = $signal.filterVendor
+    }
+
+    # ---- A block page served over HTTPS is a category block ------------
+    # Some filters block a category by answering the handshake with a cert
+    # they mint themselves, only so the browser can show the block page. That
+    # reads as 'intercepted', but nothing is being decrypted and the fix is a
+    # category exception, not an SSL-decryption exemption. Field: Armstrong IL
+    # 2026-09-28 - the FortiGate served a 2-day cert for secure.logmein.com
+    # (FortiGuard category "Remote Access", 403 block page on port 80) while
+    # every other host carried a genuine public cert. Tell them apart the same
+    # way as above: plain HTTP to the host returns the vendor's block page (a
+    # 4xx, or a redirect to another host), where a decrypting-but-allowing
+    # middlebox passes port 80 through to the real site.
+    $interceptedRows = @($results | Where-Object { $_.status -eq 'intercepted' })
+    $probedIntercepted = 0
+    foreach ($row in $interceptedRows) {
+        if ($probedIntercepted -ge 3) { break }
+        $probedIntercepted++
+        $signal = Get-FilterBlockSignal -Domain $row.domain
+        $isBlockPage = $signal.filterVendor -and ($signal.blockPageHost -or ($signal.httpStatus -ge 400))
+        if ($isBlockPage) {
+            $row.status        = 'filtered'
+            $row.failureKind   = 'block-page'
+            $row.blockPageHost = $signal.blockPageHost
+            $row.blockPageUrl  = $signal.blockPageUrl
+            $row.filterVendor  = $signal.filterVendor
+        }
     }
 
     # Distinct vendor identities, same role as interceptorIssuers: give the

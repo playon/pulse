@@ -1510,8 +1510,8 @@ def _attach_impact(ports, domains, tls):
 # client-side from the raw rows and never reaches the Dashboard or the ticket.
 NET_CARD_FINDING_CODES = (
     "wifi-uplink", "uplink-on-camera-port", "wifi-disabled",
-    "ssl-inspection", "tls-filtered", "tls-filtered-support", "lmi-ssl-blocked",
-    "stream-blocked", "stream-degraded-rtmp", "stream-resiliency-reduced",
+    "ssl-inspection", "ssl-inspection-support", "tls-filtered", "tls-filtered-support",
+    "lmi-ssl-blocked", "stream-blocked", "stream-degraded-rtmp", "stream-resiliency-reduced",
 )
 
 
@@ -1730,11 +1730,30 @@ def _port_findings(port_tests) -> list:
     return out
 
 
-def _tls_findings(tls_inspection) -> list:
+def _lmi_connected_now(lmi_log) -> bool:
+    """LogMeIn has a live gateway connection or remote session right now
+    (Get-LmiGatewayLog connectedNow). Proof that remote support works,
+    whatever the probe to LogMeIn's website says."""
+    return bool(lmi_log and not lmi_log.get("error") and lmi_log.get("connectedNow"))
+
+
+def _tls_support_detail(r, lmi_connected, fallback) -> str:
+    # secure.logmein.com is LogMeIn's website, where techs sign in. The VPU
+    # stays reachable through control.lmi-app*.logmein.com instead, so while
+    # LogMeIn is connected a blocked website does not cut off support
+    # (Armstrong IL, 2026-09-28: tech on the unit over LMI, website blocked).
+    d = r.get("domain") or "?"
+    if lmi_connected and "logmein.com" in d:
+        return f"{d}: LogMeIn's website is blocked. LogMeIn on this VPU is connected, so remote support works."
+    return f"{d}: {TLS_DOMAIN_IMPACT.get(r.get('domain'), fallback)}"
+
+
+def _tls_findings(tls_inspection, lmi_log=None) -> list:
     if not tls_inspection or tls_inspection.get("error"):
         return []
     out = []
     tls_rows = tls_inspection.get("results") or []
+    lmi_connected = _lmi_connected_now(lmi_log)
 
     # ── SSL inspection (certificate substitution) ──────────────
     # Test-TlsInspection completes a real handshake to each Pixellot-critical
@@ -1747,6 +1766,33 @@ def _tls_findings(tls_inspection) -> list:
     # handshake next to a confirmed substitution is the same device, so those
     # rows join this finding instead of raising a vaguer one on the Network tab.
     intercepted = [r for r in tls_rows if r.get("status") == "intercepted"]
+    # Support-plane hosts only (LogMeIn, python.org): same split as the
+    # filtered rows below. Inspection of LogMeIn's website is a support
+    # headache, never a reason to fail tonight's readiness.
+    if intercepted and not any(
+            (r.get("domain") or "") in _BROADCAST_CRITICAL_TLS_DOMAINS for r in intercepted):
+        issuers = [i for i in (tls_inspection.get("interceptorIssuers") or []) if i]
+        who = f", {', '.join(issuers)}," if issuers else ""
+        n = len(intercepted)
+        out.append({
+            "code": "ssl-inspection-support",
+            "severity": "warning",
+            "category": "Network",
+            "title": f"The venue firewall is inspecting {n} support service{'s' if n != 1 else ''}",
+            "recommendation": (
+                f"The venue's firewall{who} is replacing the security certificates on the "
+                f"support services below. Tonight's broadcast is unaffected. Ask venue IT to "
+                f"exempt them from SSL decryption."
+            ),
+            "it": f"Add these to the SSL-decryption exemption list: {_tls_exempt_list(intercepted)}.",
+            "evidence": (
+                "Pulse opened a secure connection to each service and checked the certificate "
+                "it was given. It was issued by the firewall instead of a public certificate "
+                "authority. Every broadcast service passed."
+            ),
+            "details": [_tls_support_detail(r, lmi_connected, "Connection refused.") for r in intercepted],
+        })
+        intercepted = []
     if intercepted:
         hs_fail = [r for r in tls_rows if r.get("status") == "handshake-fail"]
         issuers = [i for i in (tls_inspection.get("interceptorIssuers") or []) if i]
@@ -1800,6 +1846,7 @@ def _tls_findings(tls_inspection) -> list:
     # The distinction matters operationally: an SSL-decryption bypass
     # does NOT fix a category block, and vice versa. Say which one it is.
     filtered = [r for r in tls_rows if r.get("status") == "filtered"]
+    n_filtered = len(filtered)
     if filtered:
         vendors = [v for v in (tls_inspection.get("filterVendors") or []) if v]
         vendor_txt = " / ".join(vendors)
@@ -1823,16 +1870,18 @@ def _tls_findings(tls_inspection) -> list:
             f"{_tls_exempt_list(filtered)}. Add the same domains to the SSL-decryption "
             f"exemption list, so inspection can't take the block's place."
         )
+        block_page = [r for r in filtered if r.get("failureKind") == "block-page"]
         evidence = (
-            "Each connection was reset the moment the VPU named the site, and no certificate "
-            "was substituted, so this is a category block, not SSL inspection."
+            ("The filter answered with a certificate of its own only to show its block page, "
+             "and plain web requests to the same sites get that block page too, so this is a "
+             "category block, not SSL inspection."
+             if block_page and len(block_page) == n_filtered else
+             "Each connection was reset the moment the VPU named the site, and no certificate "
+             "was substituted, so this is a category block, not SSL inspection.")
             + (f" The filter's block page names the rule it applied: {block_urls[0]}"
                if block_urls else "")
         )
-        details = [
-            f"{r.get('domain', '?')}: {TLS_DOMAIN_IMPACT.get(r.get('domain'), 'Connection reset.')}"
-            for r in filtered
-        ]
+        details = [_tls_support_detail(r, lmi_connected, "Connection reset.") for r in filtered]
         n = len(filtered)
         if broadcast_hit:
             out.append(
@@ -1857,6 +1906,12 @@ def _tls_findings(tls_inspection) -> list:
                     "category": "Network",
                     "title": f"{who} is blocking {n} support service{'s' if n != 1 else ''}",
                     "recommendation": (
+                        f"{who_lower} is blocking LogMeIn's website. Tonight's broadcast is "
+                        f"unaffected, and LogMeIn on this VPU is connected, so remote support "
+                        f"works. If LogMeIn drops off, ask venue IT to add a category exception "
+                        f"for it."
+                        if lmi_connected and all("logmein.com" in (r.get("domain") or "") for r in filtered)
+                        else
                         f"{who_lower} is blocking the support services below. Tonight's "
                         f"broadcast is unaffected, but remote support and installer downloads "
                         f"will fail on this network. Ask venue IT to add a category exception "
@@ -2672,7 +2727,7 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
     # _uplink_findings and friends above.
     findings.extend(_stream_findings(port_tests))
     findings.extend(_port_findings(port_tests))
-    findings.extend(_tls_findings(tls_inspection))
+    findings.extend(_tls_findings(tls_inspection, lmi_log))
     findings.extend(_lmi_findings(lmi_log))
 
     # ── Scorebug never reached the broadcast (on-box, not network) ──
@@ -2827,6 +2882,10 @@ _READINESS_POLICY = {
                                          #      (LogMeIn / python.org) - remote
                                          #      support and installer downloads
                                          #      suffer, tonight's game does not.
+    "ssl-inspection-support": "info",    # F37b only support-plane hosts inspected
+                                         #      (LogMeIn / python.org); every
+                                         #      broadcast host passed. Same
+                                         #      rationale as F38b.
     "lmi-ssl-blocked":       "info",     # F39 LogMeIn's own service log shows the
                                          #     venue killing its TLS handshakes
                                          #     (SSL error on client hello) with no
@@ -3861,7 +3920,7 @@ def _build_network(config, domains, ports, ntp, local=None, ntp_peers=None, dns_
     _attach_impact(ports, domains, tls)
     net_findings = [
         f for f in (_uplink_findings(config if config and not config.get("error") else None, wifi)
-                    + _tls_findings(tls) + _lmi_findings(lmi_log) + _stream_findings(ports))
+                    + _tls_findings(tls, lmi_log) + _lmi_findings(lmi_log) + _stream_findings(ports))
         if f.get("code") in NET_CARD_FINDING_CODES
     ]
 

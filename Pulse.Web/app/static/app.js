@@ -4628,7 +4628,9 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
     if (!lmiLog.blockedNow) {
       issues.push({
         severity: "info",
-        title: "LogMeIn was being blocked on this network until " + (lmiLog.recoveredAt || lmiLog.lastSslFailure || "recently"),
+        // The last cut-off connection, not the first login seen after it:
+        // Armstrong's block ended 9/23 but LogMeIn's next login line was 9/28.
+        title: "LogMeIn was being blocked on this network until " + (lmiLog.lastSslFailure || lmiLog.recoveredAt || "recently"),
         body: "LogMeIn was blocked here, then connected"
           + (lmiLog.recoveredAt ? " at " + lmiLog.recoveredAt : "")
           + ", so the venue likely changed its filter. "
@@ -4742,8 +4744,12 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
   }
 
   // ── Adapter: half-duplex ─────────────────────────────────
+  // Wi-Fi is half-duplex by nature, so on a Wi-Fi uplink this would send
+  // the tech to a switch port that isn't in the path (Armstrong IL,
+  // 2026-09-28). The wifi-uplink finding covers that case.
   var uStats = cfg.uplinkStats || {};
-  if (uStats.fullDuplex === false)
+  var uplinkOnWifi = !!(wifi && !wifi.error && wifi.uplinkIsWifi);
+  if (uStats.fullDuplex === false && !uplinkOnWifi)
     issues.push({ severity: "warning", title: "Uplink adapter running in half-duplex",
       body: "The uplink is running half-duplex, which slows every connection. Set both the VPU's network port and the switch port to auto-negotiate, or hard-set both to 1 Gbps full duplex." });
 

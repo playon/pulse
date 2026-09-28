@@ -54,6 +54,36 @@ try {
 
     $allAdapters = @(Get-NetAdapter -ErrorAction SilentlyContinue)
 
+    # -- Which interface does Windows actually send internet traffic on? --
+    # Holding a default route is not enough: a cable in the motherboard port
+    # can hold one (static config, or a dead jack's DHCP) while Windows routes
+    # everything over Wi-Fi on a better metric. Field: Armstrong IL
+    # 2026-09-28 - on Wi-Fi with a cable in the main port, and this check
+    # stayed quiet because "a wired adapter has a default route". Ask the
+    # route table directly; fall back to the lowest route + interface metric.
+    $uplinkIdx = $null
+    $uplinkSource = $null
+    try {
+        $uplinkIdx = @(Find-NetRoute -RemoteIPAddress '8.8.8.8' -ErrorAction Stop |
+            Where-Object { $_.InterfaceIndex } | Select-Object -ExpandProperty InterfaceIndex)[0]
+        if ($uplinkIdx) { $uplinkSource = 'route-lookup' }
+    }
+    catch { }
+    if (-not $uplinkIdx) {
+        try {
+            $ifMetric = @{}
+            foreach ($i in @(Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue)) { $ifMetric[[int]$i.ifIndex] = [int]$i.InterfaceMetric }
+            $best = $null; $bestMetric = [int]::MaxValue
+            foreach ($r in @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue)) {
+                if (-not $r.NextHop -or $r.NextHop -eq '0.0.0.0' -or $r.NextHop.StartsWith('169.254.')) { continue }
+                $m = [int]$r.RouteMetric + [int]$ifMetric[[int]$r.ifIndex]
+                if ($m -lt $bestMetric) { $bestMetric = $m; $best = $r.ifIndex }
+            }
+            if ($best) { $uplinkIdx = $best; $uplinkSource = 'lowest-metric' }
+        }
+        catch { }
+    }
+
     # Does a wired adapter hold the default route? If so, Wi-Fi (even if up)
     # is not the primary internet path and we should not warn.
     $ethernetHasDefaultRoute = $false
@@ -78,6 +108,8 @@ try {
             isUp                 = $isUp
             isVirtual            = [bool](Test-IsVirtualWifi $a)
             hasDefaultRoute      = [bool]($defaultRouteIdx -contains $a.ifIndex)
+            ifIndex              = $a.ifIndex
+            isUplink             = [bool]($uplinkIdx -and $a.ifIndex -eq $uplinkIdx)
             connected            = $false
             ssid                 = $null
             networkCategory      = $null
@@ -108,7 +140,12 @@ try {
     # A real (non-virtual) Wi-Fi NIC carries the default route, and no wired
     # adapter does. This is the only case worth a warning.
     $uplinkIsWifi = $false
-    if (-not $ethernetHasDefaultRoute) {
+    if ($uplinkIdx) {
+        foreach ($d in $adapters) {
+            if ($d.isUplink -and $d.isUp -and -not $d.isVirtual) { $uplinkIsWifi = $true; break }
+        }
+    }
+    elseif (-not $ethernetHasDefaultRoute) {
         foreach ($d in $adapters) {
             if ($d.isUp -and -not $d.isVirtual -and $d.hasDefaultRoute) {
                 $uplinkIsWifi = $true
@@ -125,6 +162,8 @@ try {
         activeCount             = $activeCount
         ethernetHasDefaultRoute = [bool]$ethernetHasDefaultRoute
         uplinkIsWifi            = [bool]$uplinkIsWifi
+        uplinkIfIndex           = $uplinkIdx
+        uplinkSource            = $uplinkSource
     } | ConvertTo-Json -Depth 5 -Compress
 }
 catch {
