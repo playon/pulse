@@ -79,6 +79,8 @@ const SCENARIOS = [
     why: "the audio device collector dies" },
   { key: "reboots", fault: "reboothistory", tab: "reboots",
     why: "the reboot history collector dies" },
+  { key: "stream-log", fault: "vpustreamlog", tab: "network",
+    why: "VPU.exe's stream-log reader dies; a stream that went unread must not look like one that connected" },
   { key: "dashboard", fault: "performance,services,nicadapters", tab: "dashboard",
     why: "three dashboard inputs die; the readiness verdict has no term for checks that did not run" },
   // POSITIVE CONTROL. Local Network Health is the one panel of 42 that gets

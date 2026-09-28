@@ -22,6 +22,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 
 ## [Unreleased]
 
+### Added
+- Pulse now reads the VPU's own streaming log and checks what the live stream actually did. The port tests only reach Pixellot's test server, so a VPU could pass every one while its stream couldn't connect to the event's real streaming server. A stream that can't connect now fails the readiness check. A stream running on its backup or last-resort path shows as a warning, with the server it tried and when. The Network page shows a one-line "Live stream (VPU log)" result under the port tiles.
+
 ## [1.3.2] - 2026-09-25
 
 ### Changed
