@@ -1255,6 +1255,14 @@ class TestLmiGatewayLogFinding(unittest.TestCase):
             [x for x in self._findings(self._lmi(blocked=False))
              if x["code"] == "lmi-ssl-blocked"], [])
 
+    def test_live_connection_overrides_log_history(self):
+        # Armstrong IL 2026-09-28: Pulse said LogMeIn was blocked while the
+        # tech was on the unit through LogMeIn. A live connection wins.
+        live = self._lmi(blocked=True)
+        live["connectedNow"] = True
+        self.assertEqual(
+            [x for x in self._findings(live) if x["code"] == "lmi-ssl-blocked"], [])
+
     def test_clean_log_is_quiet(self):
         clean = self._lmi(blocked=False)
         clean.update({"sslFailures": 0, "handshakeFailures": 0,
@@ -1279,6 +1287,208 @@ class TestLmiGatewayLogFinding(unittest.TestCase):
         self.assertEqual(verdict["status"], "PASS")
 
 
+# ── Graphics delivery (Get-GraphicsDelivery) ─────────────────────────
+# Counts are the field bundles: MacLaren CO 2026-09-23 (127/127 hand-offs to
+# VPU.exe timed out, none delivered, VPU.exe received none) and the healthy
+# Tanque Verde control (one cold-start timeout, then steady deliveries).
+class TestGraphicsDeliveryFinding(unittest.TestCase):
+    BAD = {"eventId": "6a983c489175897b10f5097f", "firstSeen": "2026-09-23T15:49:41",
+           "lastSeen": "2026-09-23T17:55:07", "delivered": 0, "deadlineFails": 127,
+           "unavailableFails": 0, "otherFails": 0, "maxAttempt": 127, "vpuReceived": 0}
+    GOOD = {"eventId": "5fb394c2aaaaaaaaaaaaaaaa", "firstSeen": "2026-09-08T18:00:00",
+            "lastSeen": "2026-09-08T20:00:00", "delivered": 413, "deadlineFails": 1,
+            "unavailableFails": 0, "otherFails": 0, "maxAttempt": 1, "vpuReceived": 414}
+
+    def _gd(self, events, **kw):
+        gd = {"logsFound": True, "events": events,
+              "config": {"graphicEngineType": "CGENGINE"},
+              "engineDisabled": {"lines": 0}}
+        gd.update(kw)
+        return gd
+
+    def _codes(self, gd):
+        return [f for f in main._compute_findings(
+            identity={}, performance={}, services={}, nics={}, graphics_delivery=gd)
+            if f["code"].startswith("graphics-")]
+
+    def test_latest_event_failed_is_critical(self):
+        f = self._codes(self._gd([self.GOOD, self.BAD]))
+        self.assertEqual([x["code"] for x in f], ["graphics-handoff-failed"])
+        self.assertEqual(f[0]["severity"], "critical")
+        self.assertIn("1 of the last 2", f[0]["title"])
+        self.assertIn("127 failed hand-offs", _finding_text(f[0]))
+        self.assertIn("never received", _finding_text(f[0]))
+
+    def test_earlier_failure_latest_fine_is_warning(self):
+        good_later = dict(self.GOOD, eventId="6b0000000000000000000001",
+                          lastSeen="2026-09-25T20:00:00")
+        f = self._codes(self._gd([self.BAD, good_later]))
+        self.assertEqual(f[0]["severity"], "warning")
+
+    def test_armstrong_payload(self):
+        # Armstrong IL, 2026-09-28, verbatim counts: four events with zero
+        # hand-offs, then the retest after the rollback delivered 52.
+        ev = lambda i, first, d, f: {"eventId": i, "firstSeen": first, "lastSeen": first,
+                                     "delivered": d, "deadlineFails": f, "unavailableFails": 0,
+                                     "otherFails": 0, "maxAttempt": f, "vpuReceived": d}
+        events = [ev("6ababbc449aa737eb0da963b", "2026-09-28T14:11:29", 52, 40),
+                  ev("6abab3d14f50111eeaea77b3", "2026-09-28T13:37:30", 0, 17),
+                  ev("6abaa5405ba3a09f72a70568", "2026-09-28T12:35:21", 0, 37),
+                  ev("6a7d2200271c403aec9c4a3a", "2026-09-24T17:49:56", 0, 180),
+                  ev("6a7d21c36ecc42b7e65134c1", "2026-09-21T17:49:31", 0, 181)]
+        f = self._codes(self._gd(events, config={"graphicEngineType": "NONE_SELECTED"},
+                                 engineDisabled={"lines": 0, "lastSetScoreboardType": "CGENGINE",
+                                                 "lastSetAt": "2026-09-28 12:33:30"}))
+        self.assertEqual([x["code"] for x in f], ["graphics-handoff-failed"])
+        self.assertEqual(f[0]["severity"], "warning")
+        self.assertIn("4 of the last 5", f[0]["title"])
+        self.assertIn("most recent game had graphics", f[0]["recommendation"])
+        # Local time, not shifted: Jesse's test started 13:37 CDT.
+        self.assertIn("Mon Sep 28 13:37", _finding_text(f[0]))
+
+    def test_one_cold_start_timeout_is_normal(self):
+        self.assertEqual(self._codes(self._gd([self.GOOD])), [])
+
+    def test_startup_refusals_are_not_the_bug(self):
+        # Connection refused before VPU.exe is up, then deliveries: healthy.
+        race = dict(self.GOOD, deadlineFails=0, unavailableFails=40)
+        self.assertEqual(self._codes(self._gd([race])), [])
+        # Refusals only, never delivered: VPU.exe never came up. Not this
+        # finding (the stream itself is the problem there).
+        down = dict(race, delivered=0, vpuReceived=0)
+        self.assertEqual(self._codes(self._gd([down])), [])
+
+    def test_too_few_attempts_is_inconclusive(self):
+        short = dict(self.BAD, deadlineFails=3, maxAttempt=3)
+        self.assertEqual(self._codes(self._gd([short])), [])
+
+    def test_idle_box_and_dead_collector_are_quiet(self):
+        self.assertEqual(self._codes(self._gd([])), [])
+        self.assertEqual(self._codes({"logsFound": False}), [])
+        self.assertEqual(self._codes({"error": True, "message": "boom"}), [])
+
+    def test_engine_none_selected_warns_while_still_set(self):
+        dis = {"lines": 120, "first": "2026-08-17 19:02:00", "last": "2026-08-17 19:32:00",
+               "lastSetScoreboardType": None, "lastSetAt": None}
+        f = self._codes(self._gd([], config={"graphicEngineType": "NONE_SELECTED"},
+                                 engineDisabled=dis))
+        self.assertEqual([x["code"] for x in f], ["graphics-engine-none"])
+        # Fixed since: an engine is selected now, or was set after the last
+        # graphics-off line.
+        self.assertEqual(self._codes(self._gd([], config={"graphicEngineType": "CGENGINE"},
+                                              engineDisabled=dis)), [])
+        fixed = dict(dis, lastSetScoreboardType="CGENGINE", lastSetAt="2026-08-17 19:33:00")
+        self.assertEqual(self._codes(self._gd([], config={"graphicEngineType": "NONE_SELECTED"},
+                                              engineDisabled=fixed)), [])
+
+    def test_none_selected_config_alone_is_quiet(self):
+        # VPU2's bench config is NONE_SELECTED; only its daily test ran, and
+        # the test's own graphics-off line isn't counted.
+        self.assertEqual(self._codes(self._gd([], config={"graphicEngineType": "NONE_SELECTED"})), [])
+
+    def test_graphics_findings_warn_not_fail_readiness(self):
+        for code in ("graphics-handoff-failed", "graphics-engine-none"):
+            verdict = main._compute_readiness(
+                [{"code": code, "severity": "critical", "category": "Pixellot",
+                  "title": "t", "recommendation": "r"}])
+            self.assertEqual(verdict["status"], "WARN", code)
+
+
+# ── Armstrong IL (2026-09-28): FortiGate blocking LogMeIn's website ──────
+# The FortiGate answered secure.logmein.com with a 2-day cert of its own
+# (issuer FG200FT922937326) to show its FortiGuard "Remote Access" block
+# page, and port 80 returned that page as a 403. Every broadcast host had a
+# genuine cert, and the tech was on the unit over LogMeIn the whole time.
+class TestSupportOnlyTlsFindings(unittest.TestCase):
+    def _row(self, domain, status, **kw):
+        r = {"domain": domain, "status": status}
+        r.update(kw)
+        return r
+
+    def _tls(self, rows, issuers=None):
+        return {"results": rows, "interceptorIssuers": issuers or [], "filterVendors": []}
+
+    def _findings(self, tls, lmi=None):
+        return main._compute_findings(identity={}, performance={}, services={}, nics={},
+                                      tls_inspection=tls, lmi_log=lmi)
+
+    def test_support_only_interception_is_not_a_blocker(self):
+        tls = self._tls([self._row("singular.live", "pass"),
+                         self._row("secure.logmein.com", "intercepted", issuerCn="FG200FT922937326")],
+                        ["FG200FT922937326 (Fortinet)"])
+        codes = [f["code"] for f in self._findings(tls)]
+        self.assertIn("ssl-inspection-support", codes)
+        self.assertNotIn("ssl-inspection", codes)
+        self.assertEqual(main._readiness_class("ssl-inspection-support"), "info")
+
+    def test_broadcast_interception_still_blocks(self):
+        tls = self._tls([self._row("api.singular.live", "intercepted"),
+                         self._row("secure.logmein.com", "intercepted")])
+        codes = [f["code"] for f in self._findings(tls)]
+        self.assertIn("ssl-inspection", codes)
+        self.assertNotIn("ssl-inspection-support", codes)
+
+    def test_block_page_with_lmi_connected_says_support_works(self):
+        tls = self._tls([self._row("secure.logmein.com", "filtered", failureKind="block-page",
+                                   filterVendor="FortiGuard (Fortinet)")])
+        tls["filterVendors"] = ["FortiGuard (Fortinet)"]
+        f = [x for x in self._findings(tls, {"connectedNow": True, "logsFound": True})
+             if x["code"] == "tls-filtered-support"]
+        self.assertEqual(len(f), 1)
+        text = _finding_text(f[0])
+        self.assertIn("remote support works", f[0]["recommendation"])
+        # Nothing is broken, so it's a note, not a warning (Ian, 2026-09-28).
+        self.assertEqual(f[0]["severity"], "info")
+        self.assertIn("Remote support still works", f[0]["title"])
+        self.assertIn("block page", text)
+        self.assertNotIn("can't reach the VPU", text)
+
+    def test_block_page_without_live_lmi_keeps_the_warning(self):
+        tls = self._tls([self._row("secure.logmein.com", "filtered", failureKind="block-page")])
+        f = [x for x in self._findings(tls) if x["code"] == "tls-filtered-support"]
+        self.assertIn("remote support and installer downloads will fail", f[0]["recommendation"])
+        self.assertEqual(f[0]["severity"], "warning")
+
+
+# ── Score source: OCR camera or ScoreConnect (Armstrong IL, 2026-09-28) ──
+# Pulse warned "ScoreConnect not running" on a unit whose OCR camera was
+# connected and reading the board. Only the source in use matters.
+class TestScoreboardSource(unittest.TestCase):
+    SC_DOWN = {"reachable": False, "sc2": {"reachable": False}}
+    SC_UP = {"reachable": True}
+    OCR_UP = {"configured": True, "connected": True, "port": "Port 3"}
+    OCR_DOWN = {"configured": True, "connected": False, "port": None}
+
+    def test_ocr_connected_makes_scoreconnect_optional(self):
+        r = main._scoreboard_source(self.SC_DOWN, self.OCR_UP)
+        self.assertEqual((r["source"], r["ok"], r["issue"]), ("ocr", True, None))
+        self.assertEqual(r["ocrPort"], "Port 3")
+
+    def test_ocr_detected_without_config_counts(self):
+        r = main._scoreboard_source(self.SC_DOWN, {"configured": False, "connected": True, "port": "Port 2"})
+        self.assertTrue(r["ok"])
+
+    def test_ocr_configured_but_disconnected_is_an_issue(self):
+        # Even with ScoreConnect running: the unit is set up to read the
+        # score with the camera.
+        r = main._scoreboard_source(self.SC_UP, self.OCR_DOWN)
+        self.assertEqual((r["source"], r["ok"], r["issue"]), ("ocr", False, "ocr-not-connected"))
+
+    def test_no_ocr_needs_scoreconnect(self):
+        r = main._scoreboard_source(self.SC_DOWN, None)
+        self.assertEqual((r["source"], r["ok"], r["issue"]), ("scoreconnect", False, "scoreconnect-down"))
+        self.assertTrue(main._scoreboard_source(self.SC_UP, None)["ok"])
+
+    def test_legacy_scoreconnect_counts_as_running(self):
+        r = main._scoreboard_source({"reachable": False, "sc2": {"reachable": True}}, None)
+        self.assertTrue(r["ok"])
+
+    def test_camera_read_failed_judges_scoreconnect_alone(self):
+        r = main._scoreboard_source(self.SC_DOWN, "unknown")
+        self.assertEqual(r["source"], "scoreconnect")
+        self.assertFalse(r["ocrKnown"])
+
+
 # Finding codes emitted with severity "critical" by _compute_findings. Kept
 # explicit rather than scraped so adding a critical is a deliberate two-line
 # change: emit it, then classify it.
@@ -1301,6 +1511,7 @@ _CRITICAL_FINDING_CODES = {
     "temp-critical",
     "tz-non-us",
     "uplink-on-camera-port",
+    "graphics-handoff-failed",
     # port-dns-blocked / port-required-blocked share one emit site.
     "port-dns-blocked",
     "port-required-blocked",

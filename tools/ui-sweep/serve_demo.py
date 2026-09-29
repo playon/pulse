@@ -119,6 +119,50 @@ def _inject(demo_data, faults, empties, slows):
         print("slowed:   %s" % ", ".join(sorted(slows - faults - empties)))
 
 
+# Rough per-script wall time on a fleet VPU (Win10 LTSC, cold PowerShell), in
+# seconds. Approximate on purpose: the point is a load that SHAPES like a real
+# one -- the 4-slot semaphore backs up, the port sweep and event log scans run
+# long -- so the splash can be judged at field pace instead of demo's ~1s.
+_VPU_LATENCY = {
+    "Get-SystemIdentity.ps1": 2.2, "Get-Hardware.ps1": 3.0, "Get-GpuInfo.ps1": 2.4,
+    "Get-Performance.ps1": 1.6, "Get-PerfSample.ps1": 1.4,
+    "Get-InstalledSoftware.ps1": 3.8, "Get-Services.ps1": 1.8,
+    "Test-PixellotInstallState.ps1": 1.6, "Get-PixellotConfig.ps1": 1.9,
+    "Get-NicAdapters.ps1": 1.5, "Get-NetworkConfig.ps1": 2.6,
+    "Get-NetworkHealth.ps1": 2.0, "Get-WifiAdapters.ps1": 1.2,
+    "Test-NetworkPorts.ps1": 4.5, "Test-NetworkDomains.ps1": 3.2,
+    "Test-DnsResolution.ps1": 1.8, "Test-TlsInspection.ps1": 3.0,
+    "Test-LocalNetwork.ps1": 2.2, "Test-NtpDrift.ps1": 2.0, "Get-NtpPeers.ps1": 1.3,
+    "Get-LmiGatewayLog.ps1": 1.1, "Get-CameraExpectations.ps1": 0.9,
+    "Get-PoePower.ps1": 2.4, "Get-DiskHealth.ps1": 3.4, "Get-EventLogs.ps1": 4.2,
+    "Get-EventWindowSignals.ps1": 3.0, "Get-PixellotEvents.ps1": 2.6,
+    "Get-RebootHistory.ps1": 2.2, "Get-AudioDevices.ps1": 1.7,
+    "Get-ScoreConnectStatus.ps1": 2.0,
+}
+
+
+def _add_latency(scale):
+    """Delay every demo collector by its rough VPU wall time x scale.
+
+    Wraps powershell._run_ps_inner, which runs INSIDE the semaphore, so the
+    delay queues exactly like real PowerShell work does. asyncio.sleep, not
+    time.sleep: a blocking sleep would stall the whole event loop and every
+    request would serialise, which no real VPU does.
+    """
+    import asyncio
+    import powershell
+
+    original = powershell._run_ps_inner
+
+    async def slow_inner(script_name, args, timeout, task_id, cancel_evt):
+        base = _VPU_LATENCY.get(script_name, 1.5)
+        await asyncio.sleep(base * scale * random.uniform(0.75, 1.25))
+        return await original(script_name, args, timeout, task_id, cancel_evt)
+
+    powershell._run_ps_inner = slow_inner
+    print("latency:  x%.2f of rough VPU timing" % scale)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8797)))
@@ -131,6 +175,10 @@ def main():
                     help="comma-separated collectors that should return nothing")
     ap.add_argument("--slow", default=os.environ.get("PULSE_SLOW", ""),
                     help="comma-separated collectors that should time out")
+    ap.add_argument("--latency", type=float, default=float(os.environ.get("PULSE_DEMO_LATENCY", 0)),
+                    help="delay collectors by rough VPU timing x this scale (1 = field pace, 0 = off)")
+    ap.add_argument("--stay-up", action="store_true",
+                    help="don't auto-exit 60s after the last browser tab closes (for side-by-side review)")
     ap.add_argument("--list-collectors", action="store_true",
                     help="print every name --fault accepts and exit")
     args = ap.parse_args()
@@ -200,8 +248,15 @@ def main():
     except OSError:
         pass
 
+    if args.latency > 0:
+        _add_latency(args.latency)
+
     import main
     import uvicorn
+
+    if args.stay_up:
+        # _idle_shutdown reads the module global when it fires.
+        main.IDLE_SHUTDOWN_SECS = 10 ** 9
 
     print("seed=%d  port=%d" % (args.seed, args.port))
     uvicorn.run(main.app, host="127.0.0.1", port=args.port, reload=False,

@@ -1510,8 +1510,8 @@ def _attach_impact(ports, domains, tls):
 # client-side from the raw rows and never reaches the Dashboard or the ticket.
 NET_CARD_FINDING_CODES = (
     "wifi-uplink", "uplink-on-camera-port", "wifi-disabled",
-    "ssl-inspection", "tls-filtered", "tls-filtered-support", "lmi-ssl-blocked",
-    "stream-blocked", "stream-degraded-rtmp", "stream-resiliency-reduced",
+    "ssl-inspection", "ssl-inspection-support", "tls-filtered", "tls-filtered-support",
+    "lmi-ssl-blocked", "stream-blocked", "stream-degraded-rtmp", "stream-resiliency-reduced",
 )
 
 
@@ -1528,6 +1528,10 @@ def _uplink_findings(network_config, wifi) -> list:
             a for a in (wifi.get("adapters") or [])
             if a.get("isUp") and a.get("hasDefaultRoute") and not a.get("isVirtual")
         ]
+        # A cable can be in the network port and still unused: Armstrong IL
+        # (2026-09-28) had the motherboard port up on 192.168.10.x while
+        # Windows sent everything over the faculty Wi-Fi.
+        wired = [w for w in (wifi.get("wiredDefaultRoutes") or []) if w]
         out.append(
             {
                 "code": "wifi-uplink",
@@ -1535,14 +1539,27 @@ def _uplink_findings(network_config, wifi) -> list:
                 "category": "Network",
                 "title": "VPU is using Wi-Fi for its internet connection. Switch to wired Ethernet",
                 "recommendation": (
-                    "The VPU is reaching the internet over Wi-Fi, which adds lag and dropouts "
-                    "during a stream. Plug the motherboard network port into the venue network. "
-                    "Wi-Fi is only for the Pixellot Connect app."
+                    (
+                        "The VPU is reaching the internet over Wi-Fi, which adds lag and dropouts "
+                        "during a stream, even though a cable is connected to its network port. "
+                        "Get that cable onto the venue's internet network, and once it works, "
+                        "disconnect the VPU from the venue Wi-Fi. Wi-Fi is only for the Pixellot "
+                        "Connect app."
+                    ) if wired else (
+                        "The VPU is reaching the internet over Wi-Fi, which adds lag and dropouts "
+                        "during a stream. Plug the motherboard network port into the venue network. "
+                        "Wi-Fi is only for the Pixellot Connect app."
+                    )
                 ),
                 "details": [
                     (a.get("interfaceDescription") or a.get("name") or "Wi-Fi")
                     + (f", SSID {a.get('ssid')}" if a.get("ssid") else "")
                     for a in uplink_wifi
+                ] + [
+                    f"{w.get('name') or 'Wired port'} ({w.get('interfaceDescription') or 'Ethernet'}) "
+                    f"is connected{', gateway ' + w['nextHop'] if w.get('nextHop') else ''}, "
+                    "but Windows isn't using it for internet."
+                    for w in wired
                 ],
             }
         )
@@ -1730,11 +1747,30 @@ def _port_findings(port_tests) -> list:
     return out
 
 
-def _tls_findings(tls_inspection) -> list:
+def _lmi_connected_now(lmi_log) -> bool:
+    """LogMeIn has a live gateway connection or remote session right now
+    (Get-LmiGatewayLog connectedNow). Proof that remote support works,
+    whatever the probe to LogMeIn's website says."""
+    return bool(lmi_log and not lmi_log.get("error") and lmi_log.get("connectedNow"))
+
+
+def _tls_support_detail(r, lmi_connected, fallback) -> str:
+    # secure.logmein.com is LogMeIn's website, where techs sign in. The VPU
+    # stays reachable through control.lmi-app*.logmein.com instead, so while
+    # LogMeIn is connected a blocked website does not cut off support
+    # (Armstrong IL, 2026-09-28: tech on the unit over LMI, website blocked).
+    d = r.get("domain") or "?"
+    if lmi_connected and "logmein.com" in d:
+        return f"{d}: LogMeIn's website is blocked. LogMeIn on this VPU is connected, so remote support works."
+    return f"{d}: {TLS_DOMAIN_IMPACT.get(r.get('domain'), fallback)}"
+
+
+def _tls_findings(tls_inspection, lmi_log=None) -> list:
     if not tls_inspection or tls_inspection.get("error"):
         return []
     out = []
     tls_rows = tls_inspection.get("results") or []
+    lmi_connected = _lmi_connected_now(lmi_log)
 
     # ── SSL inspection (certificate substitution) ──────────────
     # Test-TlsInspection completes a real handshake to each Pixellot-critical
@@ -1747,6 +1783,35 @@ def _tls_findings(tls_inspection) -> list:
     # handshake next to a confirmed substitution is the same device, so those
     # rows join this finding instead of raising a vaguer one on the Network tab.
     intercepted = [r for r in tls_rows if r.get("status") == "intercepted"]
+    # Support-plane hosts only (LogMeIn, python.org): same split as the
+    # filtered rows below. Inspection of LogMeIn's website is a support
+    # headache, never a reason to fail tonight's readiness.
+    if intercepted and not any(
+            (r.get("domain") or "") in _BROADCAST_CRITICAL_TLS_DOMAINS for r in intercepted):
+        issuers = [i for i in (tls_inspection.get("interceptorIssuers") or []) if i]
+        who = f", {', '.join(issuers)}," if issuers else ""
+        n = len(intercepted)
+        lmi_site_only = lmi_connected and all(
+            "logmein.com" in (r.get("domain") or "") for r in intercepted)
+        out.append({
+            "code": "ssl-inspection-support",
+            "severity": "info" if lmi_site_only else "warning",
+            "category": "Network",
+            "title": f"The venue firewall is inspecting {n} support service{'s' if n != 1 else ''}",
+            "recommendation": (
+                f"The venue's firewall{who} is replacing the security certificates on the "
+                f"support services below. Tonight's broadcast is unaffected. Ask venue IT to "
+                f"exempt them from SSL decryption."
+            ),
+            "it": f"Add these to the SSL-decryption exemption list: {_tls_exempt_list(intercepted)}.",
+            "evidence": (
+                "Pulse opened a secure connection to each service and checked the certificate "
+                "it was given. It was issued by the firewall instead of a public certificate "
+                "authority. Every broadcast service passed."
+            ),
+            "details": [_tls_support_detail(r, lmi_connected, "Connection refused.") for r in intercepted],
+        })
+        intercepted = []
     if intercepted:
         hs_fail = [r for r in tls_rows if r.get("status") == "handshake-fail"]
         issuers = [i for i in (tls_inspection.get("interceptorIssuers") or []) if i]
@@ -1800,6 +1865,7 @@ def _tls_findings(tls_inspection) -> list:
     # The distinction matters operationally: an SSL-decryption bypass
     # does NOT fix a category block, and vice versa. Say which one it is.
     filtered = [r for r in tls_rows if r.get("status") == "filtered"]
+    n_filtered = len(filtered)
     if filtered:
         vendors = [v for v in (tls_inspection.get("filterVendors") or []) if v]
         vendor_txt = " / ".join(vendors)
@@ -1823,16 +1889,18 @@ def _tls_findings(tls_inspection) -> list:
             f"{_tls_exempt_list(filtered)}. Add the same domains to the SSL-decryption "
             f"exemption list, so inspection can't take the block's place."
         )
+        block_page = [r for r in filtered if r.get("failureKind") == "block-page"]
         evidence = (
-            "Each connection was reset the moment the VPU named the site, and no certificate "
-            "was substituted, so this is a category block, not SSL inspection."
+            ("The filter answered with a certificate of its own only to show its block page, "
+             "and plain web requests to the same sites get that block page too, so this is a "
+             "category block, not SSL inspection."
+             if block_page and len(block_page) == n_filtered else
+             "Each connection was reset the moment the VPU named the site, and no certificate "
+             "was substituted, so this is a category block, not SSL inspection.")
             + (f" The filter's block page names the rule it applied: {block_urls[0]}"
                if block_urls else "")
         )
-        details = [
-            f"{r.get('domain', '?')}: {TLS_DOMAIN_IMPACT.get(r.get('domain'), 'Connection reset.')}"
-            for r in filtered
-        ]
+        details = [_tls_support_detail(r, lmi_connected, "Connection reset.") for r in filtered]
         n = len(filtered)
         if broadcast_hit:
             out.append(
@@ -1850,13 +1918,29 @@ def _tls_findings(tls_inspection) -> list:
                 }
             )
         else:
+            # LogMeIn connected and only its website blocked: nothing is
+            # broken (the website is where techs sign in, not how the VPU is
+            # reached), so it's a note that explains the Secure Connections
+            # row, not a warning. Ian, Armstrong IL 2026-09-28.
+            lmi_site_only = lmi_connected and all(
+                "logmein.com" in (r.get("domain") or "") for r in filtered)
             out.append(
                 {
                     "code": "tls-filtered-support",
-                    "severity": "warning",
+                    "severity": "info" if lmi_site_only else "warning",
                     "category": "Network",
-                    "title": f"{who} is blocking {n} support service{'s' if n != 1 else ''}",
+                    "title": (
+                        f"{who} blocks LogMeIn's website. Remote support still works"
+                        if lmi_site_only else
+                        f"{who} is blocking {n} support service{'s' if n != 1 else ''}"
+                    ),
                     "recommendation": (
+                        f"{who_lower} is blocking LogMeIn's website. Tonight's broadcast is "
+                        f"unaffected, and LogMeIn on this VPU is connected, so remote support "
+                        f"works. If LogMeIn drops off, ask venue IT to add a category exception "
+                        f"for it."
+                        if lmi_site_only
+                        else
                         f"{who_lower} is blocking the support services below. Tonight's "
                         f"broadcast is unaffected, but remote support and installer downloads "
                         f"will fail on this network. Ask venue IT to add a category exception "
@@ -1877,7 +1961,12 @@ def _lmi_findings(lmi_log) -> list:
     # as it is right now; the log carries the timeline. Field origin: a VPU
     # dark in LMI for 16 hours, 2026-08-28. Only a CURRENT block becomes a
     # finding; a recovered one is history and stays on the Network tab.
-    if not lmi_log or lmi_log.get("error") or not lmi_log.get("blockedNow"):
+    # "Current" is the collector's call: it clears blockedNow when LogMeIn is
+    # connected right now or the failures stopped hours ago (Armstrong IL
+    # 2026-09-28 false positive, see Get-LmiGatewayLog.ps1). connectedNow is
+    # checked here too, so a live connection can never show as a block.
+    if (not lmi_log or lmi_log.get("error") or not lmi_log.get("blockedNow")
+            or lmi_log.get("connectedNow")):
         return []
     n = lmi_log.get("sslFailures") or 0
     since = (lmi_log.get("firstSslFailure") or "")[:10]
@@ -1907,7 +1996,130 @@ def _lmi_findings(lmi_log) -> list:
     }]
 
 
-def _compute_findings(identity, performance, services, nics, hardware=None, installed_sw=None, network_config=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, probe_results=None, tls_inspection=None, lmi_log=None) -> list:
+# ── Graphics delivery (Get-GraphicsDelivery) ──────────────────────────────
+# Pulse's network checks can't see a scorebug that never reaches the video:
+# the hand-off from GraphicsManager to VPU.exe is localhost gRPC, so a unit
+# can air a whole game with no graphics and pass every check (Tanque Verde AZ
+# 2026-09-14, Thomas MacLaren CO 2026-09-23, Armstrong IL 2026-09-28, all
+# 5.37.x). The collector counts, per event, the hand-offs that succeeded and
+# the ones that failed; the verdict lives here so it can be tested.
+GRAPHICS_FAILED_MIN_TIMEOUTS = 5  # one per event is normal (CEF ~6s vs a 5s deadline)
+
+
+def _graphics_event_status(ev) -> str:
+    """delivered | failed | vpu-unreachable | inconclusive for one event."""
+    if (ev.get("delivered") or 0) > 0:
+        return "delivered"
+    timeouts = (ev.get("deadlineFails") or 0) + (ev.get("otherFails") or 0)
+    if timeouts >= GRAPHICS_FAILED_MIN_TIMEOUTS:
+        return "failed"
+    # Connection refused on VPU.exe's port and nothing else: GraphicsManager
+    # retrying before VPU.exe came up. Sustained, VPU.exe never started for
+    # the event, which is a different fault (the stream itself is at risk)
+    # that the service and event lanes own.
+    if (ev.get("unavailableFails") or 0) >= GRAPHICS_FAILED_MIN_TIMEOUTS:
+        return "vpu-unreachable"
+    return "inconclusive"
+
+
+def _gm_local_time(ts) -> str:
+    """GraphicsManager stamps "2026-09-23T17:42:02...z". The z is a lie: it
+    is VPU local time (Armstrong IL matched its agent log and the Slack
+    timeline to the minute only read as local), so format it, don't shift."""
+    try:
+        from datetime import datetime
+        return datetime.strptime((ts or "")[:19], "%Y-%m-%dT%H:%M:%S").strftime("%a %b %d %H:%M")
+    except (TypeError, ValueError):
+        return ts or "?"
+
+
+def _graphics_findings(gd) -> list:
+    if not gd or gd.get("error") or not gd.get("logsFound"):
+        return []
+    out = []
+
+    events = [e for e in (gd.get("events") or []) if e.get("eventId") not in (None, "", "unknown")]
+    judged = [dict(e, status=_graphics_event_status(e)) for e in events]
+    judged = [e for e in judged if e["status"] in ("delivered", "failed")]
+    judged.sort(key=lambda e: e.get("lastSeen") or "", reverse=True)
+    failed = [e for e in judged if e["status"] == "failed"]
+    if failed:
+        latest_failed = judged[0]["status"] == "failed"
+        n, m = len(failed), len(judged)
+        title = (
+            f"Graphics didn't reach the broadcast on {n} of the last {m} event{'s' if m != 1 else ''}, "
+            "so those games streamed with no scorebug"
+            if latest_failed else
+            f"Graphics failed on {n} of the last {m} events, so some games streamed with no scorebug"
+        )
+        received = [e.get("vpuReceived") for e in failed]
+        out.append({
+            "code": "graphics-handoff-failed",
+            "severity": "critical" if latest_failed else "warning",
+            "category": "Pixellot",
+            "title": title,
+            "recommendation": (
+                "The Pixellot software on this VPU isn't passing the scorebug to the video, so "
+                "games go out with no graphics even though the scoreboard and the network are "
+                "fine. Nothing at the school needs to change. Support: reset graphics or restart "
+                "the Pixellot software during the next event, and if it keeps happening, roll the "
+                "VPU back to the previous Pixellot version."
+                if latest_failed else
+                # Armstrong IL: four games without graphics, then the retest
+                # after the rollback delivered.
+                "The Pixellot software on this VPU didn't pass the scorebug to the video on the "
+                "games below, so they streamed with no graphics. The most recent game had "
+                "graphics. If the scorebug goes missing again, reset graphics or restart the "
+                "Pixellot software during the event, or roll the VPU back to the previous "
+                "Pixellot version."
+            ),
+            "evidence": (
+                "GraphicsManager's log (C:\\Pixellot\\Data\\Log) shows every attempt to hand the "
+                "graphics to VPU.exe timing out, with no successful hand-off, for each event below"
+                + ("; VPU.exe's own log shows it never received them" if all(r == 0 for r in received) else "")
+                + ". The hand-off never leaves the VPU, so the venue network can't cause it. One "
+                "failed try per event is normal."
+            ),
+            "details": [
+                f"{_gm_local_time(e.get('firstSeen'))}: "
+                f"{(e.get('deadlineFails') or 0) + (e.get('otherFails') or 0)} failed hand-offs, none delivered "
+                f"(event {e.get('eventId')})"
+                for e in failed
+            ],
+        })
+
+    # The agent switches graphics off for an event when no scoreboard engine
+    # is selected (Merrol Hyde, 2026-08-17): GraphicsManager is never even
+    # told about the event. The daily test logs its own graphics-off line,
+    # which the collector doesn't count. Only while the setting is still
+    # NONE_SELECTED: choosing an engine fixes it within seconds, mid-game.
+    dis = gd.get("engineDisabled") or {}
+    engine = ((gd.get("config") or {}).get("graphicEngineType") or "").upper()
+    fixed_after = dis.get("lastSetAt") and dis.get("last") and dis["lastSetAt"] > dis["last"]
+    if (dis.get("lines") or 0) > 0 and engine in ("", "NONE_SELECTED") and not fixed_after:
+        out.append({
+            "code": "graphics-engine-none",
+            "severity": "warning",
+            "category": "Pixellot",
+            "title": "No scoreboard type is selected on this VPU, so it turns graphics off for every game",
+            "recommendation": (
+                "The VPU has no scoreboard type selected, so it switches graphics off when each "
+                "game starts and the stream goes out with no scorebug. Support: set the scoreboard "
+                "type (CG engine) on the VPU and save. Graphics come on within seconds, even "
+                "mid-game."
+            ),
+            "evidence": (
+                f"The Pixellot agent log shows graphics switched off for a real event "
+                f"{dis.get('lines')} times between {dis.get('first') or '?'} and {dis.get('last') or '?'} "
+                "because the scoreboard type is NONE_SELECTED"
+                + (", and agentsetup.cfg still has GraphicEngineType = NONE_SELECTED." if engine
+                   else ".")
+            ),
+        })
+    return out
+
+
+def _compute_findings(identity, performance, services, nics, hardware=None, installed_sw=None, network_config=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None) -> list:
     findings = []
 
     # None vs {} matters for probe_results: None means the caller never
@@ -2553,8 +2765,11 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
     # _uplink_findings and friends above.
     findings.extend(_stream_findings(port_tests))
     findings.extend(_port_findings(port_tests))
-    findings.extend(_tls_findings(tls_inspection))
+    findings.extend(_tls_findings(tls_inspection, lmi_log))
     findings.extend(_lmi_findings(lmi_log))
+
+    # ── Scorebug never reached the broadcast (on-box, not network) ──
+    findings.extend(_graphics_findings(graphics_delivery))
 
     # ── Missing / under-count main cameras ─────────────────────
     # One helper for the Dashboard, readiness, the ticket and Camera
@@ -2665,6 +2880,15 @@ _READINESS_POLICY = {
     "ram-insufficient":      "risk",     # F21 <32 GB host
     "ntp-unapproved":        "risk",     # F22 drift can break signed-URL stream
     "wifi-uplink":           "risk",     # F24 Wi-Fi uplink — latency/loss
+    "graphics-handoff-failed": "risk",   # F40 scorebug never reached VPU.exe on recent
+                                         #     events (Pixellot 5.37.x on-box fault).
+                                         #     The game still airs, without graphics,
+                                         #     and it recurs, so WARN. Field: Tanque
+                                         #     Verde, MacLaren, Armstrong IL (2026-09).
+    "graphics-engine-none":  "risk",     # F41 agent turns graphics off because no
+                                         #     scoreboard type is selected. Airs clean
+                                         #     of graphics every game until fixed.
+                                         #     Field: Merrol Hyde, 2026-08-17.
     # F14 temp≥90, F15b D:>90, F17 CPU sustained, F19 mem sustained are computed
     # below (readiness-specific thresholds the dashboard findings don't surface).
 
@@ -2696,6 +2920,10 @@ _READINESS_POLICY = {
                                          #      (LogMeIn / python.org) - remote
                                          #      support and installer downloads
                                          #      suffer, tonight's game does not.
+    "ssl-inspection-support": "info",    # F37b only support-plane hosts inspected
+                                         #      (LogMeIn / python.org); every
+                                         #      broadcast host passed. Same
+                                         #      rationale as F38b.
     "lmi-ssl-blocked":       "info",     # F39 LogMeIn's own service log shows the
                                          #     venue killing its TLS handshakes
                                          #     (SSL error on client hello) with no
@@ -2712,6 +2940,18 @@ def _readiness_class(code: str) -> str:
     """Map a finding code to its readiness class. Unmapped / unknown codes →
     `info` (Ian's call: note an unverifiable or new check, never gate on it)."""
     return _READINESS_POLICY.get(code or "", "info")
+
+
+def _tag_readiness(findings) -> list:
+    """Stamp each coded finding with its readiness class, so every tab that
+    lists findings can say "Stops tonight's game / Risk tonight / Worth
+    knowing" exactly as the Dashboard does (app.js _findingTone). The
+    Network and Camera tabs used to print the raw collector severity
+    (CRITICAL/WARNING/INFO), so one finding had two names on two tabs."""
+    for f in findings or []:
+        if isinstance(f, dict) and f.get("code"):
+            f["readinessClass"] = _readiness_class(f["code"])
+    return findings
 
 
 def _disk_used_by_letter(disk_health, performance):
@@ -2759,8 +2999,9 @@ def _compute_readiness(findings, performance=None, disk_health=None,
             "category": category,
         }
         # The venue-IT line, the evidence and the per-row detail ride along so
-        # Copy for ticket can paste the whole finding, not just its body.
-        for k in ("it", "evidence", "details"):
+        # Copy for ticket can paste the whole finding, not just its body; the
+        # severity lets it label an info-class problem "Fix soon".
+        for k in ("it", "evidence", "details", "severity"):
             if source and source.get(k):
                 entry[k] = source[k]
         {"blocker": blockers, "risk": risks}.get(cls, info).append(entry)
@@ -3619,7 +3860,7 @@ def _compute_camera_findings(ports: list, poe=None) -> list:
 # ─── Data-building helpers (shared by per-page and preload) ──
 
 
-def _build_dashboard(identity, performance, services, nics, network_config=None, hardware=None, installed_sw=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, perf_sample=None, probe_results=None, tls_inspection=None, lmi_log=None):
+def _build_dashboard(identity, performance, services, nics, network_config=None, hardware=None, installed_sw=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, perf_sample=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None):
     # Tag adapter roles (motherboard / camera / wifi) so both the findings and
     # the embedded "Network config" the dashboard ships carry them.
     _classify_network_adapters(network_config)
@@ -3675,13 +3916,14 @@ def _build_dashboard(identity, performance, services, nics, network_config=None,
         "Hardware": hardware,
         "Installed software": installed_sw,
         "Port connectivity": port_tests,
+        "Graphics delivery": graphics_delivery,
     }
     source_errors = [
         name for name, data in _sources.items()
         if isinstance(data, dict) and data.get("error")
     ]
 
-    findings = _compute_findings(identity, performance, services, nics, hardware, installed_sw, network_config, install_state, port_tests, gpu_info, wifi, pixellot_config=pixellot_config, expectations=expectations, disk_health=disk_health, probe_results=probe_results, tls_inspection=tls_inspection, lmi_log=lmi_log)
+    findings = _compute_findings(identity, performance, services, nics, hardware, installed_sw, network_config, install_state, port_tests, gpu_info, wifi, pixellot_config=pixellot_config, expectations=expectations, disk_health=disk_health, probe_results=probe_results, tls_inspection=tls_inspection, lmi_log=lmi_log, graphics_delivery=graphics_delivery)
 
     return {
         "identity": flat_identity,
@@ -3729,7 +3971,7 @@ def _build_network(config, domains, ports, ntp, local=None, ntp_peers=None, dns_
     _attach_impact(ports, domains, tls)
     net_findings = [
         f for f in (_uplink_findings(config if config and not config.get("error") else None, wifi)
-                    + _tls_findings(tls) + _lmi_findings(lmi_log) + _stream_findings(ports))
+                    + _tls_findings(tls, lmi_log) + _lmi_findings(lmi_log) + _stream_findings(ports))
         if f.get("code") in NET_CARD_FINDING_CODES
     ]
 
@@ -3738,7 +3980,7 @@ def _build_network(config, domains, ports, ntp, local=None, ntp_peers=None, dns_
     return {"config": net, "domains": domains, "ports": ports, "ntp": ntp,
             "local": local, "ntpPeers": ntp_peers,
             "dnsResolution": dns_resolution, "wifi": wifi, "tls": tls,
-            "lmiLog": lmi_log, "findings": net_findings}
+            "lmiLog": lmi_log, "findings": _tag_readiness(net_findings)}
 
 
 # ─── Routes ───────────────────────────────────────────────────
@@ -3803,8 +4045,16 @@ async def api_server_log(tail: int = Query(default=200)):
 
 
 @app.get("/api/scripts/running")
-async def api_scripts_running():
-    return {"tasks": get_running_tasks()}
+async def api_scripts_running(since: Optional[int] = Query(default=None)):
+    """In-flight collectors. With `since`, also the script log from that index,
+    so the splash feed costs one request per poll: during a cold start the
+    browser's six connections per host are already busy with the sweep."""
+    out = {"tasks": get_running_tasks()}
+    if since is not None:
+        logs = list(LOG_BUFFER)
+        out["logs"] = logs[max(0, since):]
+        out["total"] = len(logs)
+    return out
 
 
 @app.post("/api/scripts/cancel")
@@ -3835,7 +4085,7 @@ async def _collect_dashboard() -> dict:
     launch check-in beacon so both score readiness with identical inputs."""
     (identity, performance, services, nics, net_config, hardware, installed_sw,
      install_state, port_tests, gpu_info, wifi, pixellot_config, expectations,
-     disk_health, perf_sample, tls_inspection, lmi_log) = await asyncio.gather(
+     disk_health, perf_sample, tls_inspection, lmi_log, graphics_delivery) = await asyncio.gather(
         run_ps("Get-SystemIdentity.ps1"),
         run_ps("Get-Performance.ps1"),
         run_ps("Get-Services.ps1"),
@@ -3867,6 +4117,10 @@ async def _collect_dashboard() -> dict:
         # LogMeIn's own service log — the historical half of the middlebox
         # story (feeds the "venue is killing LogMeIn's connection" warning).
         run_ps("Get-LmiGatewayLog.ps1", timeout=20),
+        # GraphicsManager / VPU / agent logs from the last week of events:
+        # did the scorebug ever reach the video? ~1s on VPU2; the collector
+        # stops itself at 25s and says so.
+        run_ps("Get-GraphicsDelivery.ps1", timeout=40),
     )
     # CGI probe (cached 30s; usually already warm from preload) so the
     # slow-port finding identifies the OCR by its actual camera model, not a
@@ -3905,7 +4159,7 @@ async def _collect_dashboard() -> dict:
         pixellot_config=pixellot_config, expectations=expectations,
         disk_health=disk_health, perf_sample=perf_sample,
         probe_results=probe_results, tls_inspection=tls_inspection,
-        lmi_log=lmi_log,
+        lmi_log=lmi_log, graphics_delivery=graphics_delivery,
     )
 
 
@@ -4224,7 +4478,7 @@ async def api_cameras(refresh: bool = False):
     return {
         "ports": ports,
         "pixellotConfig": pix_config,
-        "findings": count_findings + _compute_camera_findings(ports, poe),
+        "findings": _tag_readiness(count_findings + _compute_camera_findings(ports, poe)),
         "systemType": system_type,
         "expectedMainCameras": expected_main,
         # The same count the camera-count finding uses, for the camera-head
@@ -4733,12 +4987,62 @@ async def api_audio_volume(request: Request):
     return await run_ps("Set-AudioVolume.ps1", {"DeviceId": device_id, "Volume": volume}, use_cache=False)
 
 
+def _scoreboard_source(sc, ocr) -> dict:
+    """Where this VPU gets its score, and whether that source is working.
+
+    A VPU reads the score EITHER with an OCR camera pointed at the board OR
+    from the scoreboard controller through ScoreConnect. Only the one in use
+    matters (Ian, Armstrong IL 2026-09-28: Pulse warned "ScoreConnect not
+    running" on a unit whose OCR camera was connected and doing the job):
+      - OCR configured or detected: fine while the camera is connected,
+        whatever ScoreConnect is doing; an issue when it isn't connected.
+      - no OCR: ScoreConnect (III, or legacy I/II) must be running.
+    `ocr` is _scoreboard_camera_state()'s answer; None means no OCR camera
+    is configured or seen. ocrKnown False means the camera read itself
+    failed, so the OCR half is unknown and ScoreConnect is judged alone."""
+    sc = sc if isinstance(sc, dict) else {}
+    sc_running = bool(not sc.get("error") and (
+        sc.get("reachable") or (sc.get("sc2") or {}).get("reachable")))
+    ocr_known = ocr != "unknown"
+    ocr = ocr if isinstance(ocr, dict) else None
+    if ocr and (ocr.get("configured") or ocr.get("connected")):
+        connected = bool(ocr.get("connected"))
+        return {"source": "ocr", "ok": connected,
+                "issue": None if connected else "ocr-not-connected",
+                "ocrConnected": connected, "ocrPort": ocr.get("port"),
+                "scoreConnectRunning": sc_running, "ocrKnown": True}
+    return {"source": "scoreconnect", "ok": sc_running,
+            "issue": None if sc_running else "scoreconnect-down",
+            "ocrConnected": False, "ocrPort": None,
+            "scoreConnectRunning": sc_running, "ocrKnown": ocr_known}
+
+
 @app.get("/api/scoreconnect")
 async def api_scoreconnect():
     settings = load_settings()
     url = settings.get("scoreConnectUrl", "http://localhost:5000")
     # 15s timeout — SC III REST probes ~2-4s, SC II file-based probe < 2s.
-    return await _run_sc_status(url, timeout=15)
+    # The camera reads ride along (both cached, and the CGI probe is usually
+    # warm from preload) so the page and the splash know whether an OCR
+    # camera makes ScoreConnect optional on this unit.
+    result, nics, pix_config = await asyncio.gather(
+        _run_sc_status(url, timeout=15),
+        run_ps("Get-NicAdapters.ps1"),
+        run_ps("Get-PixellotConfig.ps1"),
+    )
+    ocr = "unknown"
+    try:
+        if nics and not nics.get("error"):
+            ocr_ips, _ = _build_ocr_sets(pix_config)
+            # block=False: cached probes (warm from preload) or default-IP /
+            # cameras.cfg identity; never hold the page on a slow camera.
+            probes = await _probe_all_cameras(nics.get("ports", []), ocr_ips, block=False)
+            ocr = _scoreboard_camera_state(_enrich_ports(nics, pix_config, probes), pix_config)
+    except Exception as e:
+        _server_log.warning("ScoreConnect OCR check failed: %s", e)
+    if isinstance(result, dict):
+        result["scoreboardSource"] = _scoreboard_source(result, ocr)
+    return result
 
 
 @app.get("/api/scoreconnect/history")
@@ -5203,6 +5507,7 @@ async def _send_checkin() -> None:
         cs   = ident.get("computerSystem") or {}
         bios = ident.get("bios") or {}
         px   = ident.get("pixellot") or {}
+        os_  = ident.get("operatingSystem") or {}
         payload = {
             "secret":       secret,
             "hostname":     cs.get("name"),
@@ -5212,7 +5517,17 @@ async def _send_checkin() -> None:
             "model":        cs.get("model"),
             "pulseVersion": APP_VERSION,
             "channel":      _update_channel(),
+            "osBuild":      os_.get("buildNumber"),
         }
+        # UBR tells an unpatched 17763.253 unit from a patched one; the build
+        # number alone can't. Fail-open: the check-in goes out without it.
+        try:
+            ubr = await run_ps("Get-WindowsUbr.ps1", timeout=10)
+            if isinstance(ubr, dict) and not ubr.get("error"):
+                payload["ubr"] = ubr.get("ubr")
+                payload["osBuild"] = payload["osBuild"] or ubr.get("currentBuild")
+        except Exception as e:
+            _server_log.info("Check-in UBR skipped (%s)", e)
         # Stream Readiness verdict on the beacon → a pre-game-readiness time
         # series at ~zero marginal cost (the beacon already fires on launch).
         # Fail-open like everything else here: a readiness error never blocks

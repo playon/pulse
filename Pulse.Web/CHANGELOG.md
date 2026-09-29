@@ -22,6 +22,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 
 ## [Unreleased]
 
+### Changed
+- Findings on the Dashboard, Network Test and Camera Connectivity are now one short list: one line per finding, most urgent first, with the fix a click away. A summary at the top says how many stop tonight's game, how many are risks tonight, how many to fix soon, and how many are just worth knowing. "Fix soon" is new: a real problem that won't affect tonight's game, such as a web filter blocking LogMeIn, used to be labelled "Risk tonight". The worth-knowing notes fold into one line, and every tab uses the same words for how serious a finding is.
+
+### Added
+- Pulse now checks the last week of games for missing graphics. It flags a VPU where the Pixellot software never passed the scorebug to the video (the "missing graphics" bug: the scoreboard and network are fine, but games stream with no graphics), and a VPU with no scoreboard type selected, which turns graphics off for every game.
+
+### Fixed
+- ScoreConnect not running is no longer a warning on a VPU whose OCR camera is connected and reading the score. Pulse now checks whichever score source the VPU uses: the OCR camera if it has one, otherwise ScoreConnect.
+- A web filter blocking LogMeIn's website is no longer reported as SSL inspection or as a Stream Readiness failure. Pulse now says it's a category block. When LogMeIn is connected it's shown as a note, not a warning, because remote support still works.
+- Pulse now warns when the VPU is on Wi-Fi even if a cable is plugged into the main network port, and no longer tells you to fix the switch's duplex setting for a Wi-Fi connection.
+- Pulse no longer says the venue is blocking LogMeIn when LogMeIn is connected. It was reading an old block in LogMeIn's log as a current one, even while a tech was on the unit through LogMeIn.
+
+## [1.3.2] - 2026-09-25
+
+### Changed
+- The live scoreboard on the ScoreConnect page now labels every value (Away Score, Home Score, Quarter/Inning/Period, Time, Down & Distance, Ball On, Clock) and the home score lines up under its team name again.
+- The loading screen now shows each check's result as it finishes (Pass, Warning, Critical, or Couldn't check) on a map of the setup: cameras, VPU, venue network, Pixellot cloud and scoreboard. It lists every issue as it's found, shows which scripts are running, and ends on the stream readiness verdict before opening Pulse.
+
 ## [1.3.1] - 2026-09-22
 
 ### Added

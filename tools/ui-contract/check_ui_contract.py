@@ -47,7 +47,7 @@ STATIC = os.path.join("Pulse.Web", "app", "static")
 # Ratchet baselines. These are debts that predate the guard, not permissions.
 # Lower each number when you pay one down; the guard fails if it goes up.
 # ---------------------------------------------------------------------------
-MAX_LITERALS = 47      # raw colour literals outside :root / html.dark
+MAX_LITERALS = 46      # raw colour literals outside :root / html.dark
 MAX_FALLBACKS = 13     # var(--token, <literal>) second values
 MAX_BARE_OUTLINE = 9   # outline:none rules with no :focus-visible partner
 
