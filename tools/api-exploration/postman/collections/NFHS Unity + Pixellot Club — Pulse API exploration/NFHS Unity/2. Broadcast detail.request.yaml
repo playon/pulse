@@ -1,0 +1,20 @@
+$kind: http-request
+description: Broadcast detail — headline, status (on_air/complete/scheduled), vod_key, publisher + association, HD flag. Captures vod_key for the VOD URL request.
+url: "{{unity_base}}/v2/broadcasts/{{broadcast_key}}"
+method: GET
+headers:
+  Authorization: "{{nfhs_auth}}"
+  Accept: application/json
+scripts:
+  - type: afterResponse
+    code: |-
+      pm.test('200 OK', () => pm.response.to.have.status(200));
+      let j; try { j = pm.response.json(); } catch (e) { return; }
+      const d = j.data || j;
+      const grab = (obj, names) => names.map(n => obj[n]).find(v => v !== undefined && v !== null);
+      const set = (envKey, val) => { if (val) { pm.environment.set(envKey, String(val)); console.log(envKey + ' = ' + val); } };
+      set('vod_key', grab(d, ['vod_key', 'vodKey']));
+      set('game_key', grab(d, ['game_key', 'gameKey']));
+      console.log('status:', d.status, '| headline:', d.headline, '| hd:', grab(d, ['hd_enabled','hdEnabled','hd']));
+    language: text/javascript
+order: 2000
