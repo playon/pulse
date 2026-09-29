@@ -105,7 +105,12 @@ def _sc_config_snapshot(result):
     have no data-present signal, so history records SC III only.)"""
     if not isinstance(result, dict) or not result.get("reachable"):
         return None
-    if "data is present" not in str(result.get("dataStatus") or "").lower():
+    # Only "...and in the correct format" is a working setup. SC III also says
+    # "Data is present but not in the proper format" when the console sends
+    # data the setup can't read: a wrong Fair-Play code did exactly that on
+    # vpu-home (2026-09-29), and the old substring check would have recorded
+    # it here as known-good.
+    if "correct format" not in str(result.get("dataStatus") or "").lower():
         return None
     cfg = result.get("configuration") or {}
     bot = result.get("botStatus") or {}
@@ -325,6 +330,13 @@ async def _on_startup():
     # filled in, and never in demo/dev). Scheduled so it can't delay startup.
     try:
         asyncio.create_task(_send_checkin())
+    except Exception:
+        pass
+
+    # Fire-and-forget: make sure ScoreConnect III restarts itself after its
+    # known crash (see _ensure_sc3_recovery). Free when already configured.
+    try:
+        asyncio.create_task(_ensure_sc3_recovery())
     except Exception:
         pass
 
@@ -5060,7 +5072,646 @@ async def api_scoreconnect():
         _server_log.warning("ScoreConnect OCR check failed: %s", e)
     if isinstance(result, dict):
         result["scoreboardSource"] = _scoreboard_source(result, ocr)
+        if DEMO_MODE:
+            from demo_data import _demo_sc_scenario_source
+            result["scoreboardSource"] = _demo_sc_scenario_source(result["scoreboardSource"])
+            # After a demo save, report what the simulated SC III now holds.
+            if _demo_sc3 is not None and result.get("configuration"):
+                c = _demo_sc3.cfg
+                result["configuration"] = dict(result["configuration"], vendor=c["vendorName"],
+                                               sport=c["vendorSportName"],
+                                               vendorConfigurationName=c["vendorConfigurationName"])
+        try:
+            result.update(_sc_chain_payload(result))
+        except Exception as e:
+            _server_log.warning("ScoreConnect chain payload failed: %s", e)
+            result["chainError"] = str(e)
     return result
+
+
+# ── ScoreConnect chain: VPU > ScoreLink > cable > extension > console ──
+# The ScoreConnect tab draws the physical chain and points at the link that
+# is broken. Pulse measures three things on it (SC III answering, the
+# ScoreLink on USB plus SC III's own serial log, and whether scoreboard data
+# arrives); everything past the ScoreLink is either inferred from SC III's
+# vendor setting or confirmed by the tech on the phone with the school. The
+# page picks the break from live signals; the words it shows live here.
+
+import sc3_client  # noqa: E402
+
+SC_CHAIN_PATH = _os.path.join(_web_root, "pulse-scoreconnect-chain.json")
+SC3_PREVIOUS_PATH = _os.path.join(_web_root, "pulse-sc3-previous.json")
+SC3_BACKUP_DIR = _os.path.join(_web_root, "sc3-backups")
+_SC_CHAIN_IMG_DIR = _os.path.join(_app_dir, "static", "img", "sc")
+
+_demo_sc3 = None
+
+
+def _sc3_call():
+    """SC III transport: the real local REST API, or the demo simulator."""
+    global _demo_sc3
+    if DEMO_MODE:
+        if _demo_sc3 is None:
+            from sc3_demo_catalog import CATALOG
+            from demo_data import _demo_sc_scenario
+            _demo_sc3 = sc3_client.DemoSc3(CATALOG)
+            # A save takes seconds on a real unit; the demo scan shows it.
+            _demo_sc3.save_delay = 1.5
+            if _demo_sc_scenario() == "wrong-format":
+                # SC III is set to Daktronics 3000 Football; the console sends
+                # Daktronics Football, so Find the code has something to find.
+                _demo_sc3.console_sport = "Daktronics Football"
+        return _demo_sc3
+    return sc3_client.http_transport(load_settings().get("scoreConnectUrl", "http://localhost:5000"))
+
+
+def _sc3_settings():
+    if DEMO_MODE:
+        return _sc3_call().settings()
+    return sc3_client.read_sc3_settings()
+
+
+def _sc3_serial_state():
+    if DEMO_MODE:
+        from demo_data import _demo_sc_serial_state
+        st = _demo_sc_serial_state()
+        if _demo_sc3 is not None:
+            st.update(configMode=_demo_sc3.device_type, configProblem=_demo_sc3.config_problem)
+        return st
+    return sc3_client.read_sc3_serial_state()
+
+
+def _pixellot_score_source():
+    if DEMO_MODE:
+        return {"source": "SPORTZCAST", "botNumber": "02130", "error": None}
+    return sc3_client.read_graphics_cfg()
+
+
+# Which console takes which tip of the multi-tip cable, and into which port.
+# Source: NFHS "Scoreboard Controllers" support article (Mar 2026), digested in
+# docs/scoreboard-controllers.md; change the two together. The multi-tip
+# cable's 9-pin end goes into the ScoreLink's SCOREBOARD port and one of its
+# three tips (red 1/4", gray 1/4", black BNC) into the console. Bench-proven
+# on vpu-home, 2026-09-29: All Sport 5000 on the gray tip (ScoreLink II,
+# 19200 baud) and Fair-Play MP-70 on the red tip (ScoreLink, 57600 baud), both
+# with the score read correctly off the live console.
+#   tip        gray | red | bnc | custom | wireless | None (not compatible)
+#   extension  trs (1/4" stereo) | coax (50-ohm only) | none
+#   match      lowercase substrings of SC III's vendor + sport names that
+#              identify the model when the school has not said
+SC_BRAND_TIPS = {"daktronics": "gray", "electromech": "gray", "fairplay": "red", "nevco": "bnc"}
+SC_CONSOLES = [
+    {"id": "dak-1600", "brand": "daktronics", "name": "All Sport 1600", "tip": "gray", "port": "J1 or J2 on the back",
+     "extension": "trs", "sports": "Baseball and football only", "match": ["daktronics 1600"],
+     "note": "A model number ending R6 (e.g. 1610R6) can use a wireless ScoreLink."},
+    {"id": "dak-2000", "brand": "daktronics", "name": "All Sport 2000", "tip": None, "match": ["daktronics 2000"],
+     "note": "Not compatible with ScoreConnect. The school can upgrade the console, or use a PiP camera or "
+             "manual scoring in Console."},
+    {"id": "dak-3000", "brand": "daktronics", "name": "All Sport 3000", "tip": "gray", "port": "J1, J2 or J3 on the back",
+     "extension": "trs", "sports": "Football only", "match": ["daktronics 3000"]},
+    {"id": "dak-4000", "brand": "daktronics", "name": "All Sport 4000", "tip": "gray", "port": "J1, J2 or J3 on the back",
+     "extension": "trs", "sports": "Baseball, basketball, football, hockey and volleyball", "match": ["daktronics 4000"]},
+    {"id": "dak-5000", "brand": "daktronics", "name": "All Sport 5000", "tip": "gray", "port": "J1, J2 or J3 on the back",
+     "extension": "trs", "match": [],
+     "note": "R6 at the end of the model number (sticker above the power cable) means it can use a wireless ScoreLink."},
+    {"id": "dak-5500", "brand": "daktronics", "name": "All Sport 5500", "tip": "gray", "port": "J1, J2 or J3 on the back",
+     "extension": "trs", "sports": "Basketball only", "match": ["daktronics 5500"]},
+    {"id": "dak-cg", "brand": "daktronics", "name": "All Sport CG", "tip": "custom", "port": "the CG's Control port",
+     "extension": "none", "match": ["allsport cg", "all sport cg"], "setting": "Use the All Sport CG settings.",
+     "note": "Connects with a straight-through serial cable (male to female). Do not use a null adapter."},
+    {"id": "dak-pro", "brand": "daktronics", "name": "All Sport Pro", "tip": "gray", "port": "J1, J2 or J3 (Series 1)",
+     "extension": "trs", "match": [], "setting": "Use the regular Daktronics codes.",
+     "note": "The smaller Series 2 needs a Daktronics wireless ScoreLink; its 1/4\" jack does not work."},
+    {"id": "dak-mx1", "brand": "daktronics", "name": "All Sport MX-1", "tip": "gray",
+     "port": "the interface box, through Daktronics' signal cable and a 1/4\" coupler", "extension": "trs",
+     "match": [], "setting": "Use the All Sport 5000 codes."},
+    {"id": "dak-rc", "brand": "daktronics", "name": "RC-100 or RC-200 handheld", "tip": None, "match": [],
+     "note": "Not compatible with ScoreConnect. The school can upgrade (All Sport 5000, MX-1 or Pro) or use a "
+             "PiP camera."},
+    {"id": "em", "brand": "electromech", "name": "Electro-Mech console", "tip": "gray",
+     "port": "an output labelled Scoreboards on the back", "extension": "trs", "match": [],
+     "note": "Only one output? Try a splitter, or Electro-Mech can add one. An SL-400 sticker on the bottom means "
+             "it can use a wireless ScoreLink."},
+    {"id": "fp-mp70", "brand": "fairplay", "name": "MP-70 (MP-71, 72, 73)", "tip": "red",
+     "port": "Scoreboard port 1 or 2 on the back", "extension": "trs", "match": ["mp70", "mp-70"],
+     "note": "Software 3.0 or higher (shown when it starts up) can use a Fair-Play wireless ScoreLink."},
+    {"id": "fp-mp50", "brand": "fairplay", "name": "MP-50 (MP-51, 52, 53)", "tip": "red",
+     "port": "Scoreboard port 1 or 2 on the back", "extension": "trs", "match": [],
+     "setting": "Set it up as an MP-70."},
+    {"id": "fp-mp69", "brand": "fairplay", "name": "MP-69", "tip": "red", "port": "the scoreboard output",
+     "extension": "trs", "sports": "Football and baseball only", "match": ["mp69", "mp-69"],
+     "setting": "Use the MP-69 codes."},
+    {"id": "fp-mp80", "brand": "fairplay", "name": "MP-80 or MP-60", "tip": "wireless", "match": ["mp80", "mp-80"],
+     "setting": "Use the Fairplay MP80 settings.",
+     "note": "Wireless only, with no data outputs. It needs a wireless ScoreLink."},
+    {"id": "nv-mpc", "brand": "nevco", "name": "MPC-5, MPC-6, MPC-7 (or MPCW)", "tip": "bnc",
+     "port": "the console's BNC data output", "extension": "coax", "match": [],
+     "setting": "For MPC-7 soccer, use the MPC-7 Football code."},
+    {"id": "nv-handheld", "brand": "nevco", "name": "MPC-X or MPCX2 handheld", "tip": None, "match": [],
+     "note": "Not compatible with ScoreConnect. The school can upgrade to a tabletop console or use a PiP camera."},
+    {"id": "aa-3000", "brand": "other", "name": "All-American 3000", "tip": "red", "port": "the added 1/4\" jack",
+     "extension": "trs", "sports": "Football only", "match": ["all american model 3000"],
+     "note": "Only after SportzCast adds a 1/4\" output jack. Needs the old ScoreConnect 3.4.5.0."},
+    {"id": "aa-8000", "brand": "other", "name": "All-American 8000 or 9000", "tip": "custom",
+     "port": "the Scoreboard port (8000) or Hardwire port (9000)", "extension": "none",
+     "match": ["all american model 8000", "all american model 9000"], "note": "Uses a PlayOn custom cable."},
+    {"id": "eversan", "brand": "other", "name": "Eversan 9700", "tip": "custom", "port": "a DATA port",
+     "extension": "none", "match": ["eversan"], "note": "Uses a custom cable made to length. No extensions."},
+    {"id": "oes", "brand": "other", "name": "OES ISC 9000", "tip": "custom", "port": "GAME OUT", "extension": "none",
+     "match": ["oes"], "note": "4-pin XLR to 9-pin cable with the OES (RS422) settings, or a 9-pin null modem cable "
+                              "with OES (RS232)."},
+    {"id": "sp-msx", "brand": "other", "name": "Spectrum MSX or MSX5", "tip": "red", "port": "the added 1/4\" jack",
+     "extension": "trs", "match": ["spectrum v2"], "setting": "Never use the Spectrum settings ending (RS232).",
+     "note": "Only after a 1/4\" jack is added. Data that cycles through test numbers means TEST MODE: restart "
+             "the console and start a new game."},
+    {"id": "sp-ms250", "brand": "other", "name": "Spectrum MS250", "tip": None, "match": ["spectrum ms250"],
+     "note": "Not compatible with ScoreConnect. The school can upgrade to an MSX or MSX5, or use a PiP camera."},
+    {"id": "varsity", "brand": "other", "name": "Varsity, All-Star, Sportable or BSN", "tip": "custom",
+     "port": "DIN1 or DIN2 on the back", "extension": "none", "match": ["varsity"],
+     "setting": "Use the Varsity settings.", "note": "Uses a PlayOn custom cable. No wireless option."},
+    {"id": "colorado", "brand": "other", "name": "Colorado Time Systems", "tip": None, "match": ["colorado"],
+     "note": "Treat as not supported: there are no pool score graphics. Lane timers use a PiP camera."},
+    {"id": "major", "brand": "other", "name": "Major Display", "tip": None, "match": [],
+     "note": "Not compatible with ScoreConnect. Use an OCR camera for the score."},
+]
+
+# Every sentence the chain says. Each break: the title is cause + effect, `say`
+# is what the agent reads to the school, `where` names the node(s) to light.
+SC_CHAIN_COPY = {
+    "breaks": {
+        "sc3-down": {
+            "title": "ScoreConnect III isn't answering on this VPU, so no score can reach the stream",
+            "say": "Start it with the button below. It has a known crash; if crash auto-restart is not on "
+                   "(panel further down), turn it on so Windows restarts it by itself next time.",
+            "where": ["vpu"], "tone": "critical"},
+        "usb-missing": {
+            "title": "The ScoreLink isn't plugged into the VPU, so no score can reach the stream",
+            "say": "Ask the school to find the {device} and follow its USB cable to the VPU. Unplug it and "
+                   "plug it into a different USB port on the back of the VPU. This page shows it the moment "
+                   "Windows sees it.",
+            "where": ["usb"], "tone": "critical"},
+        "serial-failing": {
+            "title": "Windows sees the ScoreLink, but ScoreConnect can't open it",
+            "say": "Ask the school to unplug the ScoreLink's USB cable, wait ten seconds, and plug it back in. "
+                   "If this stays, restart the ScoreConnect III service.",
+            "where": ["usb", "device"], "tone": "critical"},
+        # vpu-home 2026-09-29: SC III set to ScoreLink with a ScoreLink II
+        # plugged in kept reading data, because the device kept the chip setup
+        # from its last correct run. SC III cannot reprogram it until they match.
+        "config-problem": {
+            "title": "ScoreConnect couldn't set up the ScoreLink the last time its setup changed",
+            "say": "ScoreConnect III said: \"{configProblem}\" It is set for a {sc3Device}. The usual cause is "
+                   "that model not matching the device plugged in: use Change setup to pick the right ScoreLink. "
+                   "Data can keep flowing on the device's old settings, so fix this before changing the console "
+                   "or the tip.",
+            "where": ["device"], "tone": "warning"},
+        "device-mismatch": {
+            "title": "ScoreConnect is set up for a {sc3Device}, but the school says a {device} is plugged in",
+            "say": "Scores can still come through, because the device keeps its last settings, but ScoreConnect "
+                   "can't update them until the model matches. Use Change setup to pick the {device}.",
+            "where": ["device"], "tone": "soon"},
+        "cable-mismatch": {
+            "title": "The {model} takes the {tipNeeded}, but the school says the {tip} is plugged in",
+            "say": "Ask the school to unplug the {tip} and plug the {tipNeeded} of the same cable into {port}.",
+            "where": ["cable"], "tone": "warning"},
+        "console-unsupported": {
+            "title": "The {model} can't send its score to ScoreConnect",
+            "say": "{consoleNote}",
+            "where": ["controller"], "tone": "critical"},
+        "vendor-mismatch": {
+            "title": "ScoreConnect is set for {vendor}, but the console is a {brand}, so the score will be wrong or missing",
+            "say": "Use Change setup below to pick the console's brand and sport. The brand and model are "
+                   "printed on the front of the console.",
+            "where": ["controller"], "tone": "warning"},
+        # Two measured "no data" signatures (vpu-home, 2026-09-29). A console
+        # switched off, its tip pulled out, or the 9-pin end pulled out of the
+        # ScoreLink all look the same: packets stop, SC III keeps the last one
+        # and says "Connected". SC III set for the wrong brand instead says "No
+        # Scoreboard data" with nothing in the data field, as does a ScoreLink
+        # with nothing plugged into it.
+        "data-stopped": {
+            "title": "The console stopped sending data, so the score on the stream is stuck",
+            "say": "Something between the console and the ScoreLink came apart or went off. Ask the school: is "
+                   "the console on and running a game? Is the {tip} pushed all the way into {port}? Is the "
+                   "9-pin end screwed into the SCOREBOARD port on the {device}? {extensionAsk}",
+            "where": ["cable", "extension", "controller"], "tone": "warning"},
+        # Measured on vpu-home 2026-09-29 (Fair-Play MP-70 at board 23): SC III
+        # set to Football Code 24, Basketball Code 1 or Baseball Code 34 says
+        # "Data is present but not in the proper format" with an empty data
+        # field. The cable and console are fine; the setup is not.
+        "wrong-format": {
+            "title": "The console is sending data, but it doesn't match ScoreConnect's setup, so no score comes through",
+            "say": "The cable and console are working. ScoreConnect is set to {sport}, which is not what the console "
+                   "is sending. {codeHint}If the school can read the code off the console, use Change setup to pick "
+                   "it. If not, Find the code tries each of ScoreConnect's {vendor} codes until one reads.",
+            "where": ["controller"], "tone": "warning"},
+        # While Find the code runs, the status flips on every code it tries;
+        # this one line stands in for the findings that would flicker.
+        "scanning": {
+            "title": "Pulse is trying ScoreConnect's {vendor} codes to find the one the console sends",
+            "say": "The score is not reaching the stream until a code matches. Progress is under Scoreboard "
+                   "connection below.",
+            "where": ["controller"], "tone": "info"},
+        "no-data": {
+            "title": "ScoreConnect isn't getting any data it can read from the console",
+            "say": "Normal while the console is off. Before a game, ask the school: is the console on and running "
+                   "a game? Is the Power light on the {device} green? Is the {tip} pushed all the way into {port}? "
+                   "{extensionAsk}If all of that is fine, ScoreConnect may be set for the wrong brand: it is set "
+                   "for {vendor}. Check the console's brand and use Change setup if it is different.",
+            "where": ["cable", "extension", "controller"], "tone": "warning"},
+        "intermittent": {
+            "title": "Scoreboard data keeps dropping out ({drops} times since this page opened)",
+            "say": "That is usually a loose cable. Ask the school to push the cable in firmly at the console "
+                   "and at the ScoreLink. {extensionDrop}",
+            "where": ["cable", "extension"], "tone": "warning"},
+        "no-recovery": {
+            "title": "ScoreConnect III won't restart itself after its known crash",
+            "say": "It has a crash that stops the service. With auto-restart on, Windows restarts it within "
+                   "seconds instead of leaving the scoreboard down until someone notices. Pulse turns this on "
+                   "each time it starts; it did not take on this VPU, so use the button below.",
+            "where": ["vpu"], "tone": "soon"},
+        # Pixellot's scoreboard source (graphics.cfg [GENERAL] TYPE) is Pixellot's
+        # own configuration, read-only here. It is what the unit is set to use,
+        # not a fault, and Pulse never changes it: that is done in VPU Manager
+        # (Ian, 2026-09-29).
+        "pixellot-ocr": {
+            "title": "Pixellot is set to take the score from the OCR camera, not ScoreConnect",
+            "say": "That is how this VPU is configured, so ScoreConnect's data is not what reaches the stream. "
+                   "If this venue should use ScoreConnect instead, change the scoreboard source in VPU Manager.",
+            "where": ["vpu"], "tone": "info"},
+        "pixellot-other": {
+            "title": "Pixellot's scoreboard source is set to {pixellotSource}",
+            "say": "That is how this VPU is configured. If data arrives here but the stream shows no score, "
+                   "check this setting in VPU Manager.",
+            "where": ["vpu"], "tone": "info"},
+    },
+    "healthy": "Scoreboard data is arriving, so every link from the VPU to the console is working.",
+    "legacy": "This VPU runs {legacy}. Pulse can see the ScoreLink but not live scoreboard data, so the "
+              "cable and console links can't be checked from here.",
+    "ocr": "The OCR camera reads the score on this VPU, so ScoreConnect isn't needed.",
+    "symptoms": {
+        "no-score": {
+            "label": "No score on the stream",
+            "where": ["cable", "extension", "controller"],
+            "checks": [
+                "Is the console on, with a game running (not a menu or setup screen)?",
+                "Is the Power light on the {device} green?",
+                "Is the {tip} of the cable pushed all the way into {port}?",
+                "Is the 9-pin end of the cable screwed into the SCOREBOARD port on the {device}?",
+                "{extensionCheck}",
+                "{extensionKind}",
+                "If data is arriving here but the stream still has no score, the break is after ScoreConnect: "
+                "check Pixellot's scoreboard source and the scorebug on the Graphics tab.",
+            ]},
+        "wrong-score": {
+            "label": "Score is wrong",
+            "where": ["controller"],
+            "checks": [
+                "ScoreConnect is set for {vendor}, {sport}. Ask the school for the brand and model printed on "
+                "the front of the console.",
+                "If the brand or sport is different, use Change setup. A wrong sport inside the right brand "
+                "still looks like good data to ScoreConnect, so only the school can spot it.",
+                "{consoleSetting}",
+                "{consoleSports}",
+                "If the setup matches, ask whether the console itself shows the right score. ScoreConnect "
+                "only copies what the console sends.",
+            ]},
+        "freezes": {
+            "label": "Score freezes or lags",
+            "where": ["controller", "extension"],
+            "checks": [
+                "Is the console still in the game, not a menu or setup screen?",
+                "Turn the console off and on.",
+                "{extensionFreeze}",
+            ]},
+        "drops": {
+            "label": "Score drops in and out",
+            "where": ["cable", "extension"],
+            "checks": [
+                "Push the cable in firmly at the console and at the {device}.",
+                "{extensionDrop}",
+                "Make sure the cable is not pulled tight or pinched under the table.",
+            ]},
+    },
+    # Extension wording by what the school said: not asked yet, or confirmed
+    # in line. "No extension" drops these lines altogether.
+    "fills": {
+        "extensionAsk": "If there is an extension cable, are both of its joins pushed in? ",
+        "extensionCheck": "If there is an extension cable, check both of its joins are pushed in.",
+        "extensionFreeze": "If there is an extension cable, try the cable without it.",
+        "extensionDrop": "If there is an extension cable, check both of its joins, then try without it.",
+    },
+    # What kind of extension this cable takes, by the console's tip.
+    "extensionKinds": {
+        "coax": "An extension on the BNC tip must be 50-ohm coax. 75-ohm video cable looks the same and will "
+                "not carry the data.",
+        "none": "This console's cable is made to length and has no extension.",
+    },
+    # Where a console shows the code ScoreConnect has to match, by brand.
+    # Fair-Play: the startup screen reads e.g. "Brd 23 Group 001" (NFHS
+    # article photo of an MP-70), and "Brd 23" is SC III's "Code 23".
+    "codeHints": {
+        "fairplay": "A Fair-Play console shows its code when it starts up, as \"Brd\" and a number: Brd 23 "
+                    "means ScoreConnect's Code 23. ",
+    },
+    "guideLines": {
+        "sports": "ScoreConnect supports the {model} for: {sports}.",
+        "setting": "Setting tip for the {model}: {setting}",
+        "radio": "Wireless group and channel: a Daktronics scoreboard shows them at power-up as bX CY (X is the "
+                 "group, Y the channel), with radio consoles nearby switched off. Default is group 1, channel 01.",
+    },
+    "tipNames": {"gray": "gray tip", "red": "red tip", "bnc": "black BNC tip", "custom": "custom cable",
+                 "wireless": "wireless ScoreLink"},
+    "fillsExtension": {
+        "extensionAsk": "Are both joins of the extension cable pushed in? ",
+        "extensionCheck": "Check both joins of the extension cable are pushed in.",
+        "extensionFreeze": "Try the cable without the extension.",
+        "extensionDrop": "Check both joins of the extension cable, then try without it.",
+    },
+    "saveWarning": "Saving restarts ScoreConnect's connection to the console. The score stops for about 15 "
+                   "seconds (measured on a bench unit).",
+    "saveWarningLive": "Scoreboard data is arriving right now. Saving stops the score on the stream for about "
+                       "15 seconds while ScoreConnect reconnects.",
+}
+
+
+def _sc_chain_images():
+    try:
+        return sorted(n for n in _os.listdir(_SC_CHAIN_IMG_DIR) if n.lower().endswith((".png", ".jpg", ".webp")))
+    except OSError:
+        return []
+
+
+def _sc_chain_basis(result):
+    cfg = (result or {}).get("configuration") or {}
+    return {"vendorName": cfg.get("vendor"), "scoreLinkModel": (result or {}).get("scoreLinkModel") or None}
+
+
+def _sc_chain_payload(result):
+    """The chain's extra facts on the /api/scoreconnect payload. Each read
+    fails on its own and says so; none of them blocks the page."""
+    out = {
+        "chain": sc3_client.chain_with_staleness(sc3_client.load_chain(SC_CHAIN_PATH), _sc_chain_basis(result)),
+        "chainImages": _sc_chain_images(),
+        "chainCopy": SC_CHAIN_COPY,
+        "consoles": SC_CONSOLES,
+        "brandTips": SC_BRAND_TIPS,
+        "pixellotScore": _pixellot_score_source(),
+        "sc3Previous": sc3_client.load_previous(SC3_PREVIOUS_PATH),
+    }
+    if result.get("reachable"):
+        out["sc3Device"] = _sc3_settings()
+        out["sc3Serial"] = _sc3_serial_state()
+    return out
+
+
+@app.post("/api/scoreconnect/chain")
+async def api_scoreconnect_chain_save(request: Request):
+    """Save what the school confirmed about a chain part (cable, extension,
+    console, ScoreLink model). Stored on the VPU next to the config
+    history so the next call starts from it."""
+    body = await request.json()
+    update = body.get("update") if isinstance(body, dict) else None
+    if not isinstance(update, dict) or not update:
+        return {"error": True, "message": "Nothing to save."}
+    sc = await _run_sc_status(load_settings().get("scoreConnectUrl", "http://localhost:5000"), timeout=15)
+    try:
+        chain = sc3_client.save_chain(SC_CHAIN_PATH, sc3_client.load_chain(SC_CHAIN_PATH),
+                                      update, _sc_chain_basis(sc),
+                                      allowed={"model": tuple(c["id"] for c in SC_CONSOLES)})
+    except ValueError as e:
+        return {"error": True, "message": str(e)}
+    except OSError as e:
+        return {"error": True, "message": "Could not save on this VPU: %s" % e}
+    return {"error": False, "chain": sc3_client.chain_with_staleness(chain, _sc_chain_basis(sc))}
+
+
+@app.get("/api/scoreconnect/sc3/setup")
+async def api_sc3_setup():
+    """What the setup editor needs to open: SC III's current setup (ids, not
+    just names), its vendor list, and the bot number it is using."""
+    call = _sc3_call()
+    try:
+        cur = await asyncio.to_thread(sc3_client.current, call, _sc3_settings())
+        cat = await asyncio.to_thread(sc3_client.catalog, call)
+    except sc3_client.Sc3Error as e:
+        return {"error": True, "message": str(e)}
+    return {"error": False, "current": cur, "vendors": cat["vendors"],
+            "previous": sc3_client.load_previous(SC3_PREVIOUS_PATH)}
+
+
+@app.get("/api/scoreconnect/sc3/vendor/{vendor_id}")
+async def api_sc3_vendor(vendor_id: int):
+    """Sports and connection types for one vendor. Connection-type ids are
+    per vendor, so the editor re-fetches on every vendor change."""
+    try:
+        return dict(await asyncio.to_thread(sc3_client.vendor_detail, _sc3_call(), vendor_id), error=False)
+    except sc3_client.Sc3Error as e:
+        return {"error": True, "message": str(e)}
+
+
+async def _sc3_configure(req):
+    from datetime import datetime as _dtm, timezone as _tz
+    started = _dtm.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        res = await asyncio.to_thread(
+            sc3_client.configure, _sc3_call(), req, SC3_BACKUP_DIR, SC3_PREVIOUS_PATH,
+            read_settings=(lambda _p: _sc3_settings()),
+            backup=((lambda d, s: "demo: no backup") if DEMO_MODE else sc3_client.backup_settings))
+    except ValueError as e:
+        return {"error": True, "message": str(e)}
+    except sc3_client.Sc3Error as e:
+        return {"error": True, "message": str(e) + ". Nothing was changed."}
+    clear_ps_cache()
+    if DEMO_MODE and res.get("ok") and _demo_sc3 is not None:
+        import demo_data
+        demo_data._DEMO_SC_SETUP_FIXED = _demo_sc3.verdict() == "correct"
+    # SC III programs the ScoreLink during the save and says so only in its
+    # log; a wrong ScoreLink model shows up there as a "Configuration problem".
+    if res.get("ok"):
+        try:
+            st = await asyncio.to_thread(_sc3_serial_state)
+            if st.get("configProblem") and (DEMO_MODE or (st.get("configAt") or "") >= started):
+                res["configProblem"] = st["configProblem"]
+        except Exception:
+            pass
+    return dict(res, error=False)
+
+
+@app.post("/api/scoreconnect/sc3/configure")
+async def api_sc3_configure(request: Request):
+    """Pulse's second write action: change SC III's vendor, sport, connection
+    type, ScoreLink device and bot number. SC III's settings file is backed up
+    first (no backup, no write), SC III validates the setup itself, and the
+    setup it replaced is kept for one-step restore."""
+    body = await request.json()
+    if not isinstance(body, dict) or body.get("confirm") is not True:
+        return {"error": True, "message": "Changing ScoreConnect's setup needs explicit confirmation."}
+    if _sc3_scanning():
+        return {"error": True, "message": "Pulse is trying codes right now. Stop it first. Nothing was changed."}
+    return await _sc3_configure(body.get("setup"))
+
+
+@app.post("/api/scoreconnect/sc3/restore")
+async def api_sc3_restore(request: Request):
+    """Put back the setup the last Pulse save replaced."""
+    body = await request.json()
+    if not isinstance(body, dict) or body.get("confirm") is not True:
+        return {"error": True, "message": "Restoring needs explicit confirmation."}
+    if _sc3_scanning():
+        return {"error": True, "message": "Pulse is trying codes right now. Stop it first. Nothing was changed."}
+    prev = sc3_client.load_previous(SC3_PREVIOUS_PATH)
+    if not prev:
+        return {"error": True, "message": "There is no earlier setup saved by Pulse on this VPU."}
+    return await _sc3_configure(sc3_client.restore_request(prev))
+
+
+# ── Find the code: try each sport code until SC III reads the console ──
+# Offered only while SC III says the console's data is present but not in the
+# format its setup expects (the wrong-format finding). One scan at a time;
+# setup saves wait for it. The scan loop is sc3_client.run_scan.
+
+import threading as _threading  # noqa: E402
+from datetime import datetime as _scan_dt  # noqa: E402
+
+_sc3_scan = {"state": "idle"}
+_sc3_scan_stop = _threading.Event()
+
+
+def _sc3_scanning():
+    return _sc3_scan.get("state") in ("starting", "running", "restoring")
+
+
+def _sc3_scan_view():
+    v = dict(_sc3_scan)
+    v["tried"] = list(v.get("tried") or [])
+    return v
+
+
+def _sc3_scan_plan(call):
+    """What the scan form needs: the vendor SC III is set to, its sports and
+    how many codes each has. None when SC III has no vendor set."""
+    cur = sc3_client.current(call, _sc3_settings())
+    if not cur.get("vendorId"):
+        return None, cur
+    sports = sc3_client.vendor_detail(call, cur["vendorId"])["sports"]
+    return {"vendorId": cur["vendorId"], "vendorName": cur.get("vendorName"),
+            "currentSport": cur.get("vendorSportName"),
+            "currentSportKey": sc3_client.sport_of(cur.get("vendorSportName")),
+            # Counted as the scan will try them: auto-detect first, the code
+            # SC III is on now left out.
+            "sports": [{"key": x["key"], "count": len(sc3_client.scan_candidates(sports, x["key"], cur.get("vendorSportId")))}
+                       for x in sc3_client.scan_sports(sports)],
+            "allCount": len(sc3_client.scan_candidates(sports, None, cur.get("vendorSportId"))),
+            "secondsPerCode": sc3_client.SCAN_SECONDS_PER_CODE}, cur
+
+
+@app.get("/api/scoreconnect/sc3/scan")
+async def api_sc3_scan_get(plan: int = 0):
+    """The running or last scan; with ?plan=1 also what a new scan would try."""
+    out = {"error": False, "scan": _sc3_scan_view()}
+    if plan and not _sc3_scanning():
+        try:
+            out["plan"], _cur = await asyncio.to_thread(_sc3_scan_plan, _sc3_call())
+        except sc3_client.Sc3Error as e:
+            return {"error": True, "message": str(e), "scan": out["scan"]}
+    return out
+
+
+@app.post("/api/scoreconnect/sc3/scan")
+async def api_sc3_scan_start(request: Request):
+    """Start a scan. Body {confirm: true, sport: "football" | null}; null tries
+    every code the vendor has."""
+    global _sc3_scan
+    body = await request.json()
+    if not isinstance(body, dict) or body.get("confirm") is not True:
+        return {"error": True, "message": "Trying codes changes ScoreConnect's setup and needs explicit confirmation."}
+    if _sc3_scanning():
+        return {"error": True, "message": "Pulse is already trying codes."}
+    sport = body.get("sport")
+    if sport is not None and sport not in sc3_client.SPORT_WORDS:
+        return {"error": True, "message": "Unknown sport"}
+    _sc3_scan = {"state": "starting"}
+    call = _sc3_call()
+    try:
+        verdict, _d, _b = await asyncio.to_thread(sc3_client.read_scan_status, call)
+        if verdict == "correct":
+            _sc3_scan = {"state": "idle"}
+            return {"error": True, "message": "ScoreConnect is already reading the console, so there is no code to find."}
+        plan, cur = await asyncio.to_thread(_sc3_scan_plan, call)
+        if not plan:
+            _sc3_scan = {"state": "idle"}
+            return {"error": True, "message": "ScoreConnect III has no vendor set. Use Change setup to pick the console's brand first."}
+        settings = _sc3_settings() or {}
+        device = settings.get("deviceType") or cur.get("deviceType")
+        if device not in sc3_client.DEVICE_TYPES:
+            _sc3_scan = {"state": "idle"}
+            return {"error": True, "message": "Pulse can't tell which ScoreLink ScoreConnect is using, so it changed nothing. "
+                                              "Use Change setup to pick it."}
+        sports = (await asyncio.to_thread(sc3_client.vendor_detail, call, plan["vendorId"]))["sports"]
+        candidates = sc3_client.scan_candidates(sports, sport, cur.get("vendorSportId"))
+        if not candidates:
+            _sc3_scan = {"state": "idle"}
+            return {"error": True, "message": "ScoreConnect has no other %s codes for %s." % (sport or "", plan["vendorName"])}
+        # One backup and one "Restore previous" for the whole scan: the setup
+        # it started from. Per-code backups would push the real one out of
+        # the ten kept.
+        backup_path = "demo: no backup" if DEMO_MODE else await asyncio.to_thread(sc3_client.backup_settings, SC3_BACKUP_DIR)
+    except sc3_client.Sc3Error as e:
+        _sc3_scan = {"state": "idle"}
+        return {"error": True, "message": str(e) + ". Nothing was changed."}
+    except Exception:
+        _sc3_scan = {"state": "idle"}
+        raise
+    earlier_previous = sc3_client.load_previous(SC3_PREVIOUS_PATH)
+    original = {"vendorSportId": cur["vendorSportId"], "vendorConfigurationId": cur.get("vendorConfigurationId"),
+                "deviceType": device, "additionalConfiguration": cur.get("additionalConfiguration")}
+    base = dict(original)
+    base.pop("vendorSportId")
+
+    def try_setup(req):
+        return sc3_client.configure(call, req, SC3_BACKUP_DIR, None,
+                                    read_settings=(lambda _p: _sc3_settings()), backup=(lambda d, s: backup_path))
+
+    def progress(st):
+        _sc3_scan.update(st)
+
+    def work():
+        res = sc3_client.run_scan(candidates, base, original, try_setup,
+                                  lambda: sc3_client.read_scan_status(call), progress=progress,
+                                  stop=_sc3_scan_stop.is_set)
+        try:
+            if res["state"] == "found":
+                with open(SC3_PREVIOUS_PATH, "w", encoding="utf-8") as f:
+                    json.dump({"savedAt": _scan_dt.now().isoformat(timespec="seconds"), "setup": cur}, f)
+        except OSError:
+            pass
+        clear_ps_cache()
+        if DEMO_MODE:
+            import demo_data
+            demo_data._DEMO_SC_SETUP_FIXED = _demo_sc3.verdict() == "correct"
+        _sc3_scan.update(finishedAt=_scan_dt.now().isoformat(timespec="seconds"))
+        ps_log("sc3-scan", 0, res["state"], "%s: tried %d of %d%s" % (
+            plan["vendorName"], len(res["tried"]), len(candidates),
+            (", found " + res["found"]["name"]) if res.get("found") else ""))
+
+    _sc3_scan_stop.clear()
+    _sc3_scan = {"state": "running", "vendorName": plan["vendorName"], "sport": sport,
+                 "original": cur.get("vendorSportName"), "total": len(candidates), "tried": [],
+                 "current": None, "found": None, "restored": None, "message": None,
+                 "secondsPerCode": sc3_client.SCAN_SECONDS_PER_CODE,
+                 "startedAt": _scan_dt.now().isoformat(timespec="seconds"), "earlierPrevious": bool(earlier_previous)}
+    asyncio.create_task(asyncio.to_thread(work))
+    return {"error": False, "scan": _sc3_scan_view()}
+
+
+@app.post("/api/scoreconnect/sc3/scan/stop")
+async def api_sc3_scan_stop():
+    """Stop after the code being tried, then put the original setup back."""
+    if not _sc3_scanning():
+        return {"error": False, "scan": _sc3_scan_view()}
+    _sc3_scan_stop.set()
+    return {"error": False, "scan": _sc3_scan_view()}
 
 
 @app.get("/api/scoreconnect/history")
@@ -5120,8 +5771,16 @@ async def api_scoreconnect_live():
 async def api_scoreconnect_scorelink():
     """Live check of the ScoreLink USB device (a light WMI query). Polled by
     the Score Connect page every few seconds to flag a USB disconnect — which
-    drops scoreboard data the same way the controller powering off does."""
-    return await run_ps("Get-ScoreLinkStatus.ps1", timeout=8)
+    drops scoreboard data the same way the controller powering off does.
+    Carries SC III's serial state from its own log, the one signal that tells
+    "Windows sees it" apart from "ScoreConnect can open it"."""
+    res = await run_ps("Get-ScoreLinkStatus.ps1", timeout=8)
+    if isinstance(res, dict):
+        try:
+            res["sc3Serial"] = await asyncio.to_thread(_sc3_serial_state)
+        except Exception as e:
+            res["sc3Serial"] = {"state": "unknown", "error": str(e)}
+    return res
 
 
 @app.post("/api/scoreconnect/install-sc3")
@@ -5406,6 +6065,71 @@ async def _refresh_installed_launcher(started_at: float = None) -> None:
 
 
 # ── Run-tracking check-in ───────────────────────────────────────────────────
+# ── ScoreConnect III crash auto-restart, on every launch ──────────────────
+# SC III dies on an unhandled WebSocket exception in every version seen, and
+# Sportzcast's installer sets no service recovery, so the service sits
+# Stopped until someone notices. Pulse used to apply recovery only when Pulse
+# installed SC III (PR #154), so any SC III installed another way stayed
+# unprotected: vpu-home crashed 2026-09-29 (System 7034, no corrective
+# action) and stayed down. Now every launch checks and applies it. The
+# check reads the service's FailureActions from the registry in Python, so a
+# unit that already has it never spawns PowerShell. Fail-open throughout.
+
+def _sc3_recovery_configured():
+    """True/False from the registry; None when SC III is not installed or the
+    registry cannot be read (then do nothing)."""
+    try:
+        import winreg
+    except ImportError:
+        return None
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SYSTEM\CurrentControlSet\Services\ScoreConnectIII") as k:
+            try:
+                blob, _ = winreg.QueryValueEx(k, "FailureActions")
+            except FileNotFoundError:
+                return False
+    except OSError:
+        return None
+    try:
+        import struct
+        count, at0 = struct.unpack_from("<II", blob, 12)
+        at0 = max(at0, 20)
+        return any(struct.unpack_from("<I", blob, at0 + i * 8)[0] == 1
+                   for i in range(count) if at0 + i * 8 + 8 <= len(blob))
+    except Exception:
+        return False
+
+
+async def _ensure_sc3_recovery() -> None:
+    if DEMO_MODE:
+        return
+    try:
+        if _sc3_recovery_configured() is not False:
+            return  # already protected, or no SC III on this unit
+        await asyncio.sleep(20)  # let the dashboard preload go first
+        result = await run_ps("Set-Sc3ServiceRecovery.ps1", timeout=30, use_cache=False)
+        ok = bool((result or {}).get("configured"))
+        msg = "SC III crash auto-restart applied on launch" if ok else \
+              "SC III crash auto-restart NOT applied: " + str((result or {}).get("message"))
+        ps_log("sc3-recovery", 0, "ok" if ok else "error", msg)
+        (_server_log.info if ok else _server_log.warning)(msg)
+    except Exception as e:
+        try:
+            _server_log.info("SC III recovery check skipped (%s)", e)
+        except Exception:
+            pass
+
+
+@app.post("/api/scoreconnect/service-recovery/enable")
+async def api_sc3_service_recovery_enable():
+    """Turn on SC III crash auto-restart now (the launch-time check does this
+    too; the button covers a launch where it could not)."""
+    res = await run_ps("Set-Sc3ServiceRecovery.ps1", timeout=30, use_cache=False)
+    clear_ps_cache()
+    return res
+
+
 # ── One-shot Canopy Leaf removal ────────────────────────────────────────────
 # PlayOn retired the Banyan Hills Canopy platform (fully shut down mid-2026),
 # but fleet VPUs still carry the orphaned Leaf agent: four auto-start services,
