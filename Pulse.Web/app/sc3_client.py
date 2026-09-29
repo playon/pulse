@@ -430,9 +430,12 @@ def restore_request(previous):
 
 CHAIN_FIELDS = {
     "device": ("ScoreLink", "ScoreLinkII"),
-    "cable": ("multitip", "gray", "red", "bnc"),
+    # Which tip of the multi-tip cable is in the console, or a custom cable.
+    "cable": ("gray", "red", "bnc", "custom"),
     "extension": ("none", "yes"),
     "controller": ("daktronics", "fairplay", "nevco", "electromech", "other"),
+    # Console model ids come from main.SC_CONSOLES and are passed in `allowed`.
+    "model": (),
 }
 
 
@@ -445,20 +448,21 @@ def load_chain(path):
         return {}
 
 
-def save_chain(path, current_chain, update, basis, now=None):
+def save_chain(path, current_chain, update, basis, now=None, allowed=None):
     """Merge one confirmation into the saved chain. Each part carries when it
     was confirmed and what SC III was set to at the time (basis), so a later
     vendor change can mark the console and cable as needing a fresh check.
     A value of None clears that part."""
     chain = dict(current_chain or {})
     stamp = (now or datetime.now()).isoformat(timespec="seconds")
+    fields = dict(CHAIN_FIELDS, **(allowed or {}))
     for k, v in (update or {}).items():
-        if k not in CHAIN_FIELDS:
+        if k not in fields:
             raise ValueError("Unknown part: %s" % k)
         if v is None:
             chain.pop(k, None)
             continue
-        if v not in CHAIN_FIELDS[k]:
+        if v not in fields[k]:
             raise ValueError("Unknown %s: %s" % (k, v))
         chain[k] = {"value": v, "at": stamp, "basis": dict(basis or {})}
     with open(path, "w", encoding="utf-8") as f:
@@ -476,7 +480,7 @@ def chain_with_staleness(chain, basis):
             continue
         b = entry.get("basis") or {}
         stale = False
-        if k in ("controller", "cable", "extension"):
+        if k in ("controller", "model", "cable", "extension"):
             stale = bool(basis.get("vendorName") and b.get("vendorName")
                          and basis["vendorName"] != b["vendorName"])
         elif k == "device":

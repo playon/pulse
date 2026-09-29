@@ -5107,15 +5107,90 @@ def _pixellot_score_source():
     return sc3_client.read_graphics_cfg()
 
 
-# Which cable goes with which console. Ian is supplying the Sportzcast chart;
-# until then only rows proven on a bench are listed, and the page shows the
-# cable as the tech's answer without judging whether it fits. Keyed by brand
-# (sc3_client.brand_of) and a lowercase substring of SC III's vendor/sport
-# name. Do not add a row that has not been seen working.
-SC_CABLE_CHART = [
-    # vpu-home 2026-09-29: Daktronics All Sport 5000 on the gray 1/4" cable,
-    # SC III "Daktronics Auto Detect", data present and in the correct format.
-    {"brand": "daktronics", "match": "", "cable": "gray", "evidence": "Daktronics All Sport 5000, vpu-home bench"},
+# Which console takes which tip of the multi-tip cable, and into which port.
+# Source: NFHS "Scoreboard Controllers" support article (Mar 2026), digested in
+# docs/scoreboard-controllers.md; change the two together. The multi-tip
+# cable's 9-pin end goes into the ScoreLink's SCOREBOARD port and one of its
+# three tips (red 1/4", gray 1/4", black BNC) into the console. Bench-proven:
+# All Sport 5000 on the gray tip (vpu-home, 2026-09-29).
+#   tip        gray | red | bnc | custom | wireless | None (not compatible)
+#   extension  trs (1/4" stereo) | coax (50-ohm only) | none
+#   match      lowercase substrings of SC III's vendor + sport names that
+#              identify the model when the school has not said
+SC_BRAND_TIPS = {"daktronics": "gray", "electromech": "gray", "fairplay": "red", "nevco": "bnc"}
+SC_CONSOLES = [
+    {"id": "dak-1600", "brand": "daktronics", "name": "All Sport 1600", "tip": "gray", "port": "J1 or J2 on the back",
+     "extension": "trs", "sports": "Baseball and football only", "match": ["daktronics 1600"],
+     "note": "A model number ending R6 (e.g. 1610R6) can use a wireless ScoreLink."},
+    {"id": "dak-2000", "brand": "daktronics", "name": "All Sport 2000", "tip": None, "match": ["daktronics 2000"],
+     "note": "Not compatible with ScoreConnect. The school can upgrade the console, or use a PiP camera or "
+             "manual scoring in Console."},
+    {"id": "dak-3000", "brand": "daktronics", "name": "All Sport 3000", "tip": "gray", "port": "J1, J2 or J3 on the back",
+     "extension": "trs", "sports": "Football only", "match": ["daktronics 3000"]},
+    {"id": "dak-4000", "brand": "daktronics", "name": "All Sport 4000", "tip": "gray", "port": "J1, J2 or J3 on the back",
+     "extension": "trs", "sports": "Baseball, basketball, football, hockey and volleyball", "match": ["daktronics 4000"]},
+    {"id": "dak-5000", "brand": "daktronics", "name": "All Sport 5000", "tip": "gray", "port": "J1, J2 or J3 on the back",
+     "extension": "trs", "match": [],
+     "note": "R6 at the end of the model number (sticker above the power cable) means it can use a wireless ScoreLink."},
+    {"id": "dak-5500", "brand": "daktronics", "name": "All Sport 5500", "tip": "gray", "port": "J1, J2 or J3 on the back",
+     "extension": "trs", "sports": "Basketball only", "match": ["daktronics 5500"]},
+    {"id": "dak-cg", "brand": "daktronics", "name": "All Sport CG", "tip": "custom", "port": "the CG's Control port",
+     "extension": "none", "match": ["allsport cg", "all sport cg"], "setting": "Use the All Sport CG settings.",
+     "note": "Connects with a straight-through serial cable (male to female). Do not use a null adapter."},
+    {"id": "dak-pro", "brand": "daktronics", "name": "All Sport Pro", "tip": "gray", "port": "J1, J2 or J3 (Series 1)",
+     "extension": "trs", "match": [], "setting": "Use the regular Daktronics codes.",
+     "note": "The smaller Series 2 needs a Daktronics wireless ScoreLink; its 1/4\" jack does not work."},
+    {"id": "dak-mx1", "brand": "daktronics", "name": "All Sport MX-1", "tip": "gray",
+     "port": "the interface box, through Daktronics' signal cable and a 1/4\" coupler", "extension": "trs",
+     "match": [], "setting": "Use the All Sport 5000 codes."},
+    {"id": "dak-rc", "brand": "daktronics", "name": "RC-100 or RC-200 handheld", "tip": None, "match": [],
+     "note": "Not compatible with ScoreConnect. The school can upgrade (All Sport 5000, MX-1 or Pro) or use a "
+             "PiP camera."},
+    {"id": "em", "brand": "electromech", "name": "Electro-Mech console", "tip": "gray",
+     "port": "an output labelled Scoreboards on the back", "extension": "trs", "match": [],
+     "note": "Only one output? Try a splitter, or Electro-Mech can add one. An SL-400 sticker on the bottom means "
+             "it can use a wireless ScoreLink."},
+    {"id": "fp-mp70", "brand": "fairplay", "name": "MP-70 (MP-71, 72, 73)", "tip": "red",
+     "port": "Scoreboard port 1 or 2 on the back", "extension": "trs", "match": ["mp70", "mp-70"],
+     "note": "Software 3.0 or higher (shown when it starts up) can use a Fair-Play wireless ScoreLink."},
+    {"id": "fp-mp50", "brand": "fairplay", "name": "MP-50 (MP-51, 52, 53)", "tip": "red",
+     "port": "Scoreboard port 1 or 2 on the back", "extension": "trs", "match": [],
+     "setting": "Set it up as an MP-70."},
+    {"id": "fp-mp69", "brand": "fairplay", "name": "MP-69", "tip": "red", "port": "the scoreboard output",
+     "extension": "trs", "sports": "Football and baseball only", "match": ["mp69", "mp-69"],
+     "setting": "Use the MP-69 codes."},
+    {"id": "fp-mp80", "brand": "fairplay", "name": "MP-80 or MP-60", "tip": "wireless", "match": ["mp80", "mp-80"],
+     "setting": "Use the Fairplay MP80 settings.",
+     "note": "Wireless only, with no data outputs. It needs a wireless ScoreLink."},
+    {"id": "nv-mpc", "brand": "nevco", "name": "MPC-5, MPC-6, MPC-7 (or MPCW)", "tip": "bnc",
+     "port": "the console's BNC data output", "extension": "coax", "match": [],
+     "setting": "For MPC-7 soccer, use the MPC-7 Football code."},
+    {"id": "nv-handheld", "brand": "nevco", "name": "MPC-X or MPCX2 handheld", "tip": None, "match": [],
+     "note": "Not compatible with ScoreConnect. The school can upgrade to a tabletop console or use a PiP camera."},
+    {"id": "aa-3000", "brand": "other", "name": "All-American 3000", "tip": "red", "port": "the added 1/4\" jack",
+     "extension": "trs", "sports": "Football only", "match": ["all american model 3000"],
+     "note": "Only after SportzCast adds a 1/4\" output jack. Needs the old ScoreConnect 3.4.5.0."},
+    {"id": "aa-8000", "brand": "other", "name": "All-American 8000 or 9000", "tip": "custom",
+     "port": "the Scoreboard port (8000) or Hardwire port (9000)", "extension": "none",
+     "match": ["all american model 8000", "all american model 9000"], "note": "Uses a PlayOn custom cable."},
+    {"id": "eversan", "brand": "other", "name": "Eversan 9700", "tip": "custom", "port": "a DATA port",
+     "extension": "none", "match": ["eversan"], "note": "Uses a custom cable made to length. No extensions."},
+    {"id": "oes", "brand": "other", "name": "OES ISC 9000", "tip": "custom", "port": "GAME OUT", "extension": "none",
+     "match": ["oes"], "note": "4-pin XLR to 9-pin cable with the OES (RS422) settings, or a 9-pin null modem cable "
+                              "with OES (RS232)."},
+    {"id": "sp-msx", "brand": "other", "name": "Spectrum MSX or MSX5", "tip": "red", "port": "the added 1/4\" jack",
+     "extension": "trs", "match": ["spectrum v2"], "setting": "Never use the Spectrum settings ending (RS232).",
+     "note": "Only after a 1/4\" jack is added. Data that cycles through test numbers means TEST MODE: restart "
+             "the console and start a new game."},
+    {"id": "sp-ms250", "brand": "other", "name": "Spectrum MS250", "tip": None, "match": ["spectrum ms250"],
+     "note": "Not compatible with ScoreConnect. The school can upgrade to an MSX or MSX5, or use a PiP camera."},
+    {"id": "varsity", "brand": "other", "name": "Varsity, All-Star, Sportable or BSN", "tip": "custom",
+     "port": "DIN1 or DIN2 on the back", "extension": "none", "match": ["varsity"],
+     "setting": "Use the Varsity settings.", "note": "Uses a PlayOn custom cable. No wireless option."},
+    {"id": "colorado", "brand": "other", "name": "Colorado Time Systems", "tip": None, "match": ["colorado"],
+     "note": "Treat as not supported: there are no pool score graphics. Lane timers use a PiP camera."},
+    {"id": "major", "brand": "other", "name": "Major Display", "tip": None, "match": [],
+     "note": "Not compatible with ScoreConnect. Use an OCR camera for the score."},
 ]
 
 # Every sentence the chain says. Each break: the title is cause + effect, `say`
@@ -5143,6 +5218,14 @@ SC_CHAIN_COPY = {
             "say": "Change ScoreConnect's device to match with Change setup below. The two models do not "
                    "talk to ScoreConnect the same way.",
             "where": ["device"], "tone": "warning"},
+        "cable-mismatch": {
+            "title": "The {model} takes the {tipNeeded}, but the school says the {tip} is plugged in",
+            "say": "Ask the school to unplug the {tip} and plug the {tipNeeded} of the same cable into {port}.",
+            "where": ["cable"], "tone": "warning"},
+        "console-unsupported": {
+            "title": "The {model} can't send its score to ScoreConnect",
+            "say": "{consoleNote}",
+            "where": ["controller"], "tone": "critical"},
         "vendor-mismatch": {
             "title": "ScoreConnect is set for {vendor}, but the console is a {brand}, so the score will be wrong or missing",
             "say": "Use Change setup below to pick the console's brand and sport. The brand and model are "
@@ -5151,8 +5234,8 @@ SC_CHAIN_COPY = {
         "no-data": {
             "title": "No scoreboard data is reaching ScoreConnect",
             "say": "This is normal while the console is off. Before a game, ask the school: is the console on "
-                   "and running a game? Is the Power light on the {device} green? Is the {cable} cable pushed all "
-                   "the way into the console? {extensionAsk}Pick what they are seeing below to narrow it down.",
+                   "and running a game? Is the Power light on the {device} green? Is the {tip} pushed all "
+                   "the way into {port}? {extensionAsk}Pick what they are seeing below to narrow it down.",
             "where": ["cable", "extension", "controller"], "tone": "warning"},
         "frozen": {
             "title": "The console keeps sending the same data, so the score on the stream is stuck",
@@ -5186,9 +5269,10 @@ SC_CHAIN_COPY = {
             "checks": [
                 "Is the console on, with a game running (not a menu or setup screen)?",
                 "Is the Power light on the {device} green?",
-                "Is the {cable} cable pushed all the way into the console?",
-                "Is the other end of the cable pushed all the way into the {device}?",
+                "Is the {tip} of the cable pushed all the way into {port}?",
+                "Is the 9-pin end of the cable screwed into the SCOREBOARD port on the {device}?",
                 "{extensionCheck}",
+                "{extensionKind}",
                 "If data is arriving here but the stream still has no score, the break is after ScoreConnect: "
                 "check Pixellot's scoreboard source and the scorebug on the Graphics tab.",
             ]},
@@ -5200,6 +5284,8 @@ SC_CHAIN_COPY = {
                 "the front of the console.",
                 "If the brand or sport is different, use Change setup. A wrong sport inside the right brand "
                 "still looks like good data to ScoreConnect, so only the school can spot it.",
+                "{consoleSetting}",
+                "{consoleSports}",
                 "If the setup matches, ask whether the console itself shows the right score. ScoreConnect "
                 "only copies what the console sends.",
             ]},
@@ -5228,6 +5314,20 @@ SC_CHAIN_COPY = {
         "extensionFreeze": "If there is an extension cable, try the cable without it.",
         "extensionDrop": "If there is an extension cable, check both of its joins, then try without it.",
     },
+    # What kind of extension this cable takes, by the console's tip.
+    "extensionKinds": {
+        "coax": "An extension on the BNC tip must be 50-ohm coax. 75-ohm video cable looks the same and will "
+                "not carry the data.",
+        "none": "This console's cable is made to length and has no extension.",
+    },
+    "guideLines": {
+        "sports": "ScoreConnect supports the {model} for: {sports}.",
+        "setting": "Setting tip for the {model}: {setting}",
+        "radio": "Wireless group and channel: a Daktronics scoreboard shows them at power-up as bX CY (X is the "
+                 "group, Y the channel), with radio consoles nearby switched off. Default is group 1, channel 01.",
+    },
+    "tipNames": {"gray": "gray tip", "red": "red tip", "bnc": "black BNC tip", "custom": "custom cable",
+                 "wireless": "wireless ScoreLink"},
     "fillsExtension": {
         "extensionAsk": "Are both joins of the extension cable pushed in? ",
         "extensionCheck": "Check both joins of the extension cable are pushed in.",
@@ -5260,7 +5360,8 @@ def _sc_chain_payload(result):
         "chain": sc3_client.chain_with_staleness(sc3_client.load_chain(SC_CHAIN_PATH), _sc_chain_basis(result)),
         "chainImages": _sc_chain_images(),
         "chainCopy": SC_CHAIN_COPY,
-        "cableChart": SC_CABLE_CHART,
+        "consoles": SC_CONSOLES,
+        "brandTips": SC_BRAND_TIPS,
         "pixellotScore": _pixellot_score_source(),
         "sc3Previous": sc3_client.load_previous(SC3_PREVIOUS_PATH),
     }
@@ -5282,7 +5383,8 @@ async def api_scoreconnect_chain_save(request: Request):
     sc = await _run_sc_status(load_settings().get("scoreConnectUrl", "http://localhost:5000"), timeout=15)
     try:
         chain = sc3_client.save_chain(SC_CHAIN_PATH, sc3_client.load_chain(SC_CHAIN_PATH),
-                                      update, _sc_chain_basis(sc))
+                                      update, _sc_chain_basis(sc),
+                                      allowed={"model": tuple(c["id"] for c in SC_CONSOLES)})
     except ValueError as e:
         return {"error": True, "message": str(e)}
     except OSError as e:

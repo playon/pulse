@@ -8818,20 +8818,27 @@ var _SCC_BRANDS = {
   daktronics: "Daktronics", fairplay: "Fair-Play", nevco: "Nevco",
   electromech: "Electro-Mech", other: "Other brand",
 };
-var _SCC_CABLES = { multitip: "Multi-tip", gray: "Gray 1/4\"", red: "Red", bnc: "Black BNC" };
+// Which tip of the multi-tip cable is in the console (its 9-pin end is in the
+// ScoreLink), or a custom cable. docs/scoreboard-controllers.md has the chart.
+var _SCC_CABLES = { gray: "Gray tip", red: "Red tip", bnc: "Black BNC tip", custom: "Custom cable" };
+var _SCC_CABLE_SUB = { gray: "Multi-tip cable, 1/4\"", red: "Multi-tip cable, 1/4\"", bnc: "Multi-tip cable", custom: "Made for this console" };
 var _SCC_DEVICES = { ScoreLink: "ScoreLink", ScoreLinkII: "ScoreLink II" };
 
-// Image file stem per part. Files live in static/img/sc/; a missing file
-// draws a labelled frame instead, so images can be dropped in one at a time.
-function _sccImgKey(part, v) {
-  if (part === "vpu") return "vpu";
-  if (part === "device") {
-    if (v.value === "ScoreLink") return "device-scorelink";
-    if (v.value === "ScoreLinkII") return "device-scorelink2";
-    return null;
-  }
-  if (!v.value) return null;
-  return part + "-" + v.value;
+// Image file stems per part, most specific first. Files live in
+// static/img/sc/; a missing file draws a labelled frame instead, so images
+// can be dropped in one at a time (a console model's own picture, else its
+// brand's; a tip's own picture, else the whole multi-tip cable).
+function _sccImgKeys(part, v) {
+  if (part === "vpu") return ["vpu"];
+  if (part === "device") return v.value === "ScoreLink" ? ["device-scorelink"] : v.value === "ScoreLinkII" ? ["device-scorelink2"] : [];
+  if (part === "cable") return v.value ? ["cable-" + v.value].concat(v.value === "custom" ? [] : ["cable-multitip"]) : [];
+  if (part === "controller") return [v.modelId ? "controller-" + v.modelId : null, v.value ? "controller-" + v.value : null].filter(Boolean);
+  return [];
+}
+
+// The console guide row for a model id.
+function _sccConsole(data, id) {
+  return (data.consoles || []).filter(function(x) { return x.id === id; })[0] || null;
 }
 
 function _sccBrandOf(vendor) {
@@ -8855,7 +8862,7 @@ function _sccFill(text, f) {
 }
 
 // What each part is, and how Pulse knows.
-//   src: detected | confirmed | setup | chart | unknown ; stale: basis changed
+//   src: detected | confirmed | setup | guide | unknown ; stale: basis changed
 function _sccParts(data) {
   var chain = data.chain || {};
   var cfg = data.configuration || {};
@@ -8873,15 +8880,29 @@ function _sccParts(data) {
     ? { value: chain.controller.value, src: "confirmed", at: chain.controller.at, stale: chain.controller.stale }
     : brandSetup ? { value: brandSetup, src: "setup" } : { value: null, src: "unknown" };
   controller.model = cfg.sport ? String(cfg.sport).replace(new RegExp("^" + (cfg.vendor || "") + "\\s*", "i"), "") : "";
+  // The model: what the school said (for this brand), else what SC III's
+  // vendor and sport names say ("Daktronics 3000 Football" is an All Sport
+  // 3000). No match leaves the brand alone, never a guessed model.
+  var guide = null;
+  if (c("model") && _sccConsole(data, chain.model.value) && _sccConsole(data, chain.model.value).brand === controller.value) {
+    guide = _sccConsole(data, chain.model.value);
+    controller.modelSrc = "confirmed";
+  } else if (controller.value) {
+    var hay = ((cfg.vendor || "") + " " + (cfg.sport || "")).toLowerCase();
+    guide = (data.consoles || []).filter(function(x) {
+      return x.brand === controller.value && (x.match || []).some(function(m) { return hay.indexOf(m) !== -1; });
+    })[0] || null;
+    if (guide) controller.modelSrc = "setup";
+  }
+  controller.guide = guide;
+  controller.modelId = guide ? guide.id : null;
+  // The tip this console takes: its model's, else its brand's.
+  var tipNeeded = guide ? guide.tip : ((data.brandTips || {})[controller.value] || null);
 
   var cable = { value: null, src: "unknown" };
-  if (c("cable")) cable = { value: chain.cable.value, src: "confirmed", at: chain.cable.at, stale: chain.cable.stale };
-  else {
-    var row = (data.cableChart || []).filter(function(r) {
-      return r.brand === controller.value && (!r.match || (cfg.sport || "").toLowerCase().indexOf(r.match) !== -1);
-    })[0];
-    if (row) cable = { value: row.cable, src: "chart" };
-  }
+  if (c("cable") && _SCC_CABLES[chain.cable.value]) cable = { value: chain.cable.value, src: "confirmed", at: chain.cable.at, stale: chain.cable.stale };
+  else if (tipNeeded && _SCC_CABLES[tipNeeded]) cable = { value: tipNeeded, src: "guide" };
+  cable.needed = tipNeeded;
   var extension = c("extension")
     ? { value: chain.extension.value, src: "confirmed", at: chain.extension.at, stale: chain.extension.stale }
     : { value: null, src: "unknown" };
@@ -8893,13 +8914,13 @@ function _sccSrcText(p) {
   if (p.src === "detected") return "Detected";
   if (p.src === "confirmed") return "Confirmed " + _sccWhen(p.at);
   if (p.src === "setup") return "From ScoreConnect setup";
-  if (p.src === "chart") return "From cable chart";
+  if (p.src === "guide") return "From the console guide";
   return "Not confirmed";
 }
 
 function _sccLabel(part, p) {
   if (part === "device") return p.value ? _SCC_DEVICES[p.value] : "Which ScoreLink?";
-  if (part === "cable") return p.value ? _SCC_CABLES[p.value] : "Which cable?";
+  if (part === "cable") return p.value ? _SCC_CABLES[p.value] : p.needed === "wireless" ? "Wireless" : "Which tip?";
   if (part === "controller") return p.value ? _SCC_BRANDS[p.value] : "Which console?";
   return "";
 }
@@ -8937,6 +8958,9 @@ function _sccBreaks(data, sig, parts) {
   else if (sig.sc3 === "up" && ser.state === "failing" && (ser.failures || 0) >= 2) add("serial-failing");
   else if (sig.sc3 === "up") {
     if (parts.device.src === "confirmed" && fills.sc3Device && parts.device.value !== (data.sc3Device || {}).deviceType) add("device-mismatch");
+    var g = parts.controller.guide;
+    if (g && g.tip === null) add("console-unsupported");
+    if (parts.cable.src === "confirmed" && parts.cable.needed && parts.cable.needed !== "wireless" && parts.cable.value !== parts.cable.needed) add("cable-mismatch");
     var setupBrand = _sccBrandOf((data.configuration || {}).vendor);
     if (parts.controller.src === "confirmed" && setupBrand && parts.controller.value !== setupBrand
         && !(parts.controller.value === "other" && setupBrand === "other")) add("vendor-mismatch");
@@ -8954,7 +8978,23 @@ function _sccFills(data, parts) {
   var ext = parts.extension.value;
   var fillsCopy = (ext === "yes" ? (data.chainCopy || {}).fillsExtension : (data.chainCopy || {}).fills) || {};
   var sc3dev = (data.sc3Device || {}).deviceType;
+  var copy = data.chainCopy || {};
+  var g = parts.controller.guide;
+  var tipNames = copy.tipNames || {};
+  var modelName = g ? (_SCC_BRANDS[g.brand] && g.brand !== "other" ? _SCC_BRANDS[g.brand] + " " : "") + g.name
+    : parts.controller.value && parts.controller.value !== "other" ? _SCC_BRANDS[parts.controller.value] + " console" : "console";
+  var lines = copy.guideLines || {};
+  var kind = g && g.extension ? (copy.extensionKinds || {})[g.extension] : "";
   return {
+    tip: parts.cable.value ? tipNames[parts.cable.value] : "cable",
+    tipNeeded: parts.cable.needed ? tipNames[parts.cable.needed] : "",
+    port: g && g.port ? g.port : "the console's scoreboard output",
+    model: modelName,
+    consoleNote: g && g.note ? g.note : "",
+    consoleSetting: g && g.setting ? _sccFill(lines.setting, { model: modelName, setting: g.setting }) : "",
+    consoleSports: g && g.sports ? _sccFill(lines.sports, { model: modelName, sports: g.sports.toLowerCase() }) : "",
+    // A coax warning or "no extension" note, unless the school ruled one out.
+    extensionKind: kind && !(ext === "none" && g.extension === "coax") ? kind : "",
     device: parts.device.value ? _SCC_DEVICES[parts.device.value] : "ScoreLink",
     sc3Device: sc3dev ? _SCC_DEVICES[sc3dev] : "",
     cable: parts.cable.value ? _SCC_CABLES[parts.cable.value].toLowerCase() : "scoreboard",
@@ -8989,9 +9029,10 @@ function _sccLinks(sig) {
 }
 
 function _sccImgHtml(data, part, p, label) {
-  var key = _sccImgKey(part, p || {});
+  var keys = _sccImgKeys(part, p || {});
   var have = data.chainImages || [];
-  var file = key && have.filter(function(n) { return n.replace(/\.(png|jpe?g|webp)$/i, "") === key; })[0];
+  var file = null;
+  keys.some(function(k) { file = have.filter(function(n) { return n.replace(/\.(png|jpe?g|webp)$/i, "") === k; })[0]; return !!file; });
   if (file) return '<img src="/static/img/sc/' + esc(file) + '" alt="" decoding="async">';
   return '<span class="scc-ph" aria-hidden="true">' + esc(label || "") + '</span>';
 }
@@ -9008,7 +9049,11 @@ function _sccNodeHtml(data, part, p, lit, brk) {
       : "Pixellot source unknown";
   } else {
     src = _sccSrcText(p);
-    if (part === "controller" && p.model && p.src === "setup") sub = '<span class="scc-node-model">' + esc(p.model) + '</span>';
+    if (part === "controller") {
+      var mline = p.guide ? p.guide.name : (p.src === "setup" ? p.model : "");
+      if (mline) sub = '<span class="scc-node-model">' + esc(mline) + '</span>';
+    }
+    if (part === "cable" && p.value) sub = '<span class="scc-node-model">' + esc(_SCC_CABLE_SUB[p.value] || "") + '</span>';
   }
   var srcCls = "scc-src" + (p && p.stale ? " scc-src-stale" : p && (p.src === "detected" || p.src === "confirmed") ? " scc-src-known" : "");
   var inner = '<span class="scc-img">' + _sccImgHtml(data, part, p, label) + '</span>' +
@@ -9122,15 +9167,20 @@ function _sccPickerHtml(data, part, parts) {
     { v: { extension: "yes" }, label: "Extension in line", on: p.value === "yes", textOnly: true },
   ];
   else opts = Object.keys(_SCC_BRANDS).map(function(k) {
-    return { v: { controller: k }, label: _SCC_BRANDS[k], on: p.src === "confirmed" && p.value === k, img: { value: k } };
+    // Picking a brand clears the model; the model list below then asks for it.
+    return { v: { controller: k, model: null }, keep: true, label: _SCC_BRANDS[k], on: p.src === "confirmed" && p.value === k, img: { value: k } };
   });
-  var q = { device: "Which ScoreLink is plugged into the VPU?", cable: "Which cable runs from the ScoreLink to the console?",
+  var q = { device: "Which ScoreLink is plugged into the VPU?", cable: "Which tip of the cable is plugged into the console?",
             extension: "Is there an extension cable between them?", controller: "What brand is the scoreboard console?" }[part];
+  var f = _sccFills(data, parts);
   var note = part === "device"
     ? (p.src === "detected" ? "Windows reports this model, so it is not a guess. " : "") +
       "A ScoreLink II is black with either a yellow or a blue label. Both are the same device."
+    : part === "cable"
+    ? "The cable's 9-pin end goes into the SCOREBOARD port on the ScoreLink; one of its three tips goes into the console." +
+      (p.needed && p.needed !== "wireless" ? " The " + f.model + " takes the " + f.tipNeeded + ", into " + f.port + "." : "")
     : "";
-  var clear = { device: { device: null }, cable: { cable: null }, extension: { extension: null }, controller: { controller: null } }[part];
+  var clear = { device: { device: null }, cable: { cable: null }, extension: { extension: null }, controller: { controller: null, model: null } }[part];
   var footer = part === "controller" && data.reachable
     ? '<button type="button" class="btn-outline btn-ol-blue" onclick="sccTogglePanel(\'setup\')">' + svgIcon("settings", 14) + ' Change ScoreConnect setup</button>' : "";
   return '<div class="scc-picker"><h3 class="scc-sub">' + esc(q) + '</h3>' +
@@ -9138,25 +9188,45 @@ function _sccPickerHtml(data, part, parts) {
     '<div class="scc-options' + (part === "extension" ? " scc-options-text" : "") + '" role="radiogroup" aria-label="' + esc(q) + '">' +
     opts.map(function(o) {
       return '<button type="button" role="radio" aria-checked="' + !!o.on + '" class="scc-opt' + (o.on ? " is-on" : "") + '"' +
-        " onclick='sccConfirm(" + esc(JSON.stringify(o.v)) + ")'>" +
+        " onclick='sccConfirm(" + esc(JSON.stringify(o.v)) + (o.keep ? ", true" : "") + ")'>" +
         (o.textOnly ? "" : '<span class="scc-img">' + _sccImgHtml(data, part, o.img, o.label) + '</span>') +
         '<span class="scc-opt-label">' + esc(o.label) + '</span>' +
         (o.sub ? '<span class="scc-opt-sub">' + esc(o.sub) + '</span>' : "") + '</button>';
     }).join("") + '</div>' +
+    (part === "controller" ? _sccModelsHtml(data, parts) : "") +
     '<div class="scc-picker-foot">' +
       "<button type=\"button\" class=\"btn-outline btn-ol-muted\" onclick='sccConfirm(" + esc(JSON.stringify(clear)) + ")'>Not sure</button>" +
       footer + '<span class="scc-save-state" id="scc-save-state" role="status"></span>' +
     '</div></div>';
 }
 
-async function sccConfirm(update) {
+// The models of the chosen brand, from the console guide. A model that cannot
+// send its score says so here, before anyone plugs anything in.
+function _sccModelsHtml(data, parts) {
+  var c = parts.controller;
+  if (!c.value) return "";
+  var models = (data.consoles || []).filter(function(x) { return x.brand === c.value; });
+  if (!models.length) return "";
+  var tipNames = (data.chainCopy || {}).tipNames || {};
+  return '<h3 class="scc-sub scc-sub-gap">Which ' + esc(_SCC_BRANDS[c.value] === "Other brand" ? "console" : _SCC_BRANDS[c.value] + " model") + '?</h3>' +
+    '<div class="scc-options scc-options-text scc-models" role="radiogroup" aria-label="Console model">' +
+    models.map(function(x) {
+      var on = c.modelSrc === "confirmed" && c.modelId === x.id;
+      var sub = x.tip === null ? "Not compatible" : x.tip === "wireless" ? "Wireless only" : tipNames[x.tip] ? tipNames[x.tip].replace(/^./, function(m) { return m.toUpperCase(); }) : "";
+      return '<button type="button" role="radio" aria-checked="' + on + '" class="scc-opt' + (on ? " is-on" : "") + (x.tip === null ? " is-unsupported" : "") + '"' +
+        " onclick='sccConfirm(" + esc(JSON.stringify({ controller: x.brand, model: x.id })) + ")'>" +
+        '<span class="scc-opt-label">' + esc(x.name) + '</span><span class="scc-opt-sub">' + esc(sub) + '</span></button>';
+    }).join("") + '</div>';
+}
+
+async function sccConfirm(update, keepOpen) {
   var st = document.getElementById("scc-save-state");
   if (st) st.textContent = "Saving…";
   var r = await apiPost("/api/scoreconnect/chain", { update: update });
   var d = cached("scoreconnect");
   if (r && !r.error && d) {
     d.chain = r.chain;
-    _scc.panel = null;
+    if (!keepOpen) _scc.panel = null;
     _sccRender(true);
   } else if (st) {
     st.textContent = "Couldn't save: " + ((r && r.message) || "no answer from Pulse");
@@ -9300,6 +9370,14 @@ function _sccSetupHtml(data) {
       (fl.min != null ? '<span class="scc-hint">' + fl.min + " to " + fl.max + '</span>' : "") + '</label>';
   }).join("");
   var instr = (conn && conn.instructions || []).map(function(t) { return '<p class="scc-note">' + esc(t) + '</p>'; }).join("");
+  // What the console guide says about this console's settings, and where a
+  // Daktronics scoreboard shows its radio group and channel.
+  var gParts = _sccParts(data), gFills = _sccFills(data, gParts), lines = (data.chainCopy || {}).guideLines || {};
+  var vendorBrand = _sccBrandOf((s.vendors.filter(function(v) { return v.id === f.vendorId; })[0] || {}).name);
+  if (gFills.consoleSetting) instr += '<p class="scc-note">' + esc(gFills.consoleSetting) + '</p>';
+  if (gFills.consoleSports) instr += '<p class="scc-note">' + esc(gFills.consoleSports) + '</p>';
+  if (vendorBrand === "daktronics" && conn && (conn.fields || []).some(function(x) { return x.key === "group"; }) && lines.radio)
+    instr += '<p class="scc-note">' + esc(lines.radio) + '</p>';
   var dev = ["ScoreLink", "ScoreLinkII"].map(function(t) {
     return '<label class="scc-radio"><input type="radio" name="scc-f-dev" value="' + t + '"' + (f.deviceType === t ? " checked" : "") +
       ' onchange="sccSetupField(\'deviceType\', this.value)"> ' + _SCC_DEVICES[t] + '</label>';

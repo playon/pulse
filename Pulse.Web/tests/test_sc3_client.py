@@ -204,7 +204,8 @@ class Chain(unittest.TestCase):
 
     def test_confirm_clear_and_reject_unknown(self):
         basis = {"vendorName": "Daktronics", "scoreLinkModel": None}
-        ch = c.save_chain(self.path, {}, {"cable": "gray", "controller": "daktronics"}, basis)
+        ch = c.save_chain(self.path, {}, {"cable": "gray", "controller": "daktronics", "model": "dak-5000"}, basis,
+                          allowed={"model": ("dak-5000",)})
         self.assertEqual(ch["cable"]["value"], "gray")
         ch = c.save_chain(self.path, c.load_chain(self.path), {"cable": None}, basis)
         self.assertNotIn("cable", ch)
@@ -212,6 +213,10 @@ class Chain(unittest.TestCase):
             c.save_chain(self.path, ch, {"cable": "purple"}, basis)
         with self.assertRaises(ValueError):
             c.save_chain(self.path, ch, {"wifi": "yes"}, basis)
+        with self.assertRaises(ValueError):
+            c.save_chain(self.path, ch, {"model": "made-up"}, basis, allowed={"model": ("dak-5000",)})
+        with self.assertRaises(ValueError):
+            c.save_chain(self.path, ch, {"cable": "multitip"}, basis)
 
     def test_vendor_change_marks_console_and_cable_stale(self):
         ch = c.save_chain(self.path, {}, {"cable": "gray", "controller": "daktronics", "device": "ScoreLinkII"},
@@ -222,6 +227,40 @@ class Chain(unittest.TestCase):
         self.assertFalse(out["device"]["stale"])
         out = c.chain_with_staleness(ch, {"vendorName": "Daktronics", "scoreLinkModel": None})
         self.assertFalse(any(v["stale"] for v in out.values()))
+
+
+class ConsoleGuide(unittest.TestCase):
+    """SC_CONSOLES is the article's chart in data form."""
+
+    @classmethod
+    def setUpClass(cls):
+        import main
+        cls.consoles, cls.tips = main.SC_CONSOLES, main.SC_BRAND_TIPS
+
+    def test_ids_unique_and_fields_known(self):
+        ids = [x["id"] for x in self.consoles]
+        self.assertEqual(len(ids), len(set(ids)))
+        for x in self.consoles:
+            self.assertIn(x["brand"], c.CHAIN_FIELDS["controller"], x["id"])
+            self.assertIn(x["tip"], (None, "wireless") + c.CHAIN_FIELDS["cable"], x["id"])
+            if x["tip"] in ("gray", "red", "bnc", "custom"):
+                self.assertTrue(x.get("port"), x["id"] + " needs a port to name")
+                self.assertIn(x.get("extension"), ("trs", "coax", "none"), x["id"])
+            if x["tip"] is None:
+                self.assertTrue(x.get("note"), x["id"] + " needs the school's options")
+
+    def test_bench_proven_row(self):
+        # vpu-home 2026-09-29: All Sport 5000, gray tip, J port, data present.
+        row = next(x for x in self.consoles if x["id"] == "dak-5000")
+        self.assertEqual((row["tip"], row["port"]), ("gray", "J1, J2 or J3 on the back"))
+
+    def test_brand_tips_agree_with_their_models(self):
+        for brand, tip in self.tips.items():
+            wired = [x for x in self.consoles if x["brand"] == brand and x["tip"] in ("gray", "red", "bnc")]
+            self.assertTrue(wired and all(x["tip"] == tip for x in wired), brand)
+
+    def test_nevco_extension_is_coax(self):
+        self.assertEqual(next(x for x in self.consoles if x["id"] == "nv-mpc")["extension"], "coax")
 
 
 class CopyContract(unittest.TestCase):
