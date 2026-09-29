@@ -118,6 +118,26 @@ class Files(unittest.TestCase):
         s = c.read_sc3_serial_state(self._log(replugged))
         self.assertEqual((s["state"], s["failures"]), ("open", 0))
 
+    def test_config_problem_from_the_device_mismatch_recorded_on_vpu_home(self):
+        run = [
+            "2026-09-29 21:00:21 UTC - Main - Bot Configuration - Configuration Started",
+            "2026-09-29 21:00:21 UTC - Main - Bot Configuration - ScoreLinkII USB Mode",
+            "2026-09-29 21:00:29 UTC - Main - Local BotServer - Serial thread started, Baudrate:19200",
+            "2026-09-29 21:29:16 UTC - Main - Bot Configuration - Configuration Started",
+            "2026-09-29 21:29:16 UTC - Main - Bot Configuration - ScoreLink USB Mode",
+            "2026-09-29 21:29:16 UTC - Main - Bot Configuration - Configuration problem: Unable to communicate "
+            "with the selector chip in the bot. Please retry the bot configuration.",
+            "2026-09-29 21:29:22 UTC - Main - Local BotServer - Serial thread started, Baudrate:19200",
+        ]
+        s = c.read_sc3_serial_state(self._log(run))
+        self.assertEqual((s["state"], s["configMode"], s["configAt"]), ("open", "ScoreLink", "2026-09-29T21:29:16Z"))
+        self.assertTrue(s["configProblem"].startswith("Unable to communicate with the selector chip"))
+        # Switching back to ScoreLinkII: a clean run clears the problem.
+        fixed = run + ["2026-09-29 21:29:52 UTC - Main - Bot Configuration - Configuration Started",
+                       "2026-09-29 21:29:52 UTC - Main - Bot Configuration - ScoreLinkII USB Mode"]
+        s = c.read_sc3_serial_state(self._log(fixed))
+        self.assertEqual((s["configMode"], s["configProblem"]), ("ScoreLinkII", None))
+
     def test_serial_state_unknown_without_a_log(self):
         self.assertEqual(c.read_sc3_serial_state(os.path.join(self.dir, "none"))["state"], "unknown")
 
@@ -311,7 +331,7 @@ class CopyContract(unittest.TestCase):
 
     def test_break_tones_are_verdict_words(self):
         for code, b in self.copy["breaks"].items():
-            self.assertIn(b["tone"], ("critical", "warning", "info"), code)
+            self.assertIn(b["tone"], ("critical", "warning", "soon", "info"), code)
             self.assertTrue(set(b["where"]) <= {"vpu", "usb", "device", "cable", "extension", "controller"}, code)
 
 

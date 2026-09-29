@@ -5097,7 +5097,10 @@ def _sc3_settings():
 def _sc3_serial_state():
     if DEMO_MODE:
         from demo_data import _demo_sc_serial_state
-        return _demo_sc_serial_state()
+        st = _demo_sc_serial_state()
+        if _demo_sc3 is not None:
+            st.update(configMode=_demo_sc3.device_type, configProblem=_demo_sc3.config_problem)
+        return st
     return sc3_client.read_sc3_serial_state()
 
 
@@ -5213,11 +5216,21 @@ SC_CHAIN_COPY = {
             "say": "Ask the school to unplug the ScoreLink's USB cable, wait ten seconds, and plug it back in. "
                    "If this stays, restart the ScoreConnect III service.",
             "where": ["usb", "device"], "tone": "critical"},
+        # vpu-home 2026-09-29: SC III set to ScoreLink with a ScoreLink II
+        # plugged in kept reading data, because the device kept the chip setup
+        # from its last correct run. SC III cannot reprogram it until they match.
+        "config-problem": {
+            "title": "ScoreConnect couldn't set up the ScoreLink the last time its setup changed",
+            "say": "ScoreConnect III said: \"{configProblem}\" It is set for a {sc3Device}. The usual cause is "
+                   "that model not matching the device plugged in: use Change setup to pick the right ScoreLink. "
+                   "Data can keep flowing on the device's old settings, so fix this before changing the console "
+                   "or the tip.",
+            "where": ["device"], "tone": "warning"},
         "device-mismatch": {
             "title": "ScoreConnect is set up for a {sc3Device}, but the school says a {device} is plugged in",
-            "say": "Change ScoreConnect's device to match with Change setup below. The two models do not "
-                   "talk to ScoreConnect the same way.",
-            "where": ["device"], "tone": "warning"},
+            "say": "Scores can still come through, because the device keeps its last settings, but ScoreConnect "
+                   "can't update them until the model matches. Use Change setup to pick the {device}.",
+            "where": ["device"], "tone": "soon"},
         "cable-mismatch": {
             "title": "The {model} takes the {tipNeeded}, but the school says the {tip} is plugged in",
             "say": "Ask the school to unplug the {tip} and plug the {tipNeeded} of the same cable into {port}.",
@@ -5425,6 +5438,8 @@ async def api_sc3_vendor(vendor_id: int):
 
 
 async def _sc3_configure(req):
+    from datetime import datetime as _dtm, timezone as _tz
+    started = _dtm.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         res = await asyncio.to_thread(
             sc3_client.configure, _sc3_call(), req, SC3_BACKUP_DIR, SC3_PREVIOUS_PATH,
@@ -5435,6 +5450,15 @@ async def _sc3_configure(req):
     except sc3_client.Sc3Error as e:
         return {"error": True, "message": str(e) + ". Nothing was changed."}
     clear_ps_cache()
+    # SC III programs the ScoreLink during the save and says so only in its
+    # log; a wrong ScoreLink model shows up there as a "Configuration problem".
+    if res.get("ok"):
+        try:
+            st = await asyncio.to_thread(_sc3_serial_state)
+            if st.get("configProblem") and (DEMO_MODE or (st.get("configAt") or "") >= started):
+                res["configProblem"] = st["configProblem"]
+        except Exception:
+            pass
     return dict(res, error=False)
 
 

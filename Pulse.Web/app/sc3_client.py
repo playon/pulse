@@ -193,6 +193,18 @@ SC3_LOG_DIR = r"C:\ProgramData\Sportzcast LLC\ScoreConnectIII\Logs"
 #   "Local BotServer - Serial thread started, Baudrate:19200"  (~2s after replug)
 # A config save also stops and restarts the serial thread, so "stopped" alone
 # is not a fault; repeated failures are.
+# Each save runs a "Bot Configuration": SC III logs the device mode it used
+# and, when it cannot program the device's selector chip, a "Configuration
+# problem". Recorded on vpu-home 2026-09-29 with SC III set to ScoreLink while
+# a ScoreLink II was plugged in:
+#   "Bot Configuration - ScoreLink USB Mode"
+#   "Bot Configuration - Configuration problem: Unable to communicate with the
+#    selector chip in the bot. Please retry the bot configuration. ..."
+# Data kept flowing: the ScoreLink II still held the chip setup from its last
+# ScoreLinkII-mode run, so the mismatch only bites when the setup changes.
+_CONFIG_START = "Bot Configuration - Configuration Started"
+_CONFIG_MODE_RX = re.compile(r"Bot Configuration - (ScoreLinkII|ScoreLink) USB Mode")
+_CONFIG_PROBLEM_RX = re.compile(r"Bot Configuration - Configuration problem:\s*(.*)$")
 _SERIAL_OPEN = ("Serial thread started",)
 _SERIAL_FAIL = ("SER BOT failed to connect", "Serial thread error")
 _LOG_TS_RX = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC")
@@ -214,16 +226,31 @@ def read_sc3_serial_state(log_dir=SC3_LOG_DIR, tail=400, now_utc=None):
     except OSError as e:
         return {"state": "unknown", "error": "Could not read ScoreConnect III log: %s" % e}
     state, at, failures = "unknown", None, 0
+    config = {"mode": None, "problem": None, "at": None}
     for line in lines:
+        m = _LOG_TS_RX.match(line)
+        ts = m.group(1).replace(" ", "T") + "Z" if m else None
+        if _CONFIG_START in line:
+            config = {"mode": None, "problem": None, "at": ts}
+            continue
+        mm = _CONFIG_MODE_RX.search(line)
+        if mm:
+            config["mode"] = mm.group(1)
+            continue
+        mp = _CONFIG_PROBLEM_RX.search(line)
+        if mp:
+            config["problem"] = mp.group(1).strip()
+            continue
         if any(k in line for k in _SERIAL_OPEN):
             state, failures = "open", 0
         elif any(k in line for k in _SERIAL_FAIL):
             state, failures = "failing", failures + 1
         else:
             continue
-        m = _LOG_TS_RX.match(line)
-        at = m.group(1).replace(" ", "T") + "Z" if m else None
-    return {"state": state, "at": at, "failures": failures, "error": None}
+        at = ts
+    # configMode / configProblem describe the LAST configuration run only.
+    return {"state": state, "at": at, "failures": failures, "configMode": config["mode"],
+            "configProblem": config["problem"], "configAt": config["at"], "error": None}
 
 
 # ── Reads ────────────────────────────────────────────────────
@@ -515,6 +542,7 @@ class DemoSc3:
                     "vendorConfigurationId": 11, "vendorConfigurationName": "Wired",
                     "additionalConfiguration": None}
         self.device_type = "ScoreLinkII"
+        self.config_problem = None
 
     def _vendor(self, vid):
         return next((v for v in self.cat["vendors"] if v["id"] == vid), None)
@@ -572,6 +600,10 @@ class DemoSc3:
         dev = next((d for d in self.devices if d["id"] == body.get("deviceId")), None)
         if dev:
             self.device_type = dev["type"]
+            # The demo's hardware is a ScoreLink II, as on vpu-home.
+            self.config_problem = ("Unable to communicate with the selector chip in the bot. Please retry the "
+                                   "bot configuration. If the issue persists, contact support for further "
+                                   "assistance.") if dev["type"] == "ScoreLink" else None
         self.bot = body.get("botNumber") or 51244
         self.cfg = {"vendorId": vendor_id, "vendorName": self._vendor(vendor_id)["description"],
                     "vendorSportId": sport_id, "vendorSportName": sport["description"],

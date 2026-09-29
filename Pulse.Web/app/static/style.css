@@ -3331,6 +3331,7 @@ button.scc-node:hover { background: var(--c-surface-2); border-color: var(--c-bo
 .scc-warn { display: flex; align-items: flex-start; gap: 0.45rem; margin: 0.85rem 0 0; font-size: 0.82rem; color: var(--c-accent-amber); line-height: 1.45; max-width: 72ch; }
 .scc-warn svg { flex: none; margin-top: 0.15rem; }
 .scc-warn.is-live { font-weight: 600; }
+.scc-setup > .scc-warn:first-of-type { margin: 0 0 0.6rem; }
 .scc-saved { font-size: 0.85rem; margin: 0 0 0.5rem; color: var(--c-text); }
 
 @keyframes scc-in { from { opacity: 0; transform: scale(0.97); } to { opacity: 1; transform: none; } }

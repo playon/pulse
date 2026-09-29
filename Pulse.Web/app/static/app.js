@@ -8967,7 +8967,9 @@ function _sccBreaks(data, sig, parts) {
   else if (sig.usb === false) add("usb-missing");
   else if (sig.sc3 === "up" && ser.state === "failing" && (ser.failures || 0) >= 2) add("serial-failing");
   else if (sig.sc3 === "up") {
-    if (parts.device.src === "confirmed" && fills.sc3Device && parts.device.value !== (data.sc3Device || {}).deviceType) add("device-mismatch");
+    // Measured: SC III's last configuration run could not program the device.
+    if (ser.configProblem) add("config-problem");
+    else if (parts.device.src === "confirmed" && fills.sc3Device && parts.device.value !== (data.sc3Device || {}).deviceType) add("device-mismatch");
     var g = parts.controller.guide;
     if (g && g.tip === null) add("console-unsupported");
     if (parts.cable.src === "confirmed" && parts.cable.needed && parts.cable.needed !== "wireless" && parts.cable.value !== parts.cable.needed) add("cable-mismatch");
@@ -9013,6 +9015,7 @@ function _sccFills(data, parts) {
     brand: parts.controller.value ? _SCC_BRANDS[parts.controller.value] : "",
     drops: _scc.drops,
     pixellotSource: (data.pixellotScore || {}).source || "",
+    configProblem: ((_scc.serial || data.sc3Serial || {}).configProblem || "").replace(/\s*If the issue persists.*$/i, ""),
     legacy: data.sc2 && /SC I|ScoreConnect$/i.test(data.sc2.productName || data.sc2.hardware || "") ? "ScoreConnect I" : "ScoreConnect II",
     // An extension the school ruled out drops its checks entirely.
     extensionAsk: ext === "none" ? "" : fillsCopy.extensionAsk,
@@ -9491,7 +9494,9 @@ function _sccSetupDoneHtml(s) {
   var dataLine = flowing ? '<p class="scc-status scc-status-ok">' + svgIcon("check", 16) + '<span>Scoreboard data is coming through.</span></p>'
     : watching ? '<p class="scc-note" role="status">Waiting for scoreboard data from the console…</p>'
     : '<p class="scc-note">Saved, but no scoreboard data yet. That is expected if the console is off.</p>';
-  return '<p class="scc-saved">Saved. ScoreConnect III now reports ' + esc([a.vendorSportName, a.vendorConfigurationName, _SCC_DEVICES[a.deviceType], a.botNumber != null ? "bot " + a.botNumber : null].filter(Boolean).join(" · ")) +
+  var problem = r.configProblem ? '<p class="scc-warn is-live">' + svgIcon("triangle", 14) + '<span>ScoreConnect saved it, but could not set up the ScoreLink: "' +
+    esc(r.configProblem.replace(/\s*If the issue persists.*$/i, "")) + '" The ScoreLink model you picked may not be the one plugged in.</span></p>' : "";
+  return problem + '<p class="scc-saved">Saved. ScoreConnect III now reports ' + esc([a.vendorSportName, a.vendorConfigurationName, _SCC_DEVICES[a.deviceType], a.botNumber != null ? "bot " + a.botNumber : null].filter(Boolean).join(" · ")) +
     (r.discovered ? " (it found the ScoreLink first)" : "") + '.</p>' + dataLine +
     '<div class="scc-picker-foot"><button type="button" class="btn-outline btn-ol-muted" onclick="sccTogglePanel(\'setup\')">Close</button>' +
     '<button type="button" class="btn-outline btn-ol-muted scc-restore" onclick="_sccSetupOpen().then(function(){ sccSetupRestore(); })">' + svgIcon("refresh", 14) + ' Undo this change</button></div>';
@@ -9536,7 +9541,7 @@ function _sccBodyHtml(data) {
   var parts = _sccParts(data);
   var sig = _sccSignals(data);
   var breaks = _sccBreaks(data, sig, parts);
-  _scc.sig = JSON.stringify([sig.sc3, sig.usb, sig.flow, sig.stopped, sig.drops >= 2, (sig.serial || {}).state, _scc.symptom, _scc.panel]);
+  _scc.sig = JSON.stringify([sig.sc3, sig.usb, sig.flow, sig.stopped, sig.drops >= 2, (sig.serial || {}).state, !!(sig.serial || {}).configProblem, _scc.symptom, _scc.panel]);
   return _sccStatusHtml(data, sig, breaks) +
     '<div class="scc-track" role="list" aria-label="Scoreboard connection, from the VPU to the console">' + _sccTrackHtml(data, sig, parts, breaks) + '</div>' +
     _sccDiagnosisHtml(breaks) +
@@ -9553,7 +9558,7 @@ function _sccRender(force) {
   if (!d || !body) return;
   if (!force) {
     var sig = _sccSignals(d);
-    var next = JSON.stringify([sig.sc3, sig.usb, sig.flow, sig.stopped, sig.drops >= 2, (sig.serial || {}).state, _scc.symptom, _scc.panel]);
+    var next = JSON.stringify([sig.sc3, sig.usb, sig.flow, sig.stopped, sig.drops >= 2, (sig.serial || {}).state, !!(sig.serial || {}).configProblem, _scc.symptom, _scc.panel]);
     if (next === _scc.sig) return;
   }
   var focusId = document.activeElement && document.activeElement.id;
