@@ -35,7 +35,9 @@ $FilterVendorPatterns = @(
     @{ pattern = 'lightspeedsystems|lightspeed';           name = 'Lightspeed Systems' }
     @{ pattern = 'goguardian';                             name = 'GoGuardian' }
     @{ pattern = 'contentkeeper';                          name = 'ContentKeeper' }
-    @{ pattern = 'fortiguard|fortinet|fortigate';          name = 'FortiGuard (Fortinet)' }
+    # "Web Filter Violation" is the FortiGate replacement page's <title>; the
+    # FortiGuard wording sits far down a page of inline CSS (Armstrong IL).
+    @{ pattern = 'fortiguard|fortinet|fortigate|web filter violation'; name = 'FortiGuard (Fortinet)' }
     @{ pattern = 'paloaltonetworks';                       name = 'Palo Alto Networks' }
     @{ pattern = 'umbrella|opendns';                       name = 'Cisco Umbrella (OpenDNS)' }
     @{ pattern = 'meraki';                                 name = 'Cisco Meraki' }
@@ -69,7 +71,7 @@ function Get-FilterBlockSignal {
     #>
     param([string]$Domain)
 
-    $signal = [ordered]@{ blockPageHost = $null; blockPageUrl = $null; filterVendor = $null }
+    $signal = [ordered]@{ blockPageHost = $null; blockPageUrl = $null; filterVendor = $null; httpStatus = $null }
     $resp = $null
     $reader = $null
 
@@ -88,6 +90,7 @@ function Get-FilterBlockSignal {
             if ($_.Exception.Response) { $resp = $_.Exception.Response } else { throw }
         }
 
+        try { $signal.httpStatus = [int]$resp.StatusCode } catch { }
         $location = [string]$resp.Headers['Location']
         $server   = [string]$resp.Headers['Server']
 
@@ -97,8 +100,11 @@ function Get-FilterBlockSignal {
         $stream = $resp.GetResponseStream()
         if ($stream) {
             $reader = New-Object System.IO.StreamReader($stream)
-            $buffer = New-Object char[] 4000
-            $read = $reader.Read($buffer, 0, 4000)
+            # ReadBlock, not Read: one Read returns only the first chunk that
+            # arrived, which on a FortiGate block page is all CSS. The 2.5s
+            # ReadWriteTimeout still bounds a hung connection.
+            $buffer = New-Object char[] 65536
+            $read = $reader.ReadBlock($buffer, 0, 65536)
             if ($read -gt 0) { $body = -join $buffer[0..($read - 1)] }
         }
 
@@ -347,6 +353,41 @@ try {
         $row.blockPageHost = $signal.blockPageHost
         $row.blockPageUrl  = $signal.blockPageUrl
         $row.filterVendor  = $signal.filterVendor
+    }
+
+    # ---- A block page served over HTTPS is a category block ------------
+    # Some filters block a category by answering the handshake with a cert
+    # they mint themselves, only so the browser can show the block page. That
+    # reads as 'intercepted', but nothing is being decrypted and the fix is a
+    # category exception, not an SSL-decryption exemption. Field: Armstrong IL
+    # 2026-09-28 - the FortiGate served a 2-day cert for secure.logmein.com
+    # (FortiGuard category "Remote Access", 403 block page on port 80) while
+    # every other host carried a genuine public cert. Tell them apart the same
+    # way as above: plain HTTP to the host returns the vendor's block page (a
+    # 4xx, or a redirect to another host), where a decrypting-but-allowing
+    # middlebox passes port 80 through to the real site.
+    $interceptedRows = @($results | Where-Object { $_.status -eq 'intercepted' })
+    $probedIntercepted = 0
+    foreach ($row in $interceptedRows) {
+        if ($probedIntercepted -ge 3) { break }
+        $probedIntercepted++
+        $signal = Get-FilterBlockSignal -Domain $row.domain
+        # The vendor can come from the block page itself or from the cert the
+        # middlebox minted for this host (issuer O=Fortinet at Armstrong).
+        if (-not $signal.filterVendor) {
+            $issuerText = ("$($row.issuer) $($row.issuerOrg)").ToLower()
+            foreach ($v in $FilterVendorPatterns) {
+                if ($issuerText -match $v.pattern) { $signal.filterVendor = $v.name; break }
+            }
+        }
+        $isBlockPage = $signal.filterVendor -and ($signal.blockPageHost -or ($signal.httpStatus -ge 400))
+        if ($isBlockPage) {
+            $row.status        = 'filtered'
+            $row.failureKind   = 'block-page'
+            $row.blockPageHost = $signal.blockPageHost
+            $row.blockPageUrl  = $signal.blockPageUrl
+            $row.filterVendor  = $signal.filterVendor
+        }
     }
 
     # Distinct vendor identities, same role as interceptorIssuers: give the

@@ -1028,31 +1028,10 @@ html.dark .channel-moved-banner {
     flex-direction: column;
     min-height: 0;       /* allow inner list to shrink+scroll */
 }
-/* Neutral count pill — a tally, not a severity: muted and dotless. Sized to
-   sit flush beside the severity pills. */
-.cc-findings-count {
-    display: inline-flex;
-    align-items: center;
-    font-size: 0.75rem;
-    font-weight: 600;
-    color: var(--c-muted);
-    background: var(--c-border);
-    border-radius: 999px;
-    padding: 5px 12px;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-}
 .cc-findings-list {
-    max-height: 220px;
+    max-height: 420px;   /* ten one-line rows plus one open fix */
     overflow-y: auto;
 }
-/* Separates severity groups (critical cluster vs warning cluster). */
-.cc-findings-divider {
-    height: 1px;
-    background: var(--c-border);
-    margin: 6px 10px;
-}
-
 /* Deep-link flash — pulses the destination row when a dashboard finding
    is clicked, so the tech's eye lands on the exact issue on the new tab. */
 @keyframes finding-flash-kf {
@@ -1118,8 +1097,54 @@ html.dark .channel-moved-banner {
 .finding-item[aria-expanded="true"] .finding-arrow { transform: rotate(-90deg); }
 .finding-item[aria-expanded="true"] { background: var(--c-tint-blue-faint); }
 .finding-detail {
-    padding: 2px 10px 12px 44px;
+    padding: 2px 10px 12px 28px;   /* under the verdict word, not the dot */
 }
+
+/* One findings list on every tab (findingListHtml in app.js): a summary in
+   the header, one line per finding, the fix a click away. Rows are divided by
+   a hairline, not boxed: the verdict word and dot carry the severity, so the
+   list stays quiet until something in it is opened. */
+.findings-hdr {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    margin-bottom: 6px;
+}
+.findings-hdr .section-title,
+.findings-hdr .af-header { margin-bottom: 0; }
+.findings-summary {
+    margin-left: auto;
+    font-size: 0.75rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+.findings-sep { color: var(--c-dim); font-weight: 400; margin: 0 7px; }
+.finding-row + .finding-row,
+.finding-notes { border-top: 1px solid var(--c-border); }
+.finding-notes-btn {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 10px;
+    border: none;
+    background: none;
+    font: inherit;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--c-muted);
+    text-align: left;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+.finding-notes-btn > span:nth-child(2) { flex: 1; }
+.finding-notes-btn:hover { background: var(--c-tint-blue-faint); }
+.finding-notes-btn:focus-visible { outline: 2px solid var(--c-accent-blue); outline-offset: -2px; }
+.finding-notes-btn .finding-arrow { transform: rotate(90deg); }
+.finding-notes-btn[aria-expanded="true"] .finding-arrow { transform: rotate(-90deg); }
+.finding-notes .finding-row:first-child { border-top: 1px solid var(--c-border); }
 .finding-rec {
     font-size: 0.78rem;
     line-height: 1.5;
@@ -1138,7 +1163,6 @@ html.dark .channel-moved-banner {
     text-decoration: none;
 }
 .finding-open:hover { text-decoration: underline; }
-.cc-findings-actions { display: inline-flex; align-items: center; gap: 10px; }
 .finding-copy {
     font-size: 0.7rem;
     font-weight: 600;
@@ -1160,6 +1184,7 @@ html.dark .channel-moved-banner {
 }
 .finding-dot-critical { background: var(--c-accent-red); box-shadow: 0 0 6px rgba(239, 68, 68, 0.4); }
 .finding-dot-warning  { background: var(--c-accent-amber); box-shadow: 0 0 6px rgba(234, 179, 8, 0.3); }
+.finding-dot-soon     { background: var(--c-accent-purple); }
 .finding-dot-info     { background: var(--c-accent-blue); }
 .finding-cat {
     font-size: 0.72rem;
@@ -1172,6 +1197,7 @@ html.dark .channel-moved-banner {
 /* The chip carries the verdict phrase (VERDICT in app.js), colored to match. */
 .finding-cat-critical { color: var(--c-accent-red); }
 .finding-cat-warning  { color: var(--c-accent-amber); }
+.finding-cat-soon     { color: var(--c-accent-purple); }
 .finding-cat-info     { color: var(--c-accent-blue); }
 .finding-title {
     flex: 1;
@@ -2593,15 +2619,6 @@ details[open] > .cam-details-btn::before { transform: rotate(90deg); }
    only an 8px gap between them, so two consecutive warnings would
    visually merge.  Bump the gap and add a subtle inset shadow so each
    row reads as its own card-within-card. */
-.cam-finding-row { border-radius: 6px; padding: 10px 14px; margin-bottom: 10px; box-shadow: inset 0 0 0 1px var(--c-border); }
-.cam-finding-row:last-child { margin-bottom: 0; }
-.cam-finding-row-critical { background: var(--c-tint-red); box-shadow: inset 0 0 0 1px var(--c-accent-red); }
-.cam-finding-row-warning  { background: var(--c-tint-amber); box-shadow: inset 0 0 0 1px var(--c-accent-amber); }
-.cam-finding-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-.cam-finding-pill { font-size: 0.65rem; font-weight: 700; border-radius: 3px; padding: 2px 6px; color: var(--c-on-accent); flex-shrink: 0; }
-.cam-finding-pill-critical { background: var(--c-pill-critical); }
-.cam-finding-pill-warning  { background: var(--c-pill-warning); }
-.cam-finding-body { font-size: 0.8rem; color: var(--c-muted); line-height: 1.4; }
 
 /* ── PoE power draw (ADLINK SmartPoE) ───────────────────────
    Only rendered on I210/I211 camera NICs; see Get-PoePower.ps1. Bars are a
@@ -3393,40 +3410,7 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
 .net-kv .kv-value { font-size: 0.78rem; color: var(--c-text); word-break: break-word; min-width: 0; }
 
 /* Unified issues & recommendations */
-.net-issues-list { display: flex; flex-direction: column; gap: 0; margin-top: 0.5rem; }
-.net-issue-row {
-    display: grid;
-    grid-template-columns: 72px 1fr;
-    gap: 0 10px;
-    align-items: start;
-    padding: 10px 12px;
-    border-radius: 6px;
-    margin-top: 6px;
-}
-.net-issue-info     { background: var(--c-tint-blue-faint); border: 1px solid var(--c-tint-blue-border); }
-.net-issue-warn     { background: var(--c-tint-amber-faint);  border: 1px solid var(--c-tint-amber-border); }
-.net-issue-critical { background: var(--c-tint-red-faint);  border: 1px solid var(--c-tint-red-border); }
-.net-issue-row .sev-chip { justify-self: start; margin-top: 1px; }
-.net-issue-title {
-    font-size: 0.825rem;
-    font-weight: 600;
-    color: var(--c-text);
-}
-.net-issue-body {
-    font-size: 0.75rem;
-    color: var(--c-muted);
-    line-height: 1.5;
-    margin-top: 2px;
-}
-.net-issue-details {
-    margin: 6px 0 0 0;
-    padding-left: 1rem;
-    list-style: disc;
-    font-size: 0.72rem;
-    color: var(--c-dim);
-    line-height: 1.6;
-}
-.net-issue-details li + li { margin-top: 2px; }
+.net-issues-list { margin-top: 0.25rem; }
 
 /* Under a finding's body on the Dashboard, the Network card and Camera
    Connectivity: one row per affected port or service, the line to send venue
@@ -3469,16 +3453,9 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
 /* The Dashboard detail puts "Open <page>" under the extras; keep a gap. */
 .finding-detail > .finding-evidence,
 .finding-detail > .finding-it { margin-bottom: 8px; }
-/* The Network card's issue body runs the card's full width; match it so the
-   venue-IT line and the evidence don't stop short of the text above them. */
-.net-issue-text .finding-it,
-.net-issue-text .finding-evidence { max-width: none; }
 .net-tip-evidence { display: block; margin-top: 5px; color: var(--c-muted); }
 /* On Camera Connectivity the finding sits on a severity-tinted row; the dim
    ramp washes out there, so match the row's own body text. */
-.cam-finding-row .finding-details,
-.cam-finding-row .finding-evidence { color: var(--c-muted); }
-.cam-finding-row .finding-details { margin: 6px 0 0; }
 .cam-poe-note-evidence { font-size: 0.72rem; color: var(--c-dim); line-height: 1.4; margin-top: 4px; }
 
 /* Local Network Health — ping cards */
