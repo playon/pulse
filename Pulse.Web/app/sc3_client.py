@@ -134,7 +134,16 @@ def read_sc3_settings(path=SC3_SETTINGS_PATH):
         return {"error": "ScoreConnect III settings file not found"}
     except (OSError, ValueError) as e:
         return {"error": "Could not read ScoreConnect III settings: %s" % e}
+    # parms is a LIST, one entry per slot, with "slot" choosing the live one
+    # (vpu-home 2026-09-29: slot 0, slots 1). PowerShell's ConvertTo-Json
+    # unwraps a one-element array, which hid this until Pulse ran on a VPU.
     parms = j.get("parms") or {}
+    if isinstance(parms, list):
+        slot = j.get("slot") if isinstance(j.get("slot"), int) else 0
+        dicts = [x for x in parms if isinstance(x, dict)]
+        parms = parms[slot] if 0 <= slot < len(parms) and isinstance(parms[slot], dict) else (dicts[0] if dicts else {})
+    if not isinstance(parms, dict):
+        return {"error": "ScoreConnect III settings are in a shape Pulse does not know"}
     return {
         "deviceType": device_type_of(parms.get("scorelink_desc")),
         "port": parms.get("port") or None,

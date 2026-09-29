@@ -8871,7 +8871,10 @@ function _sccParts(data) {
   var chain = data.chain || {};
   var cfg = data.configuration || {};
   var sc3dev = (data.sc3Device || {}).deviceType || null;
-  var measuredModel = /II/.test(data.scoreLinkModel || "") ? "ScoreLinkII" : (data.scoreLinkModel ? "ScoreLink" : null);
+  // Only "ScoreLinkII" is a measurement. Both models share one USB chip id,
+  // and the collector's fallback names that chip "ScoreLink": a ScoreLink II
+  // on vpu-home read "ScoreLink" (2026-09-29). So "ScoreLink" proves nothing.
+  var measuredModel = /ScoreLinkII/i.test(data.scoreLinkModel || "") ? "ScoreLinkII" : null;
   var c = function(k) { return chain[k] && chain[k].value ? chain[k] : null; };
 
   var device = { value: null, src: "unknown" };

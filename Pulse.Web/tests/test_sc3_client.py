@@ -86,6 +86,17 @@ class Files(unittest.TestCase):
         self.assertEqual(c.read_sc3_settings(p), {"deviceType": "ScoreLinkII", "port": "COM4", "error": None})
         self.assertEqual(c.device_type_of("USB ScoreLink"), "ScoreLink")
 
+    def test_settings_json_parms_is_a_list_per_slot(self):
+        # The real shape on vpu-home: parms is a list, slot picks the entry.
+        p = self._write("settings.json", '{"slot": 1, "slots": 2, "parms": ['
+                        '{"scorelink_desc": "USB ScoreLink", "port": "COM3"},'
+                        '{"scorelink_desc": "USB ScoreLinkII", "port": "COM8"}]}')
+        self.assertEqual(c.read_sc3_settings(p), {"deviceType": "ScoreLinkII", "port": "COM8", "error": None})
+        p = self._write("settings.json", '{"slot": 0, "slots": 1, "parms": [{"scorelink_desc": "USB ScoreLinkII", "port": "COM8"}]}')
+        self.assertEqual(c.read_sc3_settings(p)["deviceType"], "ScoreLinkII")
+        p = self._write("settings.json", '{"parms": "nonsense"}')
+        self.assertTrue(c.read_sc3_settings(p)["error"])
+
     def _log(self, lines):
         os.makedirs(os.path.join(self.dir, "logs"), exist_ok=True)
         with open(os.path.join(self.dir, "logs", "Log_2026-09-29.txt"), "w") as f:
