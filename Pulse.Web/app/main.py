@@ -5293,15 +5293,19 @@ SC_CHAIN_COPY = {
             "say": "That is usually a loose cable. Ask the school to push the cable in firmly at the console "
                    "and at the ScoreLink. {extensionDrop}",
             "where": ["cable", "extension"], "tone": "warning"},
+        # Pixellot's scoreboard source (graphics.cfg [GENERAL] TYPE) is Pixellot's
+        # own configuration, read-only here. It is what the unit is set to use,
+        # not a fault, and Pulse never changes it: that is done in VPU Manager
+        # (Ian, 2026-09-29).
         "pixellot-ocr": {
-            "title": "Pixellot is set to read the score from the OCR camera, so it ignores ScoreConnect",
-            "say": "If this venue's score comes from ScoreConnect, Pixellot's scoreboard source has to be "
-                   "changed to Sportzcast. That is set in Pixellot's venue setup, not in Pulse.",
-            "where": ["vpu"], "tone": "warning"},
+            "title": "Pixellot is set to take the score from the OCR camera, not ScoreConnect",
+            "say": "That is how this VPU is configured, so ScoreConnect's data is not what reaches the stream. "
+                   "If this venue should use ScoreConnect instead, change the scoreboard source in VPU Manager.",
+            "where": ["vpu"], "tone": "info"},
         "pixellot-other": {
             "title": "Pixellot's scoreboard source is set to {pixellotSource}",
-            "say": "Pulse has not confirmed that this setting reads ScoreConnect's data. If data arrives here "
-                   "but the stream shows no score, check this first.",
+            "say": "That is how this VPU is configured. If data arrives here but the stream shows no score, "
+                   "check this setting in VPU Manager.",
             "where": ["vpu"], "tone": "info"},
     },
     "healthy": "Scoreboard data is arriving, so every link from the VPU to the console is working.",
