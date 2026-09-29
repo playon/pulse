@@ -1,0 +1,37 @@
+{
+    "schema":  "gpu-triage/1",
+    "host":  "VPU",
+    "timestamp":  "2026-08-27T20:45:04.3281269-06:00",
+    "platform":  "windows",
+    "model":  "HP HP Z1 Entry Tower G5",
+    "os":  "Microsoft Windows 10 Enterprise LTSC 10.0.17763",
+    "buildLab":  "17763.1.amd64fre.rs5_release.180914-1434",
+    "bios":  "R01 Ver. 02.03.02",
+    "gpuName":  "",
+    "pciPresent":  true,
+    "pciId":  "10DE:10FA",
+    "driverVersion":  "",
+    "enumerationOk":  true,
+    "nvidiaSmiOk":  false,
+    "nvencTest":  "skipped",
+    "nvdecTest":  "skipped",
+    "hwDetectorLogHits":  10,
+    "hwDetectorFirstSeen":  "2026-08-27T20:41:42.2866759-06:00",
+    "tdrCount":  0,
+    "wheaCount":  0,
+    "verdict":  "SOFTWARE_FAULT",
+    "hardwareEvidence":  [
+
+                         ],
+    "softwareEvidence":  [
+                             "GPU is on the PCI bus but Windows exposes no NVIDIA display adapter - the display driver is not installed or not loading",
+                             "nvlddmkm.sys missing - the NVIDIA kernel driver is not installed",
+                             "nvidia-smi.exe not present - the NVIDIA driver package is incomplete; the GPU cannot be judged in this state"
+                         ],
+    "notes":  [
+                  "NVIDIA PCI device present: 10DE:10FA",
+                  "PnP reports the NVIDIA device as working (code 0)",
+                  "PnP reports the NVIDIA device as working (code 0)",
+                  "HwDetector failure present in logs back to at least 08/27/2026 20:41:42 - compare against driver/update dates in section 1"
+              ]
+}

@@ -1,0 +1,16 @@
+$kind: collection
+description: |-
+  Exploration collection for the planned Pulse cloud lookup feature:
+
+    "I am this VPU > I have this event > I was not able to stream because of X issue"
+
+  Run order for the scenario chain:
+    1. Unity: Game/Event lookup  — seeds broadcast_key, game_key, pixellot_id
+    2. Unity: Broadcast detail   — seeds vod_key; shows status (on_air/complete/scheduled)
+    3. Unity: Live stream URL    (only if status = on_air)
+    4. Unity: VOD stream URL     (only if status = complete)
+    5. Club:  Venue profile      — hardware + metrics.values health indicators for the pixellot_id
+
+  Each request's test script auto-captures the IDs the next request needs into the active environment, so after step 1 the rest just run.
+
+  Auth: every request sends `Authorization: {{nfhs_auth}}` or `{{club_auth}}`. Set those env vars to the full header value (e.g. `Bearer eyJ...`). If either API actually wants a different header (e.g. `x-api-key`), edit the header on the request — the variable plumbing stays the same.

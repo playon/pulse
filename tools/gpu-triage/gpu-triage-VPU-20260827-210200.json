@@ -1,0 +1,36 @@
+{
+    "schema":  "gpu-triage/1",
+    "host":  "VPU",
+    "timestamp":  "2026-08-27T21:02:06.7892755-06:00",
+    "platform":  "windows",
+    "model":  "HP HP EliteDesk 800 G4 WKS TWR",
+    "os":  "Microsoft Windows 10 Enterprise LTSC 10.0.17763",
+    "buildLab":  "17763.1.amd64fre.rs5_release.180914-1434",
+    "bios":  "Q01 Ver. 02.08.00",
+    "gpuName":  "NVIDIA GeForce GTX 1650",
+    "pciPresent":  true,
+    "pciId":  "10DE:10FA",
+    "driverVersion":  "536.67",
+    "enumerationOk":  true,
+    "nvidiaSmiOk":  true,
+    "nvencTest":  "PASS",
+    "nvdecTest":  "PASS",
+    "hwDetectorLogHits":  0,
+    "hwDetectorFirstSeen":  "",
+    "tdrCount":  0,
+    "wheaCount":  0,
+    "verdict":  "NOT_HARDWARE",
+    "hardwareEvidence":  [
+
+                         ],
+    "softwareEvidence":  [
+                             "nvlddmkm.sys missing - the NVIDIA kernel driver is not installed"
+                         ],
+    "notes":  [
+                  "NVIDIA PCI device present: 10DE:10FA",
+                  "PnP reports the NVIDIA device as working (code 0)",
+                  "PnP reports the NVIDIA device as working (code 0)",
+                  "FUNCTIONAL: NVENC encoded successfully on this GPU",
+                  "FUNCTIONAL: CUDA/NVDEC decode succeeded on this GPU"
+              ]
+}

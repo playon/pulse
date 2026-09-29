@@ -1,0 +1,14 @@
+$kind: http-request
+description: Signed CloudFront .m3u8 HLS URL for a completed event's VOD. Requires vod_key (captured by request 2).
+url: "{{unity_base}}/v2/vods/{{vod_key}}/url"
+method: GET
+headers:
+  Authorization: "{{nfhs_auth}}"
+  Accept: application/json
+scripts:
+  - type: afterResponse
+    code: |-
+      pm.test('200 OK', () => pm.response.to.have.status(200));
+      try { console.log('vod m3u8:', JSON.stringify(pm.response.json())); } catch (e) {}
+    language: text/javascript
+order: 4000
