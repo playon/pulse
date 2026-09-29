@@ -8994,7 +8994,11 @@ function _sccLinks(sig) {
 function _sccImgHtml(data, part, p, label) {
   var key = _sccImgKey(part, p || {});
   var have = data.chainImages || [];
-  var file = key && have.filter(function(n) { return n.replace(/\.(png|jpe?g|webp)$/i, "") === key; })[0];
+  var find = function(k) { return k && have.filter(function(n) { return n.replace(/\.(png|jpe?g|webp)$/i, "") === k; })[0]; };
+  var file = find(key);
+  // A ScoreLink II whose colour nobody has confirmed still gets a picture:
+  // both colours are the same hardware. The label never claims a colour.
+  if (!file && key === "device-scorelink2") file = find("device-scorelink2-yellow") || find("device-scorelink2-blue");
   if (file) return '<img src="/static/img/sc/' + esc(file) + '" alt="" decoding="async">';
   return '<span class="scc-ph" aria-hidden="true">' + esc(label || "") + '</span>';
 }
