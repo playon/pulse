@@ -78,6 +78,40 @@ class TestDocumentedCapture(unittest.TestCase):
         self.assertEqual(prefix[-1], DOC_CAPTURE[POS_QUARTER])
 
 
+# Second real capture, a different console model and sport setting:
+# Daktronics All Sport 5000 on the gray tip, SC III 1.4.1.1 set to
+# "Daktronics Auto Detect" (vpu-home, 2026-09-29). Every field was read off
+# the physical console by Ian: clock 0:00 stopped, home 39, guest 49, 1st &
+# 10, ball-on blank, period 6. Unlike the football capture it has no team
+# labels, a clock-state token S:S (stopped), and is 150 bytes long.
+AS5000_CAPTURE = "02 000  25 39 49  33110  6                                                                                          S:S             00C82C8DF1E7A692E6"
+
+
+class TestAllSport5000Capture(unittest.TestCase):
+    """The same offsets hold on an All Sport 5000 under Auto Detect."""
+
+    def test_length_and_header(self):
+        self.assertEqual(len(AS5000_CAPTURE), 150)
+        self.assertEqual(AS5000_CAPTURE[slice(*POS_HEADER)], "02")
+
+    def test_clock_zero(self):
+        self.assertEqual(AS5000_CAPTURE[slice(*POS_CLOCK)].strip(), "000")
+
+    def test_scores(self):
+        self.assertEqual(int(AS5000_CAPTURE[slice(*POS_HOME)].strip()), 39)
+        self.assertEqual(int(AS5000_CAPTURE[slice(*POS_VISITOR)].strip()), 49)
+
+    def test_down_to_go_packed_and_ball_on_blank(self):
+        dtb = AS5000_CAPTURE[slice(*POS_DTB)]
+        self.assertEqual((dtb[0], dtb[1:3], dtb[3:5].strip()), ("1", "10", ""))
+
+    def test_period_six_at_pos_25(self):
+        self.assertEqual(AS5000_CAPTURE[POS_QUARTER], "6")
+
+    def test_clock_state_token_stopped(self):
+        self.assertIn("S:S", AS5000_CAPTURE)
+
+
 class TestDemoGeneratorLayout(unittest.TestCase):
     """demo_data must emit the same layout the JS parser reads."""
 
