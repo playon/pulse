@@ -1,9 +1,24 @@
-# Beta Channel Playbook
+# Beta Channel Playbook (RETIRED)
+
+> **The beta channel was retired on 2026-09-21.** Pulse ships `dev` → `main`.
+> Field validation happens on the dev channel, whose launcher tracks the
+> branch tip, so a change can be exercised on a real VPU the moment it merges
+> — which is what a beta cycle was for.
+>
+> This document is kept for two reasons. It is the record of how the plumbing
+> worked if the channel ever needs reopening, and it explains why the `beta`
+> branch is **frozen rather than deleted**: `runners/Pulse-Beta.bat` sits on
+> testers' desktops and fetches its launcher from a `raw.githubusercontent.com`
+> URL on that branch every run. On the frozen branch that launcher is a
+> production redirect, so a remaining tester migrates to production silently.
+> Delete the branch and a tester with a cold launcher cache gets a download
+> failure and Pulse does not start at all.
+>
+> Nothing below should be acted on without deciding to reopen the channel.
 
 How to open a Pulse beta test cycle when a large feature or fix needs real
 field validation, and how to close it and route every tester back to
-production when the cycle ends. The beta program is **closed by default**
-(since 2026-08-04); this document is the supported way to run one.
+production when the cycle ends.
 
 ## How the channel plumbing works (read this first)
 

@@ -1,0 +1,66 @@
+# Enforce the design contract that Pulse.Web/app/static/style.css states in
+# its own comments.
+#
+# The stylesheet is unusually explicit about what it requires -- the text ramp
+# block says every tier "must clear WCAG AA (4.5:1) for normal text on BOTH
+# --c-surface and --c-bg"; the theme-invariant block explains that solid brand
+# fills carry white text so they must hold contrast in both themes; the accent
+# block works the double-tint compositing case by hand. None of it was ever
+# re-checked, and it drifted: that same ramp comment records a 4.3 in the
+# sentence that requires 4.5, and four svgIcon() call sites name icons that do
+# not exist and render blank on a real VPU.
+#
+# The gap this closes is structural, not cosmetic. Of the three existing
+# guards, python-tests filters Pulse.Web/app/**.py, ps-ascii-check filters
+# Pulse.Web/scripts/**.ps1, and launcher-sync filters the .bat copies -- none
+# matches Pulse.Web/app/static/**. Meanwhile web-auto-tag.yml fires on
+# Pulse.Web/**, which DOES match app.js, so a frontend-only change ran zero
+# checks and then published a dev pre-release that run_pulse_dev.bat installs.
+#
+# Standalone workflow for the same reason as ps-ascii-check: web-build.yml and
+# web-auto-tag.yml are both tag/release driven, and a guard has to fail on the
+# pull request, before the defect is merged and packaged.
+#
+# Unlike ps-ascii-check the check is a committed script rather than an inline
+# heredoc -- it is ~450 lines and has to be runnable locally by the
+# pulse-ui-contract skill. It is pure ASCII for the same reason: the runner's
+# locale must not change what it prints.
+
+name: UI contract
+
+on:
+  push:
+    branches: [dev, beta, main]
+    paths:
+      - "Pulse.Web/app/static/**"
+      - "tools/ui-contract/**"
+      - ".github/workflows/ui-contract.yml"
+  pull_request:
+    paths:
+      - "Pulse.Web/app/static/**"
+      - "tools/ui-contract/**"
+      - ".github/workflows/ui-contract.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ui-contract:
+    name: Pulse.Web/app/static must hold its design contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The whole guard rests on one contrast() function. If that is ever
+      # "simplified" the checks below would silently pass everything, so
+      # verify the maths against known WCAG reference values first.
+      - name: Verify the colour maths
+        run: python3 tools/ui-contract/check_ui_contract.py --self-test
+
+      - name: Check the UI contract
+        run: python3 tools/ui-contract/check_ui_contract.py --verbose

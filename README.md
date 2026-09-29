@@ -26,13 +26,15 @@ launch.
 | Launcher | Channel | Pulls |
 |---|---|---|
 | [`run_pulse.bat`](https://raw.githubusercontent.com/playon/pulse/main/runners/run_pulse.bat) | **Production** | latest `web-v*` release |
-| [`run_pulse_beta.bat`](https://raw.githubusercontent.com/playon/pulse/main/runners/run_pulse_beta.bat) | **Beta** | latest `web-beta-v*` pre-release |
 | [`run_pulse_dev.bat`](https://raw.githubusercontent.com/playon/pulse/main/runners/run_pulse_dev.bat) | **Dev** | latest commit on the `dev` branch |
 
-All three install to `C:\Pulse` (one channel at a time), so run the launcher for
-the channel you want. Field VPUs use **`run_pulse.bat`**; beta testers use
-**`run_pulse_beta.bat`**. Once installed, Pulse can update itself from
-**Settings → Check for Update** (no need to re-run the launcher).
+Both install to `C:\Pulse` (one channel at a time), so run the launcher for the
+channel you want. Field VPUs use **`run_pulse.bat`**; internal testing and
+field validation use **`run_pulse_dev.bat`**. Once installed, Pulse can update
+itself from **Settings → Check for Update** (no need to re-run the launcher).
+
+The beta channel was retired on 2026-09-21 — validation happens on `dev`, whose
+launcher tracks the branch tip.
 
 On first launch, the embedded `run.bat`:
 1. Downloads embedded Python 3.12.8 from python.org
@@ -112,11 +114,15 @@ Then open **http://localhost:8765** in your browser.
 
 ## Release channels
 
-Code flows **`dev` → `beta` → `main`**, each with its own release channel and
-launcher (above). Versions follow semver — the source of truth is
-`Pulse.Web/VERSION`, and the per-release "what's new" notes (shown by the in-app
-**Check for Update**) live in `Pulse.Web/CHANGELOG.md`. Pushing a channel tag
-(`web-v*`, `web-beta-v*`) builds and publishes the release that launcher pulls.
+Code flows **`dev` → `main`**, each with its own release channel and launcher
+(above). Versions follow semver — the source of truth is `Pulse.Web/VERSION`,
+and the per-release "what's new" notes (shown by the in-app **Check for
+Update**) live in `Pulse.Web/CHANGELOG.md`. Pushing a production tag (`web-v*`)
+builds and publishes the release the launcher pulls; `dev` auto-tags on push.
+
+The `beta` branch is frozen rather than deleted — testers' share-once launcher
+fetches from a URL on that branch, so removing it would break them. See
+`CLAUDE.md`.
 
 ---
 

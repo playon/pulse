@@ -24,6 +24,14 @@ import main  # noqa: E402
 import powershell  # noqa: E402
 
 
+def _finding_text(f):
+    """Everything a finding tells the reader: the body, the venue-IT line,
+    the evidence and the per-row details. Findings carry their facts in
+    whichever of these fits the audience, so assert against all of them."""
+    return " ".join([f.get("recommendation") or "", f.get("it") or "",
+                     f.get("evidence") or ""] + list(f.get("details") or []))
+
+
 # ── Version comparison (GPU compat caps) ─────────────────────
 class TestVersionCompare(unittest.TestCase):
     def test_wildcard_cap_allows_any_patch(self):
@@ -809,8 +817,8 @@ class TestAdapterRoles(unittest.TestCase):
         self.assertIsNotNone(f)
         self.assertEqual(f["severity"], "critical")
         self.assertIn("camera port", f["title"].lower())
-        self.assertIn("Ethernet 28", f["recommendation"])
-        self.assertIn("no cable connected", f["recommendation"])  # motherboard cable is out
+        self.assertIn("Ethernet 28", _finding_text(f))
+        self.assertIn("no cable connected", _finding_text(f))  # motherboard cable is out
 
     def test_motherboard_disabled_note(self):
         cfg = self._bad()
@@ -838,7 +846,7 @@ class TestAdapterRoles(unittest.TestCase):
                 ipc["ipv4DefaultGateway"] = "192.168.100.1"   # scalar, not a list
         f = main._camera_nic_uplink_finding(cfg)
         self.assertIsNotNone(f)
-        self.assertIn("192.168.100.1", f["recommendation"])  # full gateway, not "1"
+        self.assertIn("192.168.100.1", _finding_text(f))  # full gateway, not "1"
 
 
 # ── Wi-Fi card disabled (Pixellot Connect) ───────────────────────────
@@ -884,7 +892,7 @@ class TestWifiDisabled(unittest.TestCase):
         self.assertIsNotNone(f)
         self.assertEqual(f["severity"], "warning")
         self.assertIn("Connect", f["recommendation"])
-        self.assertIn("Wireless-AC 9560", f["recommendation"])
+        self.assertIn("Wireless-AC 9560", _finding_text(f))
 
     def test_enabled_wifi_does_not_warn(self):
         self.assertIsNone(main._wifi_disabled_finding(self._cfg(wifi_status="Up", wifi_admin="Up")))
@@ -927,7 +935,7 @@ class TestDnsProbeFalsePositive(unittest.TestCase):
     def test_dns_reported_when_nothing_resolves(self):
         # DNS fails AND no hostname-based service passed → genuine DNS problem, still flag.
         titles = self._net_titles(self._ports("fail", "fail"))
-        self.assertTrue(any("DNS is blocked" in t for t in titles), titles)
+        self.assertTrue(any("blocking name lookups" in t for t in titles), titles)
 
 
 # ── NTP source allowlist (PDF #9) ────────────────────────────
@@ -1071,6 +1079,139 @@ class TestReadinessPolicy(unittest.TestCase):
         )
 
 
+
+# ── Zero cameras must never read PASS ─────────────────────────────────
+class TestNoCamerasNeverPasses(unittest.TestCase):
+    """North East (MD) Gym, 2026-09-22, web-v1.3.0: 2 main cameras expected,
+    none connected, the venue's internet cable in camera port 2 -- and Stream
+    Readiness said PASS "Game-ready". The cold-start guard read port 2's link
+    as proof of a camera; the Dashboard never re-collected; and with no
+    expected count the check would not have run at all."""
+
+    def setUp(self):
+        self._saved_start = main._PROCESS_START_MONO
+        self._saved_tracker = main._PORT_STATE_TRACKER
+        main._PORT_STATE_TRACKER = {}
+        main._PROCESS_START_MONO = main.time.monotonic()  # inside the grace window
+
+    def tearDown(self):
+        main._PROCESS_START_MONO = self._saved_start
+        main._PORT_STATE_TRACKER = self._saved_tracker
+
+    @staticmethod
+    def _port(name, mac, up):
+        return {"name": name, "status": "Up" if up else "Disconnected",
+                "linkSpeedMbps": 1000 if up else None, "mac": mac, "arpEntries": []}
+
+    def _north_east(self):
+        nics = {"ports": [
+            self._port("Ethernet 28", "00:30:64:5F:61:86", True),   # the internet cable
+            self._port("Ethernet 29", "00:30:64:5F:61:87", False),
+            self._port("Ethernet 30", "00:30:64:5F:61:88", False),
+            self._port("Ethernet 31", "00:30:64:5F:61:89", False),
+        ]}
+        cfg = {"adapters": [
+            {"name": "Ethernet 5", "interfaceDescription": "Intel(R) Ethernet Connection (7) I219-LM",
+             "status": "Disconnected", "adminStatus": "Up", "physicalMediaType": "802.3",
+             "macAddress": "E0-D5-5E-00-00-01", "interfaceIndex": 22, "pciBus": 0},
+            {"name": "Ethernet 28", "interfaceDescription": "Intel(R) 82574L Gigabit Network Connection #13",
+             "status": "Up", "adminStatus": "Up", "physicalMediaType": "802.3",
+             "macAddress": "00-30-64-5F-61-86", "interfaceIndex": 23, "pciBus": 4},
+        ], "ipConfigurations": [
+            {"interfaceAlias": "Ethernet 28", "interfaceIndex": 23, "ipv4DefaultGateway": "10.10.60.1"},
+        ]}
+        return nics, cfg
+
+    def _findings(self, nics, cfg=None, expected=2, probes=None, identity=None):
+        return main._compute_findings(
+            identity=identity or _identity("5.37.2"), performance={}, services={}, nics=nics,
+            network_config=cfg, probe_results={} if probes is None else probes,
+            expectations={"expectedMainCameras": expected} if expected else None)
+
+    def test_internet_cable_link_is_not_camera_evidence(self):
+        nics, cfg = self._north_east()
+        f = self._findings(nics, cfg)
+        cam = [x for x in f if x["code"] == "cam-none"]
+        self.assertEqual(len(cam), 1, [x["code"] for x in f])
+        self.assertIn("internet cable", " ".join(cam[0]["details"]))
+        self.assertIn("carrying the internet cable", cam[0]["recommendation"])
+        verdict = main._compute_readiness(f)
+        self.assertEqual(verdict["status"], "FAIL")
+        self.assertIn("cam-none", [b["code"] for b in verdict["blockers"]])
+
+    def test_zero_cameras_fire_without_an_expected_count(self):
+        nics, cfg = self._north_east()
+        cam = [x for x in self._findings(nics, cfg, expected=None) if x["code"] == "cam-none"]
+        self.assertEqual(len(cam), 1)
+        self.assertNotIn("expected", cam[0]["title"])
+
+    def test_non_vpu_host_without_count_stays_quiet(self):
+        nics, cfg = self._north_east()
+        f = self._findings(nics, cfg, expected=None,
+                           identity={**_identity("5.37.2"), "isNonVpuHost": True})
+        self.assertEqual([x for x in f if x["code"].startswith("cam-")], [])
+
+    def test_cold_start_on_a_real_camera_link_is_pending_not_pass(self):
+        # The VPU2 case (camera links up, caches cold) still doesn't fire the
+        # critical, but it no longer reads as a pass either.
+        nics = {"ports": [self._port("Ethernet 28", "00:30:64:5F:61:86", True)]}
+        f = self._findings(nics)
+        self.assertEqual([x["code"] for x in f if x["code"].startswith("cam-")], ["cam-count-pending"])
+        self.assertEqual(main._compute_readiness(f)["status"], "WARN")
+
+    def test_camera_tab_carries_the_same_finding(self):
+        nics, cfg = self._north_east()
+        ports = main._enrich_ports(nics, None, {})
+        main._flag_uplink_ports(ports, cfg)
+        f = main._camera_count_findings(ports, 2, {}, True)
+        self.assertEqual([x["code"] for x in f], ["cam-none"])
+
+
+class TestMainCameraCount(unittest.TestCase):
+    """_count_main_cameras counts each camera once, by MAC, across the
+    neighbour table and the CGI probes. It used to take max(ARP, probes)."""
+
+    @staticmethod
+    def _port(macs, up=True, ocr=False, uplink=False):
+        return {"isUp": up, "isOcr": ocr, "hasInternetUplink": uplink,
+                "camerasDetected": [{"mac": m, "role": "Main Camera"} for m in macs]}
+
+    def test_one_camera_under_two_addresses_counts_once(self):
+        ports = [self._port(["00-0E-53-AA-01-01"]), self._port(["00:0e:53:aa:01:01"])]
+        self.assertEqual(main._count_main_cameras(ports, {}), 1)
+
+    def test_each_source_seeing_a_different_camera_counts_both(self):
+        ports = [self._port(["00:0E:53:AA:01:01"])]
+        probes = {"00:0E:53:BB:02:01": {"mac": "00:0E:53:BB:02:01", "ip": "169.254.16.51",
+                                         "modelNumber": "Z4SF-5"}}
+        self.assertEqual(main._count_main_cameras(ports, probes), 2)  # max() said 1
+
+    def test_uplink_ocr_and_down_ports_never_count(self):
+        ports = [self._port(["00:0E:53:AA:01:01"], uplink=True),
+                 self._port(["00:D0:89:1B:03:01"], ocr=True),
+                 self._port(["00:0E:53:AA:01:02"], up=False)]
+        self.assertEqual(main._count_main_cameras(ports, {}), 0)
+
+    def test_main_camera_ports_name_where_each_camera_is(self):
+        ports = [
+            {**self._port(["00:0E:53:AA:01:01"]), "portLabel": "Port 1", "linkSpeedMbps": 1000},
+            {**self._port(["00:0E:53:BB:02:01"]), "portLabel": "Port 2", "linkSpeedMbps": 100, "isDegraded": True},
+            {**self._port(["00:D0:89:1B:03:01"], ocr=True), "portLabel": "Port 3"},
+            {**self._port(["00:0E:53:CC:03:01"], uplink=True), "portLabel": "Port 4"},
+        ]
+        self.assertEqual(main._main_camera_ports(ports), [
+            {"port": "Port 1", "speedMbps": 1000, "cameras": 1, "slow": False},
+            {"port": "Port 2", "speedMbps": 100, "cameras": 1, "slow": True},
+        ])
+
+    def test_scoreboard_state_only_when_configured_or_present(self):
+        self.assertIsNone(main._scoreboard_camera_state([self._port([])], {"cameras": []}))
+        live = {"isUp": True, "isOcr": True, "portLabel": "Port 3", "linkSpeedMbps": 100}
+        st = main._scoreboard_camera_state([live], None)
+        self.assertEqual((st["connected"], st["port"], st["speedMbps"]), (True, "Port 3", 100))
+        st = main._scoreboard_camera_state([], {"cameras": [{"role": "OCR"}]})
+        self.assertEqual((st["configured"], st["connected"]), (True, False))
+
 # ── LogMeIn service-log evidence (Get-LmiGatewayLog) ─────────────────
 # Fixture numbers are the real field log (2026-08-28): a VPU dark in LMI all
 # day - 201 handshakes killed with "SSL error: SSLv3/TLS write client hello"
@@ -1102,10 +1243,10 @@ class TestLmiGatewayLogFinding(unittest.TestCase):
              if x["code"] == "lmi-ssl-blocked"]
         self.assertEqual(len(f), 1)
         self.assertEqual(f[0]["severity"], "warning")
-        self.assertIn("201", f[0]["recommendation"])
+        self.assertIn("201", _finding_text(f[0]))
         # The fix has to name the gateway wildcard - an allowlist entry for
         # secure.logmein.com alone leaves control.lmi-app*.logmein.com dead.
-        self.assertIn("*.logmein.com", f[0]["recommendation"])
+        self.assertIn("*.logmein.com", _finding_text(f[0]))
 
     def test_recovered_block_stays_off_dashboard(self):
         # Failures followed by a successful login = venue lifted the block.
@@ -1113,6 +1254,14 @@ class TestLmiGatewayLogFinding(unittest.TestCase):
         self.assertEqual(
             [x for x in self._findings(self._lmi(blocked=False))
              if x["code"] == "lmi-ssl-blocked"], [])
+
+    def test_live_connection_overrides_log_history(self):
+        # Armstrong IL 2026-09-28: Pulse said LogMeIn was blocked while the
+        # tech was on the unit through LogMeIn. A live connection wins.
+        live = self._lmi(blocked=True)
+        live["connectedNow"] = True
+        self.assertEqual(
+            [x for x in self._findings(live) if x["code"] == "lmi-ssl-blocked"], [])
 
     def test_clean_log_is_quiet(self):
         clean = self._lmi(blocked=False)
@@ -1138,6 +1287,208 @@ class TestLmiGatewayLogFinding(unittest.TestCase):
         self.assertEqual(verdict["status"], "PASS")
 
 
+# ── Graphics delivery (Get-GraphicsDelivery) ─────────────────────────
+# Counts are the field bundles: MacLaren CO 2026-09-23 (127/127 hand-offs to
+# VPU.exe timed out, none delivered, VPU.exe received none) and the healthy
+# Tanque Verde control (one cold-start timeout, then steady deliveries).
+class TestGraphicsDeliveryFinding(unittest.TestCase):
+    BAD = {"eventId": "6a983c489175897b10f5097f", "firstSeen": "2026-09-23T15:49:41",
+           "lastSeen": "2026-09-23T17:55:07", "delivered": 0, "deadlineFails": 127,
+           "unavailableFails": 0, "otherFails": 0, "maxAttempt": 127, "vpuReceived": 0}
+    GOOD = {"eventId": "5fb394c2aaaaaaaaaaaaaaaa", "firstSeen": "2026-09-08T18:00:00",
+            "lastSeen": "2026-09-08T20:00:00", "delivered": 413, "deadlineFails": 1,
+            "unavailableFails": 0, "otherFails": 0, "maxAttempt": 1, "vpuReceived": 414}
+
+    def _gd(self, events, **kw):
+        gd = {"logsFound": True, "events": events,
+              "config": {"graphicEngineType": "CGENGINE"},
+              "engineDisabled": {"lines": 0}}
+        gd.update(kw)
+        return gd
+
+    def _codes(self, gd):
+        return [f for f in main._compute_findings(
+            identity={}, performance={}, services={}, nics={}, graphics_delivery=gd)
+            if f["code"].startswith("graphics-")]
+
+    def test_latest_event_failed_is_critical(self):
+        f = self._codes(self._gd([self.GOOD, self.BAD]))
+        self.assertEqual([x["code"] for x in f], ["graphics-handoff-failed"])
+        self.assertEqual(f[0]["severity"], "critical")
+        self.assertIn("1 of the last 2", f[0]["title"])
+        self.assertIn("127 failed hand-offs", _finding_text(f[0]))
+        self.assertIn("never received", _finding_text(f[0]))
+
+    def test_earlier_failure_latest_fine_is_warning(self):
+        good_later = dict(self.GOOD, eventId="6b0000000000000000000001",
+                          lastSeen="2026-09-25T20:00:00")
+        f = self._codes(self._gd([self.BAD, good_later]))
+        self.assertEqual(f[0]["severity"], "warning")
+
+    def test_armstrong_payload(self):
+        # Armstrong IL, 2026-09-28, verbatim counts: four events with zero
+        # hand-offs, then the retest after the rollback delivered 52.
+        ev = lambda i, first, d, f: {"eventId": i, "firstSeen": first, "lastSeen": first,
+                                     "delivered": d, "deadlineFails": f, "unavailableFails": 0,
+                                     "otherFails": 0, "maxAttempt": f, "vpuReceived": d}
+        events = [ev("6ababbc449aa737eb0da963b", "2026-09-28T14:11:29", 52, 40),
+                  ev("6abab3d14f50111eeaea77b3", "2026-09-28T13:37:30", 0, 17),
+                  ev("6abaa5405ba3a09f72a70568", "2026-09-28T12:35:21", 0, 37),
+                  ev("6a7d2200271c403aec9c4a3a", "2026-09-24T17:49:56", 0, 180),
+                  ev("6a7d21c36ecc42b7e65134c1", "2026-09-21T17:49:31", 0, 181)]
+        f = self._codes(self._gd(events, config={"graphicEngineType": "NONE_SELECTED"},
+                                 engineDisabled={"lines": 0, "lastSetScoreboardType": "CGENGINE",
+                                                 "lastSetAt": "2026-09-28 12:33:30"}))
+        self.assertEqual([x["code"] for x in f], ["graphics-handoff-failed"])
+        self.assertEqual(f[0]["severity"], "warning")
+        self.assertIn("4 of the last 5", f[0]["title"])
+        self.assertIn("most recent game had graphics", f[0]["recommendation"])
+        # Local time, not shifted: Jesse's test started 13:37 CDT.
+        self.assertIn("Mon Sep 28 13:37", _finding_text(f[0]))
+
+    def test_one_cold_start_timeout_is_normal(self):
+        self.assertEqual(self._codes(self._gd([self.GOOD])), [])
+
+    def test_startup_refusals_are_not_the_bug(self):
+        # Connection refused before VPU.exe is up, then deliveries: healthy.
+        race = dict(self.GOOD, deadlineFails=0, unavailableFails=40)
+        self.assertEqual(self._codes(self._gd([race])), [])
+        # Refusals only, never delivered: VPU.exe never came up. Not this
+        # finding (the stream itself is the problem there).
+        down = dict(race, delivered=0, vpuReceived=0)
+        self.assertEqual(self._codes(self._gd([down])), [])
+
+    def test_too_few_attempts_is_inconclusive(self):
+        short = dict(self.BAD, deadlineFails=3, maxAttempt=3)
+        self.assertEqual(self._codes(self._gd([short])), [])
+
+    def test_idle_box_and_dead_collector_are_quiet(self):
+        self.assertEqual(self._codes(self._gd([])), [])
+        self.assertEqual(self._codes({"logsFound": False}), [])
+        self.assertEqual(self._codes({"error": True, "message": "boom"}), [])
+
+    def test_engine_none_selected_warns_while_still_set(self):
+        dis = {"lines": 120, "first": "2026-08-17 19:02:00", "last": "2026-08-17 19:32:00",
+               "lastSetScoreboardType": None, "lastSetAt": None}
+        f = self._codes(self._gd([], config={"graphicEngineType": "NONE_SELECTED"},
+                                 engineDisabled=dis))
+        self.assertEqual([x["code"] for x in f], ["graphics-engine-none"])
+        # Fixed since: an engine is selected now, or was set after the last
+        # graphics-off line.
+        self.assertEqual(self._codes(self._gd([], config={"graphicEngineType": "CGENGINE"},
+                                              engineDisabled=dis)), [])
+        fixed = dict(dis, lastSetScoreboardType="CGENGINE", lastSetAt="2026-08-17 19:33:00")
+        self.assertEqual(self._codes(self._gd([], config={"graphicEngineType": "NONE_SELECTED"},
+                                              engineDisabled=fixed)), [])
+
+    def test_none_selected_config_alone_is_quiet(self):
+        # VPU2's bench config is NONE_SELECTED; only its daily test ran, and
+        # the test's own graphics-off line isn't counted.
+        self.assertEqual(self._codes(self._gd([], config={"graphicEngineType": "NONE_SELECTED"})), [])
+
+    def test_graphics_findings_warn_not_fail_readiness(self):
+        for code in ("graphics-handoff-failed", "graphics-engine-none"):
+            verdict = main._compute_readiness(
+                [{"code": code, "severity": "critical", "category": "Pixellot",
+                  "title": "t", "recommendation": "r"}])
+            self.assertEqual(verdict["status"], "WARN", code)
+
+
+# ── Armstrong IL (2026-09-28): FortiGate blocking LogMeIn's website ──────
+# The FortiGate answered secure.logmein.com with a 2-day cert of its own
+# (issuer FG200FT922937326) to show its FortiGuard "Remote Access" block
+# page, and port 80 returned that page as a 403. Every broadcast host had a
+# genuine cert, and the tech was on the unit over LogMeIn the whole time.
+class TestSupportOnlyTlsFindings(unittest.TestCase):
+    def _row(self, domain, status, **kw):
+        r = {"domain": domain, "status": status}
+        r.update(kw)
+        return r
+
+    def _tls(self, rows, issuers=None):
+        return {"results": rows, "interceptorIssuers": issuers or [], "filterVendors": []}
+
+    def _findings(self, tls, lmi=None):
+        return main._compute_findings(identity={}, performance={}, services={}, nics={},
+                                      tls_inspection=tls, lmi_log=lmi)
+
+    def test_support_only_interception_is_not_a_blocker(self):
+        tls = self._tls([self._row("singular.live", "pass"),
+                         self._row("secure.logmein.com", "intercepted", issuerCn="FG200FT922937326")],
+                        ["FG200FT922937326 (Fortinet)"])
+        codes = [f["code"] for f in self._findings(tls)]
+        self.assertIn("ssl-inspection-support", codes)
+        self.assertNotIn("ssl-inspection", codes)
+        self.assertEqual(main._readiness_class("ssl-inspection-support"), "info")
+
+    def test_broadcast_interception_still_blocks(self):
+        tls = self._tls([self._row("api.singular.live", "intercepted"),
+                         self._row("secure.logmein.com", "intercepted")])
+        codes = [f["code"] for f in self._findings(tls)]
+        self.assertIn("ssl-inspection", codes)
+        self.assertNotIn("ssl-inspection-support", codes)
+
+    def test_block_page_with_lmi_connected_says_support_works(self):
+        tls = self._tls([self._row("secure.logmein.com", "filtered", failureKind="block-page",
+                                   filterVendor="FortiGuard (Fortinet)")])
+        tls["filterVendors"] = ["FortiGuard (Fortinet)"]
+        f = [x for x in self._findings(tls, {"connectedNow": True, "logsFound": True})
+             if x["code"] == "tls-filtered-support"]
+        self.assertEqual(len(f), 1)
+        text = _finding_text(f[0])
+        self.assertIn("remote support works", f[0]["recommendation"])
+        # Nothing is broken, so it's a note, not a warning (Ian, 2026-09-28).
+        self.assertEqual(f[0]["severity"], "info")
+        self.assertIn("Remote support still works", f[0]["title"])
+        self.assertIn("block page", text)
+        self.assertNotIn("can't reach the VPU", text)
+
+    def test_block_page_without_live_lmi_keeps_the_warning(self):
+        tls = self._tls([self._row("secure.logmein.com", "filtered", failureKind="block-page")])
+        f = [x for x in self._findings(tls) if x["code"] == "tls-filtered-support"]
+        self.assertIn("remote support and installer downloads will fail", f[0]["recommendation"])
+        self.assertEqual(f[0]["severity"], "warning")
+
+
+# ── Score source: OCR camera or ScoreConnect (Armstrong IL, 2026-09-28) ──
+# Pulse warned "ScoreConnect not running" on a unit whose OCR camera was
+# connected and reading the board. Only the source in use matters.
+class TestScoreboardSource(unittest.TestCase):
+    SC_DOWN = {"reachable": False, "sc2": {"reachable": False}}
+    SC_UP = {"reachable": True}
+    OCR_UP = {"configured": True, "connected": True, "port": "Port 3"}
+    OCR_DOWN = {"configured": True, "connected": False, "port": None}
+
+    def test_ocr_connected_makes_scoreconnect_optional(self):
+        r = main._scoreboard_source(self.SC_DOWN, self.OCR_UP)
+        self.assertEqual((r["source"], r["ok"], r["issue"]), ("ocr", True, None))
+        self.assertEqual(r["ocrPort"], "Port 3")
+
+    def test_ocr_detected_without_config_counts(self):
+        r = main._scoreboard_source(self.SC_DOWN, {"configured": False, "connected": True, "port": "Port 2"})
+        self.assertTrue(r["ok"])
+
+    def test_ocr_configured_but_disconnected_is_an_issue(self):
+        # Even with ScoreConnect running: the unit is set up to read the
+        # score with the camera.
+        r = main._scoreboard_source(self.SC_UP, self.OCR_DOWN)
+        self.assertEqual((r["source"], r["ok"], r["issue"]), ("ocr", False, "ocr-not-connected"))
+
+    def test_no_ocr_needs_scoreconnect(self):
+        r = main._scoreboard_source(self.SC_DOWN, None)
+        self.assertEqual((r["source"], r["ok"], r["issue"]), ("scoreconnect", False, "scoreconnect-down"))
+        self.assertTrue(main._scoreboard_source(self.SC_UP, None)["ok"])
+
+    def test_legacy_scoreconnect_counts_as_running(self):
+        r = main._scoreboard_source({"reachable": False, "sc2": {"reachable": True}}, None)
+        self.assertTrue(r["ok"])
+
+    def test_camera_read_failed_judges_scoreconnect_alone(self):
+        r = main._scoreboard_source(self.SC_DOWN, "unknown")
+        self.assertEqual(r["source"], "scoreconnect")
+        self.assertFalse(r["ocrKnown"])
+
+
 # Finding codes emitted with severity "critical" by _compute_findings. Kept
 # explicit rather than scraped so adding a critical is a deliberate two-line
 # change: emit it, then classify it.
@@ -1159,6 +1510,11 @@ _CRITICAL_FINDING_CODES = {
     "sw-security",
     "temp-critical",
     "tz-non-us",
+    "uplink-on-camera-port",
+    "graphics-handoff-failed",
+    # port-dns-blocked / port-required-blocked share one emit site.
+    "port-dns-blocked",
+    "port-required-blocked",
     # Built from a variable at emit time: the `{name}-down` service findings
     # and cam-none (critical when zero main cameras are present).
     "agent-down",

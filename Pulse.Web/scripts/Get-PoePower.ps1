@@ -141,7 +141,7 @@ function Get-AdlinkCardInfo {
     } elseif ($count -gt 0) {
         [pscustomobject]@{ Model = "Unknown"; Label = "Unknown NIC ($desc)";                   Supported = $false }
     } else {
-        [pscustomobject]@{ Model = "None";    Label = "No camera NIC detected";                Supported = $false }
+        [pscustomobject]@{ Model = "None";    Label = "No camera card detected";               Supported = $false }
     }
 }
 
@@ -149,10 +149,10 @@ $card = Get-AdlinkCardInfo
 
 if (-not $card.Supported) {
     $reason = switch ($card.Model) {
-        "82574L" { "PoE power telemetry is not available on the ADLINK GIE64 (Intel 82574L) camera NIC. This card family does not expose a PSE management interface. The ports still deliver power; the draw just cannot be measured." }
-        "I350"   { "PoE power telemetry is not available on the ADLINK GIE74P-AN (Intel I350) camera NIC. This card family does not expose a PSE management interface." }
-        "I354"   { "PoE power telemetry is not available on the ADLINK GIE74P-AN (Intel I354) camera NIC. This card family does not expose a PSE management interface." }
-        "None"   { "No Intel camera NIC (I210 / I211 / I350 / 82574L) was detected on this system, so there is no PoE card to measure." }
+        "82574L" { "Power draw can't be measured on this camera card (ADLINK GIE64, Intel 82574L). The ports still deliver power; Pulse just can't read how much." }
+        "I350"   { "Power draw can't be measured on this camera card (ADLINK GIE74P-AN, Intel I350). The ports still deliver power." }
+        "I354"   { "Power draw can't be measured on this camera card (ADLINK GIE74P-AN, Intel I354). The ports still deliver power." }
+        "None"   { "No camera card was detected (Intel I210 / I211 / I350 / 82574L), so there is no power draw to measure." }
         default  { "PoE power telemetry requires an ADLINK GIE74P card (Intel I210 or I211). This system reports: $($card.Label)" }
     }
     Write-PoeJson (New-PoeResult -Supported $false -Available $false `
@@ -211,7 +211,7 @@ $dllPath = Find-SmartPoeDll
 if (-not $dllPath) {
     Write-PoeJson (New-PoeResult -Supported $true -Available $false `
         -NicModel $card.Model -CardLabel $card.Label `
-        -Reason "This VPU has a PoE-capable $($card.Model) camera NIC, but the ADLINK SmartPoE driver bundle (SmartPoE.dll) is not installed. Install the ADLINK GIE Series driver package to read per-port power draw.")
+        -Reason "This camera card ($($card.Model)) can report power draw, but its ADLINK SmartPoE driver (SmartPoE.dll) is not installed. Install the ADLINK GIE Series driver package to see per-port power.")
     exit 0
 }
 

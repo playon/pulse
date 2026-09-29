@@ -52,12 +52,27 @@ try {
         $hopStatus = 'timeout'
 
         try {
+            # Ping.RoundtripTime is only populated when Status is Success. On a
+            # TtlExpired reply -- which is every intermediate hop -- .NET leaves
+            # it at 0, so reading it straight off the reply reported "0 ms" for
+            # the whole path and hid exactly the latency spike a traceroute is
+            # run to find. Time the call ourselves instead.
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
             $reply = $pinger.Send($targetIp, $TimeoutMs, $buffer, $options)
+            $sw.Stop()
 
             if ($reply.Status -eq [System.Net.NetworkInformation.IPStatus]::TtlExpired -or
                 $reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
                 $ip     = $reply.Address.ToString()
-                $rttMs  = $reply.RoundtripTime
+                # Trust the stack's own figure when it gave us one; otherwise
+                # use the measured elapsed time, floored at 1ms so a sub-1ms
+                # LAN hop does not render as the "0 ms" this bug produced.
+                if ($reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success -and $reply.RoundtripTime -gt 0) {
+                    $rttMs = [int]$reply.RoundtripTime
+                }
+                else {
+                    $rttMs = [math]::Max(1, [int][math]::Round($sw.Elapsed.TotalMilliseconds))
+                }
                 $hopStatus = if ($reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) { 'reached' } else { 'transit' }
 
                 # Quick reverse DNS -- 500ms async timeout so it doesn't stall

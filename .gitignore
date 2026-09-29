@@ -24,12 +24,16 @@ Pulse.Web/app/python/
 
 # Server log written at runtime
 Pulse.Web/pulse-server.log
+Pulse.Web/pulse-launch-done
 
 # Stray local artifacts that must never be committed:
 #  - runners/app/ : an embedded-Python tree a launcher drops when run from the repo
 #  - .claude/worktrees/ : per-session git worktree metadata
 #  - .preview-* : symlinks into a sibling worktree, used to preview another
 #    session's branch from this checkout (paths are machine-local)
+#  - .impeccable/ : snapshots and scratch state from the local design tooling
+#    (critique reports, overlay server config). Per-session and machine-local.
 runners/app/
 .claude/worktrees/
 .preview-*
+.impeccable/

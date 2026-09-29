@@ -22,7 +22,7 @@ on:
       - "Pulse.Web/launcher/run_pulse.bat"
       - ".github/workflows/launcher-sync.yml"
   push:
-    branches: [dev, beta, main]
+    branches: [dev, main]
     paths:
       - "runners/run_pulse.bat"
       - "Pulse.Web/launcher/run_pulse.bat"

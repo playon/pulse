@@ -16,7 +16,11 @@ try {
         'nfhsnetwork.com'
         'pixellot.tv'
         'software.pixellot.tv'
-        'sportzcast.net'
+        # sportzcast.net removed with the Scorebot port range: nothing on the
+        # VPU requires Sportzcast, and a row that can never fail readiness is
+        # one more name for a tier-1 agent to rule out. Scoreboard health is
+        # the ScoreConnect tab's job -- it tests the bot connection and the
+        # live feed, which is what actually breaks.
         'service.singular.live'
         'logmein.com'
     )

@@ -10,10 +10,16 @@
      BOTH --c-surface (#ffffff) and --c-bg (#f1f5f9). The tiers below carry
      10-12px metadata (log timestamps, gauge sublabels, card section labels),
      which is never "large text", so 3:1 is not good enough.
-     Ratios on #ffffff / #f1f5f9:  muted 7.6/6.9 · dim 5.6/5.1 · dimmer 4.8/4.3 */
+     The ramp is measured against every light surface it lands on, INCLUDING
+     --c-deep-bg. The first cut checked only #ffffff and #f1f5f9 and recorded
+     "dimmer 4.8/4.3" -- 4.3 is already under 4.5, and --c-deep-bg (#e8eef5,
+     the sidebar) is darker still, so the nav section labels sat at 4.07:1.
+     Measure the tier against the DARKEST light surface, not the page body.
+     Ratios on #ffffff / #f1f5f9 / #e8eef5:
+       muted 7.6/6.9/6.5 · dim 5.6/5.1/4.8 · dimmer 5.4/4.9/4.6 */
   --c-muted:     #475569;
   --c-dim:       #5b6980;
-  --c-dimmer:    #64748b;
+  --c-dimmer:    #5d6b80;
   --c-deep-bg:   #e8eef5;
   --c-tint-green:    rgba(22,163,74,0.12);
   --c-tint-red:      rgba(220,38,38,0.12);
@@ -64,6 +70,7 @@
   --c-tint-purple:       rgba(167, 139, 250, 0.25);
   --c-tint-slate:        rgba(148, 163, 184, 0.25);
   --c-scrim:             rgba(8, 10, 16, 0.82);  /* modal backdrop */
+  --c-shadow-lift:       rgba(8, 10, 16, 0.45);  /* soft offset shadow under raised tiles */
   /* Broadcast scoreboard chrome — a fixed "stadium board" look that stays
      dark in both themes regardless of app theme. */
   --c-board-bg:       #0f1419;
@@ -170,7 +177,7 @@ html.dark #sidebar { background: var(--c-surface-2); }
 .badge-notfound { background: var(--c-border); color: var(--c-muted); }
 
 /* ── Severity badges ───────────────────────────────────────── */
-.sev-ok { background: var(--c-tint-green); color: var(--c-accent-green); border-left: 3px solid var(--c-accent-green); }
+.sev-ok { background: var(--c-tint-green); color: var(--c-accent-green); }
 
 /* ── Sidebar brand ─────────────────────────────────────────── */
 /* Full Pulse wordmark + heartbeat as the brand block.
@@ -214,176 +221,459 @@ html.dark .sidebar-brand-logo {
     margin: 0;
 }
 
-/* ── Splash screen ─────────────────────────────────────────── */
-/* Shown immediately on page load and kept up until every preload
-   section (dashboard + all PAGE_API endpoints + WebSocket) has
-   settled. Also re-shown when "Run All Diagnostics" is invoked.
-   Both the background and the logo image swap based on the active
-   theme — html.dark uses the dark-bg / white-text variant. */
+/* ── Splash screen: live diagnostic sweep (system map) ─────── */
+/* Up from first paint until every preload section has settled; re-shown by
+   Run All Diagnostics. The rig is drawn as its signal chain -- cameras, the
+   VPU, the venue network, the Pixellot cloud, ScoreConnect and the stream --
+   and each node takes the answer its check produced. Connectors are an SVG
+   laid over the node grid, recomputed from the nodes' rects so they follow
+   the layout, and carry moving dashes while their check is still running.
+   The findings list names each issue as it lands; the verdict band closes
+   it out. Everything here is transform/opacity/stroke-dashoffset, so it
+   stays cheap over LogMeIn. */
 .splash {
     position: fixed;
     inset: 0;
+    z-index: 9999;
+    display: flex;
+    justify-content: center;
+    align-items: safe center;
+    overflow-y: auto;
+    /* Reserve the scrollbar so the verdict appearing can't narrow the frame
+       and shift every connector. */
+    scrollbar-gutter: stable;
+    padding: 28px 16px;
     background: var(--c-bg);
+    transition: opacity 0.45s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.splash-frame {
+    width: min(1040px, 100%);
     display: flex;
     flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 1.25rem;
-    z-index: 9999;
-    transition: opacity 0.4s ease-out;
+    gap: 14px;
+    transition: transform 0.45s cubic-bezier(0.16, 1, 0.3, 1), filter 0.45s ease-out;
+}
+.splash-head {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 6px;
 }
 .splash-logo {
-    width: 65vmin;
-    max-width: 480px;
-    /* Use the same single-image + filter approach as the sidebar brand
-       so light and dark splash variants render identically (same
-       typography, same size). */
+    width: min(230px, 55vw);
     aspect-ratio: 1428 / 442;
     background-image: url('/static/img/pulse-splash-dark.png');
     background-repeat: no-repeat;
-    background-position: center;
+    background-position: left center;
     background-size: contain;
-    animation: pulse-fade 1.6s ease-in-out infinite;
     filter: invert(1) hue-rotate(180deg);
+    animation: pulse-fade 1.6s ease-in-out infinite;
+    transform-origin: left center;
 }
-html.dark .splash-logo {
-    filter: none;
-}
-.splash-version {
-    /* Sits snug under the logo (counteracts the .splash flex gap). */
-    margin-top: -0.85rem;
+html.dark .splash-logo { filter: none; }
+.splash-final .splash-logo { animation: none; }
+.splash-meta {
+    display: flex;
+    gap: 14px;
+    align-items: baseline;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 0.8rem;
-    letter-spacing: 0.03em;
+    font-size: 0.78rem;
+    font-variant-numeric: tabular-nums;
     color: var(--c-dim);
 }
-.splash-version:empty { display: none; }   /* hide when version is unknown */
+.splash-version:empty { display: none; }
+.splash-clock { color: var(--c-muted); min-width: 4.5ch; text-align: right; }
+.splash-status {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 6px 16px;
+    flex-wrap: wrap;
+}
+.splash-verb {
+    font-size: 1.05rem;
+    font-weight: 650;
+    color: var(--c-text);
+    letter-spacing: -0.005em;
+}
+.splash-count {
+    font-size: 0.82rem;
+    font-weight: 500;
+    color: var(--c-muted);
+    font-variant-numeric: tabular-nums;
+    min-height: 1.2em;
+}
 .splash-progress {
-    width: min(420px, 60vmin);
-    height: 6px;
-    border-radius: 3px;
+    height: 4px;
+    border-radius: 2px;
     background: var(--c-border);
     overflow: hidden;
 }
+/* Scaled, not resized: a transform never triggers layout. */
 .splash-progress-fill {
     height: 100%;
-    width: 0%;
-    border-radius: 3px;
+    border-radius: 2px;
     background: linear-gradient(90deg, var(--c-accent-blue), var(--c-accent-sky));
-    transition: width 0.35s ease-out;
+    transform: scaleX(0);
+    transform-origin: left center;
+    transition: transform 0.5s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.3s;
 }
-.splash-status {
-    text-align: center;
+.splash-progress-fill[data-tone="pass"]  { background: var(--c-status-ok); }
+.splash-progress-fill[data-tone="warn"]  { background: var(--c-status-warn); }
+.splash-progress-fill[data-tone="fail"]  { background: var(--c-pill-critical); }
+.splash-progress-fill[data-tone="muted"] { background: var(--c-status-down); }
+
+.splash-pane-title {
     display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 0.25rem;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+    margin: 0 0 6px;
+    font-size: 0.72rem;
+    font-weight: 650;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--c-dim);
 }
-.splash-verb {
-    font-size: 0.85rem;
-    color: var(--c-muted);
+.splash-pane-count {
     font-weight: 500;
     letter-spacing: 0.02em;
-}
-.splash-count {
-    font-size: 0.8rem;
-    color: var(--c-dim);
-    font-weight: 500;
+    text-transform: none;
     font-variant-numeric: tabular-nums;
-    letter-spacing: 0.02em;
-    min-height: 1.2em;       /* reserve the row so layout doesn't jump */
 }
-/* Live section checklist — two columns of compact rows, each ticked off
-   as its diagnostic settles. Width matches the progress bar above it. */
-.splash-checklist {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 0.32rem 1.5rem;
-    width: min(420px, 78vw);
-    margin-top: 0.1rem;
-}
-.splash-check {
+
+/* Collector ticker: one line of what PowerShell is doing right now. */
+.map-ticker {
     display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    min-width: 0;                /* let the label ellipsize instead of overflowing */
-    font-size: 0.78rem;
-    color: var(--c-dim);
-    transition: color 0.3s ease-out;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 16px;
+    min-height: 1.4em;
+    font-size: 0.8rem;
+    color: var(--c-muted);
 }
-.splash-check-label {
-    white-space: nowrap;
+.map-tk-k {
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--c-accent-blue);
+}
+.map-ticker[data-done="1"] .map-tk-k { color: var(--c-dim); }
+.map-tk-job { color: var(--c-text); white-space: nowrap; }
+.map-tk-job b {
+    font-weight: 500;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--c-dim);
+}
+.map-tk-more { color: var(--c-dim); white-space: nowrap; }
+.map-tk-more em { font-style: normal; font-weight: 650; color: var(--c-accent-red); }
+
+/* Status mark: an 18px disc carrying a glyph drawn for this size. Shared by
+   the node rows, the VPU cells and the findings list. */
+.sp-mark {
+    --sp-tone: var(--c-dim);
+    flex: 0 0 auto;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    border: 1.5px solid var(--c-border);
+    color: var(--sp-tone);
+    transition: background-color 0.3s, border-color 0.3s, color 0.3s;
+}
+[data-state="pending"] > .sp-mark {
+    border-top-color: var(--c-accent-blue);
+    animation: sp-spin 1.1s linear infinite;
+}
+[data-state="pass"]  > .sp-mark { --sp-tone: var(--c-accent-green); background: var(--c-tint-green); border-color: transparent; }
+[data-state="warn"]  > .sp-mark { --sp-tone: var(--c-accent-amber); background: var(--c-tint-amber); border-color: transparent; }
+[data-state="crit"]  > .sp-mark { --sp-tone: var(--c-on-accent); background: var(--c-pill-critical); border-color: transparent; }
+[data-state="error"] > .sp-mark { --sp-tone: var(--c-muted); border-style: dashed; border-color: var(--c-dim); }
+[data-state="stalled"] > .sp-mark { --sp-tone: var(--c-muted); border-style: dashed; }
+[data-state="collected"] > .sp-mark { --sp-tone: var(--c-accent-blue); }
+
+/* A check row inside a node: mark · word · time (single) or mark · label ·
+   word (VPU cell). The word carries the state; colour never does alone. */
+.sp-row {
+    --row-tone: var(--c-muted);
+    display: grid;
+    grid-template-columns: 18px minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 8px;
+    font-size: 0.82rem;
+    line-height: 1.35;
+}
+.sp-row[data-state="pass"]  { --row-tone: var(--c-accent-green); }
+.sp-row[data-state="warn"]  { --row-tone: var(--c-accent-amber); }
+.sp-row[data-state="crit"]  { --row-tone: var(--c-accent-red); }
+.sp-row[data-state="pending"] { --row-tone: var(--c-dim); }
+.sp-label {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--c-text);
+    font-weight: 550;
 }
-.splash-check-mark {
-    position: relative;
-    flex: 0 0 auto;
-    width: 13px;
-    height: 13px;
-    border-radius: 50%;
-    border: 1.5px solid var(--c-border);
-    transition: background 0.3s ease-out, border-color 0.3s ease-out;
+.sp-row[data-state="pending"] .sp-label { color: var(--c-muted); font-weight: 500; }
+.sp-word {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--row-tone);
+    font-weight: 650;
+    font-size: 0.78rem;
+    white-space: nowrap;
 }
-.splash-check.done {
-    color: var(--c-muted);
-}
-.splash-check.done .splash-check-mark {
-    background: var(--c-accent-blue);
-    border-color: var(--c-accent-blue);
-}
-.splash-check.done .splash-check-mark::after {  /* the checkmark */
-    content: "";
-    position: absolute;
-    left: 4px;
-    top: 1px;
-    width: 3px;
-    height: 6.5px;
-    border: solid #fff;
-    border-width: 0 1.5px 1.5px 0;
-    transform: rotate(45deg);
-}
-/* Issue banner — a severity-tinted pill that appears only when the dashboard
-   reports critical/warning findings. Mirrors the app's .sev-* token palette. */
-.splash-issues {
-    display: none;             /* hidden until _setSplashIssues() adds .is-visible */
-    align-items: center;
-    gap: 0.45rem;
-    max-width: min(420px, 78vw);
-    padding: 0.28rem 0.75rem;
-    border: 1px solid transparent;
-    border-radius: 999px;
-    font-size: 0.8rem;
-    font-weight: 600;
-    letter-spacing: 0.01em;
-}
-.splash-issues.is-visible { display: inline-flex; }
-.splash-issues svg { flex: 0 0 auto; }
-.splash-issues-crit {
-    color: var(--c-accent-red);
-    background: var(--c-tint-red);
-    border-color: var(--c-tint-red-border);
-}
-.splash-issues-warn {
-    color: var(--c-accent-amber);
-    background: var(--c-tint-amber);
-    border-color: var(--c-tint-amber-border);
-}
-.splash-note {
-    max-width: min(420px, 78vw);
-    text-align: center;
-    font-size: 0.8rem;
-    line-height: 1.4;
+/* A check that never answered has no time worth showing. */
+.sp-row[data-state="stalled"] > .sp-time { display: none; }
+.sp-time {
     color: var(--c-dim);
-    letter-spacing: 0.01em;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
 }
-.splash-hidden {
-    opacity: 0;
+
+/* The map. */
+.map { position: relative; }
+.map-links {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
     pointer-events: none;
 }
+.map-link-base, .map-link-flow { fill: none; stroke-width: 2; stroke-linejoin: round; }
+/* Neutral links use the slate status tone, half strength: --c-border all
+   but vanishes against --c-bg in the light theme. */
+.map-link-base { stroke: var(--c-status-down); stroke-opacity: 0.5; transition: stroke 0.4s ease-out; }
+.map-link[data-flow="0"][data-state="pass"] .map-link-base,
+.map-link[data-flow="0"][data-state="warn"] .map-link-base,
+.map-link[data-flow="0"][data-state="crit"] .map-link-base { stroke-opacity: 1; }
+.map-link-flow {
+    stroke: var(--c-accent-sky);
+    stroke-dasharray: 3 9;
+    stroke-linecap: round;
+    opacity: 0;
+    transition: opacity 0.3s ease-out;
+}
+.map-link[data-flow="1"] .map-link-flow { opacity: 1; animation: map-flow 0.9s linear infinite; }
+.map-link[data-flow="0"][data-state="pass"]  .map-link-base { stroke: var(--c-status-ok); }
+.map-link[data-flow="0"][data-state="warn"]  .map-link-base { stroke: var(--c-status-warn); }
+.map-link[data-flow="0"][data-state="crit"]  .map-link-base { stroke: var(--c-pill-critical); }
+.map-link[data-flow="0"][data-state="error"] .map-link-base { stroke: var(--c-dim); stroke-dasharray: 4 5; }
+
+.map-nodes {
+    position: relative;
+    z-index: 1;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: 150px minmax(0, 1fr) 168px 168px;
+    grid-template-areas:
+        "cams vpu   net cloud"
+        ".    score .   stream";
+    gap: 22px 32px;
+    align-items: center;
+}
+.map-node[data-node="cams"]   { grid-area: cams; }
+.map-node[data-node="vpu"]    { grid-area: vpu; }
+.map-node[data-node="net"]    { grid-area: net; }
+.map-node[data-node="cloud"]  { grid-area: cloud; }
+.map-node[data-node="score"]  { grid-area: score; justify-self: start; width: min(240px, 100%); }
+.map-node[data-node="stream"] { grid-area: stream; }
+.map-node {
+    --node-tone: var(--c-dim);
+    min-width: 0;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1.5px solid var(--c-border);
+    background: var(--c-surface);
+    box-shadow: 0 2px 6px -3px var(--c-shadow-lift);
+    transition: border-color 0.4s ease-out, background-color 0.4s ease-out;
+}
+.map-node[data-state="pass"]  { --node-tone: var(--c-accent-green); border-color: var(--c-tint-green-border); background: linear-gradient(var(--c-tint-green-faint), var(--c-tint-green-faint)), var(--c-surface); }
+.map-node[data-state="warn"]  { --node-tone: var(--c-accent-amber); border-color: var(--c-status-warn); background: linear-gradient(var(--c-tint-amber-faint), var(--c-tint-amber-faint)), var(--c-surface); }
+.map-node[data-state="crit"]  { --node-tone: var(--c-accent-red); border-color: var(--c-pill-critical); background: linear-gradient(var(--c-tint-red-faint), var(--c-tint-red-faint)), var(--c-surface); }
+.map-node[data-state="error"] { --node-tone: var(--c-muted); border-style: dashed; border-color: var(--c-dim); }
+.map-node[data-state="collected"] { --node-tone: var(--c-accent-blue); }
+.map-node-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.map-node-icon { display: inline-flex; color: var(--node-tone); transition: color 0.4s; }
+.map-node-label { font-size: 0.86rem; font-weight: 650; color: var(--c-text); white-space: nowrap; }
+.map-node-host {
+    margin-left: auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.7rem;
+    color: var(--c-dim);
+}
+.map-single { margin-top: 6px; }
+.map-node-detail {
+    margin: 4px 0 0;
+    font-size: 0.74rem;
+    line-height: 1.35;
+    color: var(--c-muted);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+.map-cells {
+    list-style: none;
+    margin: 8px 0 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 16px;
+}
+.map-cell { padding: 4px 0; border-bottom: 1px solid var(--c-border); }
+.map-cell:nth-last-child(-n+2) { border-bottom-color: transparent; }
+.map-cell > .sp-label { font-size: 0.8rem; }
+
+/* Findings: every issue, worst first, as it lands. */
+.map-findings { margin-top: 2px; }
+.map-findings-list { list-style: none; margin: 0; padding: 0; display: grid; }
+.map-f {
+    --row-tone: var(--c-muted);
+    display: grid;
+    grid-template-columns: 18px 6.8rem 11rem minmax(0, 1fr);
+    align-items: center;
+    column-gap: 10px;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--c-border);
+    font-size: 0.82rem;
+}
+.map-f[data-state="crit"] { --row-tone: var(--c-accent-red); }
+.map-f[data-state="warn"] { --row-tone: var(--c-accent-amber); }
+.map-f-word { font-weight: 650; font-size: 0.78rem; color: var(--row-tone); white-space: nowrap; }
+.map-f-where { font-weight: 600; color: var(--c-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.map-f-what { color: var(--c-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.map-f-empty, .map-f-more { padding: 4px 0; font-size: 0.82rem; color: var(--c-dim); }
+.map-f-empty[data-final="1"] { color: var(--c-accent-green); font-weight: 600; }
+
+/* Verdict band — the one authored moment. */
+.splash-verdict {
+    --v-tone: var(--c-muted);
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 6px 22px;
+    padding: 16px 20px;
+    border-radius: 12px;
+    border: 1px solid var(--c-border);
+    background: var(--c-surface);
+}
+.splash-verdict[hidden] { display: none; }
+.sp-v-pass { --v-tone: var(--c-accent-green); background: var(--c-tint-green); border-color: var(--c-tint-green-border); }
+.sp-v-warn { --v-tone: var(--c-accent-amber); background: var(--c-tint-amber); border-color: var(--c-tint-amber-border); }
+.sp-v-fail { --v-tone: var(--c-accent-red);   background: var(--c-tint-red);   border-color: var(--c-tint-red-border); }
+.sp-v-word {
+    font-size: clamp(1.9rem, 4vw, 2.6rem);
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    line-height: 1;
+    color: var(--v-tone);
+}
+.sp-v-body { min-width: 0; }
+/* Skip control: the countdown drains along the button's bottom edge. */
+.splash-verdict.has-skip { grid-template-columns: auto minmax(0, 1fr) auto; }
+.splash-skip-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 5px;
+}
+.splash-skip {
+    position: relative;
+    overflow: hidden;
+    padding: 8px 16px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    background: var(--c-surface);
+    white-space: nowrap;
+}
+.splash-skip::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 3px;
+    background: var(--c-accent-blue);
+    transform-origin: left center;
+    animation: splash-drain var(--hold, 5000ms) linear forwards;
+}
+.splash-skip.is-held::after { animation: none; transform: scaleX(0); }
+.splash-skip:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--c-focus-ring); }
+.splash-skip-cd {
+    font-size: 0.74rem;
+    color: var(--c-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+@keyframes splash-drain { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+.sp-v-tag { margin: 0; font-size: 0.9rem; font-weight: 550; color: var(--c-text); }
+.sp-v-gap { margin: 6px 0 0; font-size: 0.8rem; color: var(--c-muted); }
+
+.splash-note { font-size: 0.8rem; line-height: 1.4; color: var(--c-dim); }
+.splash-hidden { opacity: 0; pointer-events: none; }
+.splash-hidden .splash-frame { transform: scale(0.985); filter: blur(2px); }
+
 @keyframes pulse-fade {
     0%, 100% { opacity: 0.85; transform: scale(1); }
     50%      { opacity: 1;    transform: scale(1.02); }
+}
+@keyframes sp-spin  { to { transform: rotate(360deg); } }
+@keyframes map-flow { to { stroke-dashoffset: -12; } }
+
+/* Short RDP/LogMeIn viewports (1280x720 and below): tighten the rhythm so
+   the map, the findings and the verdict fit without scrolling. */
+@media (max-height: 780px) {
+    .splash { padding-block: 16px; }
+    .splash-frame { gap: 10px; }
+    .splash-head { margin-bottom: 0; }
+    .splash-logo { width: min(180px, 50vw); }
+    .splash-verdict { padding: 12px 18px; }
+    .map-nodes { row-gap: 16px; }
+    .map-node { padding: 8px 11px; }
+    .map-cell { padding-block: 3px; }
+}
+/* Below desktop width the chain can't run left to right: stack it in chain
+   order and drop the connectors rather than draw diagonals through nodes. */
+@media (max-width: 960px) {
+    .map-links { display: none; }
+    .map-nodes {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-areas: "cams net" "vpu vpu" "cloud score" "stream stream";
+        gap: 12px;
+    }
+    .map-node[data-node="score"] { width: auto; justify-self: stretch; }
+    .map-f { grid-template-columns: 18px auto minmax(0, 1fr); }
+    .map-f-what { grid-column: 2 / -1; white-space: normal; }
+}
+@media (max-width: 520px) {
+    .splash { padding: 20px 16px; }
+    .map-nodes { grid-template-columns: minmax(0, 1fr); grid-template-areas: "cams" "vpu" "net" "cloud" "stream" "score"; }
+    .map-cells { grid-template-columns: minmax(0, 1fr); }
+    .map-cell:nth-last-child(2) { border-bottom-color: var(--c-border); }
+    .splash-verdict,
+    .splash-verdict.has-skip { grid-template-columns: minmax(0, 1fr); }
+    .splash-skip-wrap { align-items: stretch; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .splash-logo, [data-state="pending"] > .sp-mark, .map-link[data-flow="1"] .map-link-flow { animation: none; }
+    .splash-skip::after { animation: none; transform: scaleX(0); }
 }
 
 /* ── Theme toggle ───────────────────────────────────────────── */
@@ -433,7 +723,10 @@ html.dark .splash-logo {
     text-align: center;
 }
 .powered-by-label {
-    font-size: 0.6rem;
+    /* 0.6rem is 9.6px -- under the 11px floor for functional text, and this
+       sits in the sidebar of a tool read over a remote-desktop session where
+       everything is already resampled once. */
+    font-size: 0.69rem;
     font-weight: 700;
     letter-spacing: 0.1em;
     text-transform: uppercase;
@@ -683,10 +976,10 @@ html.dark .channel-moved-banner {
    The 90-second triage artifact: one big PASS/WARN/FAIL verdict at the top of
    the Dashboard, with the blockers/risks that drove it. A left accent stripe
    carries the verdict colour. */
-.rdy-card { margin-bottom: 1rem; border-left: 4px solid var(--c-border); padding: 1rem 1.25rem; }
-.rdy-card-pass { border-left-color: var(--c-accent-green); }
-.rdy-card-warn { border-left-color: var(--c-accent-amber); }
-.rdy-card-fail { border-left-color: var(--c-accent-red); }
+.rdy-card { margin-bottom: 1rem; padding: 1rem 1.25rem; }
+.rdy-card-pass { border-color: var(--c-accent-green); }
+.rdy-card-warn { border-color: var(--c-accent-amber); }
+.rdy-card-fail { border-color: var(--c-accent-red); }
 
 .rdy-main { display: flex; align-items: center; gap: 1rem; }
 .rdy-badge {
@@ -708,7 +1001,6 @@ html.dark .channel-moved-banner {
 .rdy-fresh svg { opacity: 0.7; }
 
 .rdy-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 0.85rem; font-size: 0.72rem; color: var(--c-muted); }
-.rdy-policy { font-family: var(--font-mono, monospace); }
 
 /* Demo-only state switcher — hidden entirely on real VPUs (not rendered). */
 .rdy-demo-bar { display: flex; align-items: center; gap: 6px; margin-top: 0.75rem; padding-top: 0.7rem; border-top: 1px dashed var(--c-border); }
@@ -798,17 +1090,67 @@ html.dark .channel-moved-banner {
 
 /* ── Top findings ───────────────────────────────────────────── */
 /* The list lives in .cc-findings, inside the Command Center. */
+/* A disclosure button, not a link: it opens the fix in place. The jump to the
+   owning tab lives inside the panel it opens. */
 .finding-item {
     display: flex;
     align-items: center;
     gap: 10px;
+    width: 100%;
     padding: 8px 10px;
+    border: none;
+    background: none;
+    font: inherit;
+    text-align: left;
     border-radius: 6px;
     text-decoration: none;
     transition: background 0.15s;
     color: var(--c-text);
     cursor: pointer;
 }
+.finding-item:focus-visible {
+    outline: 2px solid var(--c-accent-blue);
+    outline-offset: -2px;
+}
+/* The base chevron points right; as a disclosure it reads down when closed
+   and up when the fix is showing. */
+.finding-item .finding-arrow { transform: rotate(90deg); }
+.finding-item[aria-expanded="true"] .finding-arrow { transform: rotate(-90deg); }
+.finding-item[aria-expanded="true"] { background: var(--c-tint-blue-faint); }
+.finding-detail {
+    padding: 2px 10px 12px 44px;
+}
+.finding-rec {
+    font-size: 0.78rem;
+    line-height: 1.5;
+    color: var(--c-muted);
+    margin: 0 0 8px;
+    max-width: 68ch;
+}
+.finding-rec-none { font-style: italic; }
+.finding-open {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 0.74rem;
+    font-weight: 600;
+    color: var(--c-accent-blue);
+    text-decoration: none;
+}
+.finding-open:hover { text-decoration: underline; }
+.cc-findings-actions { display: inline-flex; align-items: center; gap: 10px; }
+.finding-copy {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--c-muted);
+    background: none;
+    border: 1px solid var(--c-border);
+    border-radius: 5px;
+    padding: 3px 8px;
+    cursor: pointer;
+    transition: color 0.12s, border-color 0.12s;
+}
+.finding-copy:hover { color: var(--c-accent-blue); border-color: var(--c-accent-blue); }
 .finding-item:hover { background: var(--c-tint-blue-faint); }
 .finding-dot {
     width: 8px;
@@ -820,14 +1162,14 @@ html.dark .channel-moved-banner {
 .finding-dot-warning  { background: var(--c-accent-amber); box-shadow: 0 0 6px rgba(234, 179, 8, 0.3); }
 .finding-dot-info     { background: var(--c-accent-blue); }
 .finding-cat {
-    font-size: 0.7rem;
-    font-weight: 700;
+    font-size: 0.72rem;
+    font-weight: 600;
     color: var(--c-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    min-width: 80px;
+    white-space: nowrap;
+    flex-shrink: 0;
+    min-width: 132px;
 }
-/* The chip now shows severity (CRITICAL / WARNING), colored to match. */
+/* The chip carries the verdict phrase (VERDICT in app.js), colored to match. */
 .finding-cat-critical { color: var(--c-accent-red); }
 .finding-cat-warning  { color: var(--c-accent-amber); }
 .finding-cat-info     { color: var(--c-accent-blue); }
@@ -841,7 +1183,9 @@ html.dark .channel-moved-banner {
     flex-shrink: 0;
     transition: transform 0.15s;
 }
-.finding-item:hover .finding-arrow { transform: translateX(2px); color: var(--c-muted); }
+.finding-item:hover .finding-arrow { color: var(--c-muted); }
+
+
 
 /* ── Active findings ──────────────────────────────────────── */
 .af-header {
@@ -979,13 +1323,6 @@ html.dark .channel-moved-banner {
     margin-top: 1rem;
 }
 @media (max-width: 900px) { .dash-2col { grid-template-columns: 1fr; } }
-
-/* Inspection Report rows use the app-standard 1.25rem card rhythm (not the
-   denser 1rem dashboard grid), and the Camera Frames wrapper gets the same gap
-   above it — its inner card isn't a direct #page > .card child, so the normal
-   card-stacking rule doesn't reach it. */
-.dash-2col.ir-block { gap: 1.25rem; margin-top: 1.25rem; }
-#ir-frames-wrap:not(:empty) { margin-top: 1.25rem; }
 
 /* Narrow screens: let wide data tables scroll horizontally instead of
    forcing the whole page wider (System Overview, Disk Health, etc.). */
@@ -1188,6 +1525,17 @@ html.dark .channel-moved-banner {
     gap: 0.75rem;
 }
 .page-title { font-size: 1.25rem; font-weight: 700; color: var(--c-text); margin: 0; }
+/* Text present for assistive tech and absent from the layout. Used where a
+   signal would otherwise be carried by colour alone. */
+.sr-only {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
 .page-subtitle { font-size: 0.8rem; color: var(--c-muted); margin: 0.15rem 0 0 0; }
 .page-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 
@@ -1290,16 +1638,16 @@ html.dark .channel-moved-banner {
     letter-spacing: 0.04em;
     text-transform: uppercase;
 }
-.svc-deps-current  { background: var(--c-tint-green); border-left: 3px solid var(--c-accent-green); }
+.svc-deps-current  { background: var(--c-tint-green); box-shadow: inset 0 0 0 1px var(--c-accent-green); }
 .svc-deps-current  svg, .svc-deps-current .svc-deps-pill { color: var(--c-accent-green); }
 .svc-deps-current  .svc-deps-pill { background: var(--c-tint-green); }
-.svc-deps-outdated { background: var(--c-tint-amber); border-left: 3px solid var(--c-accent-amber); }
+.svc-deps-outdated { background: var(--c-tint-amber); box-shadow: inset 0 0 0 1px var(--c-accent-amber); }
 .svc-deps-outdated svg, .svc-deps-outdated .svc-deps-pill { color: var(--c-accent-amber); }
 .svc-deps-outdated .svc-deps-pill { background: var(--c-tint-amber); }
-.svc-deps-missing  { background: var(--c-tint-red);   border-left: 3px solid var(--c-accent-red); }
+.svc-deps-missing  { background: var(--c-tint-red);   box-shadow: inset 0 0 0 1px var(--c-accent-red); }
 .svc-deps-missing  svg, .svc-deps-missing .svc-deps-pill { color: var(--c-accent-red); }
 .svc-deps-missing  .svc-deps-pill { background: var(--c-tint-red); }
-.svc-deps-newer    { background: var(--c-surface-3);   border-left: 3px solid var(--c-muted); }
+.svc-deps-newer    { background: var(--c-surface-3);   box-shadow: inset 0 0 0 1px var(--c-muted); }
 .svc-deps-newer    svg, .svc-deps-newer .svc-deps-pill { color: var(--c-muted); }
 .svc-deps-newer    .svc-deps-pill { background: var(--c-surface-3); }
 
@@ -1311,7 +1659,7 @@ html.dark .channel-moved-banner {
     padding: 8px 12px;
     border-radius: 6px;
     background: var(--c-tint-amber, rgba(217, 119, 6, 0.08));
-    border-left: 3px solid var(--c-accent-amber, #d97706);
+    box-shadow: inset 0 0 0 1px var(--c-accent-amber, #d97706);
     color: var(--c-text);
     font-size: 0.8rem;
     line-height: 1.45;
@@ -1333,11 +1681,11 @@ html.dark .channel-moved-banner {
 /* "ok" used to mean green — but EOL is informational, not a celebration,
    even when years away.  Now: blue/info for >1y or unknown, amber for
    <1y, red for <90d or past. */
-.sys-lifecycle-ok   { background: var(--c-tint-blue);  border-left: 3px solid var(--c-accent-blue); }
+.sys-lifecycle-ok   { background: var(--c-tint-blue);  box-shadow: inset 0 0 0 1px var(--c-accent-blue); }
 .sys-lifecycle-ok   svg { color: var(--c-accent-blue); }
-.sys-lifecycle-warn { background: var(--c-tint-amber); border-left: 3px solid var(--c-accent-amber); }
+.sys-lifecycle-warn { background: var(--c-tint-amber); box-shadow: inset 0 0 0 1px var(--c-accent-amber); }
 .sys-lifecycle-warn svg { color: var(--c-accent-amber); }
-.sys-lifecycle-crit { background: var(--c-tint-red);   border-left: 3px solid var(--c-accent-red);   }
+.sys-lifecycle-crit { background: var(--c-tint-red);   box-shadow: inset 0 0 0 1px var(--c-accent-red);   }
 .sys-lifecycle-crit svg { color: var(--c-accent-red); }
 
 /* Peripherals panel (mouse / keyboard / monitor) */
@@ -1385,7 +1733,7 @@ html.dark .channel-moved-banner {
 .sw-concern-banner {
     display: flex; align-items: center; gap: 8px;
     padding: 8px 12px; margin-bottom: 12px;
-    background: var(--c-tint-amber); border-left: 3px solid var(--c-accent-amber);
+    background: var(--c-tint-amber); box-shadow: inset 0 0 0 1px var(--c-accent-amber);
     border-radius: 6px;
     color: var(--c-text); font-size: 0.85rem;
 }
@@ -1453,40 +1801,54 @@ html.dark .channel-moved-banner {
     align-items: start;
     margin-top: 0.5rem;
 }
-/* Port-led tile: the port number leads (priority) with the protocol beside it
-   and a status pill — no hosts/domains (those live in Domain Reachability). A
-   top accent strip carries the status colour (green reachable / amber
-   no-failover / dim optional / red blocked-required), via --rowaccent. */
+/* Service-led tile: what the endpoint DOES leads, "UDP 2088" sits beneath it,
+   and a status pill sits right. Status reads twice — a dot beside the name
+   (the same signal the Dashboard findings list uses) and the pill's own word —
+   so it never depends on one colour alone. --rowaccent tints both.
+
+   This used to carry a 3px colour strip along the top edge. A thick coloured
+   rule on a rounded card is decoration standing in for a status signal, and it
+   was the only thing distinguishing a blocked tile from a reachable one at a
+   glance. The dot says it, and the pill says it in words. */
 .net-port-card {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    padding: 9px 12px 10px;
+    gap: 3px;
+    padding: 10px 12px 11px;
     background: var(--c-surface-2);
     border: 1px solid var(--c-border);
-    border-top: 3px solid var(--rowaccent, var(--c-border));
     border-radius: 8px;
     transition: border-color 0.12s ease;
 }
+.net-port-dot {
+    width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+    background: var(--rowaccent, var(--c-border));
+}
+
 .net-port-card:hover { border-color: var(--rowaccent, var(--c-border)); }
 .net-port-card.is-fail { border-color: rgba(220, 38, 38, 0.4); }
 /* Top row of a port tile: port number + ? tooltip cue on the left, the shared
    .badge-* status pill (same one Service Reachability rows use) on the right. */
 .net-port-card-head {
-    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
 }
 .net-port-card-lead {
-    display: inline-flex; align-items: center; gap: 7px; min-width: 0;
+    display: inline-flex; align-items: baseline; gap: 7px; min-width: 0; flex: 1 1 auto;
 }
 /* Port number leads (priority); protocol sits below it as a small label. */
-.net-port-num {
-    font-size: 1.1rem; font-weight: 700; color: var(--c-text);
+/* The service name leads. It wraps to two lines rather than truncating —
+   "Live video - last resort" has to stay readable, and a clipped service name
+   is worse than a taller tile. */
+.net-port-name {
+    font-size: 0.82rem; font-weight: 600; color: var(--c-text);
+    line-height: 1.25; min-width: 0;
+}
+/* Protocol + port, the tier-2 detail. Monospace here is measurement, not
+   costume: these are numbers a tech reads back to venue IT digit by digit. */
+.net-port-addr {
+    font-size: 0.68rem; font-weight: 500; color: var(--c-muted);
     font-family: "SF Mono","Cascadia Mono","Fira Code",monospace;
     letter-spacing: 0.01em; white-space: nowrap;
-}
-.net-port-proto-tag {
-    font-size: 0.62rem; font-weight: 600; color: var(--c-muted);
-    text-transform: uppercase; letter-spacing: 0.08em;
 }
 .net-port-card-foot {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
@@ -1658,14 +2020,6 @@ html.dark .channel-moved-banner {
     border-bottom: 1px solid var(--c-border);
     margin-bottom: 8px;
 }
-.nic-sys-chip {
-    font-size: 0.68rem;
-    font-weight: 600;
-    color: var(--c-accent-blue);
-    background: var(--c-tint-blue);
-    border-radius: 999px;
-    padding: 2px 9px;
-}
 /* Flip-layout toggle: right-aligned in the diagram header (margin-left:auto
    works whether or not the live-refresh badge is present). */
 .nic-layout-toggle {
@@ -1769,6 +2123,40 @@ html.dark .channel-moved-banner {
 .orient-acpin { fill: var(--c-muted); }
 .orient-caption { font-size: 0.66rem; line-height: 1.5; color: var(--c-muted); }
 .orient-caption strong { color: var(--c-text); font-weight: 600; }
+/* Camera-head reference panel: the head on the pole for this system type.
+   Pixellot's renders are white on transparent, so they sit on the recessed
+   surface; on a plain white card they would vanish in the light theme. */
+.nic-ref-panels { display: flex; gap: 16px; align-items: stretch; flex-wrap: wrap; justify-content: center; }
+.nic-ref-panels > .nic-orient-panel { margin-left: 0; }
+/* Two cameras side by side: wider than the shared 360px reference-panel cap. */
+.cam-head-panel { display: flex; flex-direction: column; max-width: none; }
+.cam-head-items { display: flex; gap: 16px; flex-wrap: wrap; }
+.cam-head-item { width: 176px; display: flex; flex-direction: column; }
+.cam-head-fig {
+    height: 132px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--c-surface-2);
+    border-radius: 6px;
+    padding: 8px;
+    margin-bottom: 8px;
+}
+.cam-head-fig img { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; }
+.cam-head-name { font-size: 0.8rem; font-weight: 600; color: var(--c-text); margin-bottom: 2px; }
+.cam-head-facts {
+    display: grid; grid-template-columns: auto 1fr; gap: 2px 8px;
+    margin: 8px 0 0; font-size: 0.72rem; line-height: 1.4;
+}
+.cam-head-facts dt { color: var(--c-muted); }
+.cam-head-facts dd { margin: 0; font-weight: 600; color: var(--c-text); }
+.cam-head-facts dd.status-pass { color: var(--c-accent-green); }
+.cam-head-facts dd.status-fail { color: var(--c-accent-red); }
+.cam-head-facts dd.status-warn { color: var(--c-accent-amber); }
+.cam-head-facts dd.text-pulse-muted { color: var(--c-muted); }
+/* Port lines run the item's full width under Expected / Connected: in the
+   value column alone "Port 2 at 100 Mbps (Slow)" wrapped onto two lines. */
+.cam-head-facts .cam-head-ports { grid-column: 1 / -1; font-weight: 400; display: flex; flex-direction: column; gap: 1px; margin-top: 2px; }
+.cam-head-facts .cam-head-ports .status-warn { color: var(--c-accent-amber); }
+.cam-head-facts .cam-head-ports .status-pass { color: var(--c-accent-green); }
 .nic-diagram-ports {
     display: flex;
     gap: 48px;
@@ -2207,8 +2595,8 @@ details[open] > .cam-details-btn::before { transform: rotate(90deg); }
    row reads as its own card-within-card. */
 .cam-finding-row { border-radius: 6px; padding: 10px 14px; margin-bottom: 10px; box-shadow: inset 0 0 0 1px var(--c-border); }
 .cam-finding-row:last-child { margin-bottom: 0; }
-.cam-finding-row-critical { background: var(--c-tint-red); border-left: 3px solid var(--c-accent-red); }
-.cam-finding-row-warning  { background: var(--c-tint-amber); border-left: 3px solid var(--c-accent-amber); }
+.cam-finding-row-critical { background: var(--c-tint-red); box-shadow: inset 0 0 0 1px var(--c-accent-red); }
+.cam-finding-row-warning  { background: var(--c-tint-amber); box-shadow: inset 0 0 0 1px var(--c-accent-amber); }
 .cam-finding-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
 .cam-finding-pill { font-size: 0.65rem; font-weight: 700; border-radius: 3px; padding: 2px 6px; color: var(--c-on-accent); flex-shrink: 0; }
 .cam-finding-pill-critical { background: var(--c-pill-critical); }
@@ -2221,8 +2609,8 @@ details[open] > .cam-details-btn::before { transform: rotate(90deg); }
    headroom on that port. Fills use --c-status-* (they are fills, not text);
    the note titles use --c-accent-* per the a11y pass in PR #138. */
 .cam-poe-note { border-radius: 6px; padding: 10px 14px; box-shadow: inset 0 0 0 1px var(--c-border); }
-.cam-poe-note-info { background: var(--c-tint-blue); border-left: 3px solid var(--c-accent-blue); }
-.cam-poe-note-warn { background: var(--c-tint-amber); border-left: 3px solid var(--c-accent-amber); }
+.cam-poe-note-info { background: var(--c-tint-blue); box-shadow: inset 0 0 0 1px var(--c-accent-blue); }
+.cam-poe-note-warn { background: var(--c-tint-amber); box-shadow: inset 0 0 0 1px var(--c-accent-amber); }
 .cam-poe-note-title { font-size: 0.8rem; font-weight: 600; margin-bottom: 4px; }
 .cam-poe-note-info .cam-poe-note-title { color: var(--c-accent-blue); }
 .cam-poe-note-warn .cam-poe-note-title { color: var(--c-accent-amber); }
@@ -2313,10 +2701,10 @@ details[open] > .cam-details-btn::before { transform: rotate(90deg); }
 .fi-result-detail { font-size: 0.78rem; color: var(--c-muted); margin-top: 3px; line-height: 1.45; }
 
 .fi-verdict-card { border-radius: 8px; padding: 20px; margin-bottom: 16px; }
-.fi-verdict-cable   { background: var(--c-tint-amber);  border-left: 4px solid var(--c-accent-amber); }
-.fi-verdict-nic     { background: var(--c-tint-red);     border-left: 4px solid var(--c-accent-red); }
-.fi-verdict-camera  { background: var(--c-tint-amber);   border-left: 4px solid var(--c-accent-amber); }
-.fi-verdict-unknown { background: var(--c-surface-3);   border-left: 4px solid var(--c-dim); }
+.fi-verdict-cable   { background: var(--c-tint-amber);  box-shadow: inset 0 0 0 1px var(--c-accent-amber); }
+.fi-verdict-nic     { background: var(--c-tint-red);     box-shadow: inset 0 0 0 1px var(--c-accent-red); }
+.fi-verdict-camera  { background: var(--c-tint-amber);   box-shadow: inset 0 0 0 1px var(--c-accent-amber); }
+.fi-verdict-unknown { background: var(--c-surface-3);   box-shadow: inset 0 0 0 1px var(--c-dim); }
 .fi-verdict-title { font-size: 1.05rem; font-weight: 700; margin-bottom: 8px; color: var(--c-text); }
 .fi-verdict-body  { font-size: 0.875rem; color: var(--c-text); line-height: 1.6; }
 
@@ -2348,16 +2736,20 @@ details[open] > .fi-hist-summary::before { transform: rotate(90deg); }
     display: flex; align-items: center; justify-content: space-between;
     gap: 1rem; flex-wrap: wrap;
 }
+/* The text block takes whatever the button leaves. min-width:0 lets it
+   shrink instead of pushing the button off the card at narrow RDP widths;
+   the row's flex-wrap then drops the button below when it runs out. */
+.svc-quick-action-row > div { flex: 1 1 auto; min-width: 0; }
 .svc-quick-action-title { font-weight: 600; font-size: 0.95rem; color: var(--c-text); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.svc-quick-action-body  { font-size: 0.8rem; color: var(--c-muted); margin-top: 4px; max-width: 580px; line-height: 1.5; }
+.svc-quick-action-body  { font-size: 0.8rem; color: var(--c-muted); margin-top: 4px; line-height: 1.5; }
 
 .svc-quick-action-result {
     margin-top: 0.75rem; padding: 0.75rem 0.875rem; border-radius: 6px;
 }
 .svc-quick-action-result.hidden { display: none; }
-.svc-result-ok  { background: var(--c-tint-green); border-left: 3px solid var(--c-accent-green); color: var(--c-text); }
-.svc-result-err { background: var(--c-tint-red);   border-left: 3px solid var(--c-accent-red);   color: var(--c-text); }
-.svc-result-warn { background: var(--c-tint-amber); border-left: 3px solid var(--c-accent-amber); color: var(--c-text); }
+.svc-result-ok  { background: var(--c-tint-green); box-shadow: inset 0 0 0 1px var(--c-accent-green); color: var(--c-text); }
+.svc-result-err { background: var(--c-tint-red);   box-shadow: inset 0 0 0 1px var(--c-accent-red);   color: var(--c-text); }
+.svc-result-warn { background: var(--c-tint-amber); box-shadow: inset 0 0 0 1px var(--c-accent-amber); color: var(--c-text); }
 .svc-result-output {
     margin-top: 6px; padding: 6px 8px; border-radius: 4px;
     background: var(--c-surface-3); color: var(--c-text);
@@ -2392,14 +2784,13 @@ details[open] > .fi-hist-summary::before { transform: rotate(90deg); }
     padding: 14px;
     display: flex;
     flex-direction: column;
-    border-left: 4px solid;
 }
 /* Theme-aware accent colors + thicker stripe so the running/stopped
    indicator is legible at a glance — was 3px raw hex that washed out
    on the dark surface. */
-.svc-tile-running { border-left-color: var(--c-accent-green); }
-.svc-tile-stopped { border-left-color: var(--c-accent-red); }
-.svc-tile-muted   { border-left-color: var(--c-dimmer); }
+.svc-tile-running { border-color: var(--c-accent-green); }
+.svc-tile-stopped { border-color: var(--c-accent-red); }
+.svc-tile-muted   { border-color: var(--c-dimmer); }
 .svc-tile-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
 .svc-tile-name { font-size: 0.85rem; font-weight: 600; color: var(--c-text); }
 .svc-tile-display { font-size: 0.7rem; color: var(--c-muted); margin-bottom: 4px; }
@@ -2563,7 +2954,7 @@ details[open] > .fi-hist-summary::before { transform: rotate(90deg); }
 .px-log-deps-warn {
     display: flex; gap: 10px; align-items: flex-start;
     padding: 10px 14px; border-radius: 6px;
-    background: var(--c-tint-red); border-left: 3px solid var(--c-accent-red);
+    background: var(--c-tint-red); box-shadow: inset 0 0 0 1px var(--c-accent-red);
     color: var(--c-text);
 }
 .px-log-deps-warn svg { flex-shrink: 0; color: var(--c-accent-red); margin-top: 2px; }
@@ -2635,6 +3026,53 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
 }
 .sc-team-home, .sc-team-away { display: flex; flex-direction: column; gap: 2px; }
 .sc-team-away { text-align: right; align-items: flex-end; }
+/* Live-score columns: caption, team name and score share one centre line on
+   both sides, so the two scores mirror each other across the clock. */
+.sc-score-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 2px;
+    min-width: 0;
+}
+.sc-team-clip {
+    max-width: 18ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+/* Field caption on the board ("Home Score", "Quarter", "Time") */
+.sc-cap {
+    font-size: 0.55rem;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    color: var(--c-board-muted);
+    text-transform: uppercase;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.sc-score-col .sc-cap { margin-bottom: 0.2rem; }
+.sc-cap-gap { margin-top: 0.5rem; }
+.sc-score-col .sc-team-label { color: var(--c-board-text-2); }
+
+/* Secondary stat row under the scores (down & distance, ball on, clock) */
+.sc-stats {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.5rem 2.5rem;
+    border-top: 1px solid var(--c-board-line);
+}
+.sc-stat { display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 7rem; }
+.sc-stat-lbl {
+    font-size: 0.5rem;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    color: var(--c-board-muted);
+    text-transform: uppercase;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.sc-stat-val { font-size: 1rem; font-weight: 700; color: var(--c-board-text); letter-spacing: 0.04em; }
 .sc-team-label {
     font-size: 0.55rem;
     font-weight: 700;
@@ -2840,8 +3278,8 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
   padding: 0.625rem 0.75rem; border-radius: 6px; margin-bottom: 0.5rem;
 }
 .audio-finding:last-child { margin-bottom: 0; }
-.audio-finding-warning { background: var(--c-tint-amber, rgba(217, 119, 6, 0.08)); border-left: 3px solid var(--c-accent-amber, #d97706); }
-.audio-finding-info    { background: var(--c-tint-blue-faint); border-left: 3px solid var(--c-accent-blue); }
+.audio-finding-warning { background: var(--c-tint-amber, rgba(217, 119, 6, 0.08)); box-shadow: inset 0 0 0 1px var(--c-accent-amber, #d97706); }
+.audio-finding-info    { background: var(--c-tint-blue-faint); box-shadow: inset 0 0 0 1px var(--c-accent-blue); }
 .audio-finding-pill {
   font-size: 0.65rem; font-weight: 700; border-radius: 3px;
   padding: 2px 6px; color: var(--c-on-accent); flex-shrink: 0;
@@ -2990,6 +3428,59 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
 }
 .net-issue-details li + li { margin-top: 2px; }
 
+/* Under a finding's body on the Dashboard, the Network card and Camera
+   Connectivity: one row per affected port or service, the line to send venue
+   IT, and a collapsed "How Pulse knows". The body above is written to be read
+   aloud to a school; these are for whoever acts on it. */
+.finding-details {
+    margin: 0 0 8px;
+    padding-left: 1rem;
+    list-style: disc;
+    font-size: 0.72rem;
+    color: var(--c-dim);
+    line-height: 1.6;
+    max-width: 68ch;
+}
+.finding-details li + li { margin-top: 2px; }
+.finding-it {
+    margin: 8px 0 0;
+    max-width: 68ch;
+    font-size: 0.74rem;
+    line-height: 1.5;
+    color: var(--c-text);
+}
+.finding-it-label { font-weight: 600; margin-right: 4px; }
+.finding-evidence {
+    margin: 6px 0 0;
+    max-width: 68ch;
+    font-size: 0.72rem;
+    color: var(--c-dim);
+}
+.finding-evidence > summary {
+    cursor: pointer;
+    width: max-content;
+    color: var(--c-muted);
+}
+.finding-evidence > summary:focus-visible {
+    outline: 2px solid var(--c-accent-blue);
+    outline-offset: 2px;
+}
+.finding-evidence > p { margin: 4px 0 0; line-height: 1.5; }
+/* The Dashboard detail puts "Open <page>" under the extras; keep a gap. */
+.finding-detail > .finding-evidence,
+.finding-detail > .finding-it { margin-bottom: 8px; }
+/* The Network card's issue body runs the card's full width; match it so the
+   venue-IT line and the evidence don't stop short of the text above them. */
+.net-issue-text .finding-it,
+.net-issue-text .finding-evidence { max-width: none; }
+.net-tip-evidence { display: block; margin-top: 5px; color: var(--c-muted); }
+/* On Camera Connectivity the finding sits on a severity-tinted row; the dim
+   ramp washes out there, so match the row's own body text. */
+.cam-finding-row .finding-details,
+.cam-finding-row .finding-evidence { color: var(--c-muted); }
+.cam-finding-row .finding-details { margin: 6px 0 0; }
+.cam-poe-note-evidence { font-size: 0.72rem; color: var(--c-dim); line-height: 1.4; margin-top: 4px; }
+
 /* Local Network Health — ping cards */
 .net-ping-grid {
     display: grid;
@@ -3005,10 +3496,10 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
     border: 1px solid var(--c-border);
     background: var(--c-surface-3);
 }
-.net-ping-pass { border-left: 3px solid var(--c-accent-green); }
-.net-ping-warn { border-left: 3px solid var(--c-accent-amber); }
-.net-ping-fail { border-left: 3px solid var(--c-accent-red); }
-.net-ping-info { border-left: 3px solid var(--c-accent-blue); }
+.net-ping-pass { border-color: var(--c-accent-green); }
+.net-ping-warn { border-color: var(--c-accent-amber); }
+.net-ping-fail { border-color: var(--c-accent-red); }
+.net-ping-info { border-color: var(--c-accent-blue); }
 
 .net-ping-header {
     display: flex;
@@ -3227,6 +3718,52 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
     grid-template-columns: repeat(6, 1fr);
     gap: 0.75rem;
     margin-bottom: 1rem;
+}
+/* A short qualifier after a key-value figure, where the number alone does
+   not say whether it is good. */
+.kv-hint {
+    display: block;
+    font-size: 0.66rem;
+    font-weight: 500;
+    color: var(--c-dimmer);
+}
+/* Per-camera headline: what Pulse actually checked, above ~30 raw fields. */
+.cam-hl {
+    font-size: 0.74rem;
+    font-weight: 600;
+    margin: 2px 0 8px;
+}
+.cam-hl-ok   { color: var(--c-dim); }
+.cam-hl-warn { color: var(--c-accent-amber); }
+.cam-hl-bad  { color: var(--c-accent-red); }
+/* A gauge's verdict in a word. The ring's colour already encoded this; the
+   word makes it readable to someone who does not know what 64% means, and to
+   anyone who cannot separate the amber ring from the blue one. */
+.gauge-verdict {
+    font-size: 0.66rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+}
+.gauge-verdict-ok   { color: var(--c-dim); }
+.gauge-verdict-warn { color: var(--c-accent-amber); }
+.gauge-verdict-crit { color: var(--c-accent-red); }
+/* The panel's verdict, above its raw counters. */
+.net-live-verdict {
+    font-size: 0.82rem;
+    font-weight: 500;
+    line-height: 1.45;
+    margin: 0 0 0.7rem;
+    max-width: 72ch;
+}
+/* A column's unit or normal range, under its name, so the header carries the
+   meaning that used to live in a title= nobody hovers. */
+.th-unit {
+    display: block;
+    font-size: 0.62rem;
+    font-weight: 500;
+    color: var(--c-dimmer);
+    text-transform: none;
+    letter-spacing: 0;
 }
 @media (max-width: 900px) { .net-live-gauges { grid-template-columns: repeat(3, 1fr); } }
 @media (max-width: 500px) { .net-live-gauges { grid-template-columns: repeat(2, 1fr); } }
@@ -3796,9 +4333,9 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
 }
 
 /* ── SC III crash auto-restart panel ────────────────────────── */
-.sc3-recovery { border-left: 3px solid var(--c-border); }
-.sc3-recovery-on { border-left-color: var(--c-accent-green); }
-.sc3-recovery-off { border-left-color: var(--c-accent-amber); }
+.sc3-recovery { box-shadow: inset 0 0 0 1px var(--c-border); border-radius: 6px; }
+.sc3-recovery-on { box-shadow: inset 0 0 0 1px var(--c-accent-green); }
+.sc3-recovery-off { box-shadow: inset 0 0 0 1px var(--c-accent-amber); }
 .sc3-recovery-head {
     display: flex;
     align-items: flex-start;
