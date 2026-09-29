@@ -460,8 +460,9 @@ def configure(call, req, backup_dir, previous_path, settings_path=SC3_SETTINGS_P
                 "warningMessage": resp.get("warningMessage") or ("ScoreConnect III refused the setup (HTTP %s)" % st),
                 "requiredFields": [parse_required_field(t) for t in (resp.get("requiredFields") or [])]}
 
-    # Only a setup that was actually configured is worth restoring to.
-    if before.get("configured"):
+    # Only a setup that was actually configured is worth restoring to. A code
+    # scan passes no path: it records the setup it started from itself.
+    if previous_path and before.get("configured"):
         try:
             with open(previous_path, "w", encoding="utf-8") as f:
                 json.dump({"savedAt": datetime.now().isoformat(timespec="seconds"), "setup": before}, f)
@@ -490,6 +491,168 @@ def restore_request(previous):
         "deviceType": s.get("deviceType") or "ScoreLinkII",
         "additionalConfiguration": s.get("additionalConfiguration"),
     }
+
+
+# ── Find the code ────────────────────────────────────────────
+# A console sends one data layout per sport code, and SC III reads only the
+# layout of the code it is set to. Measured on vpu-home 2026-09-29 (Fair-Play
+# MP-70 at board 23): SC III set to any other Fair-Play code says "Data is
+# present but not in the proper format" with an empty data field; Code 23
+# says "...and in the correct format". So Pulse can try each code in turn and
+# stop at the one SC III reads.
+#
+# Timing, same bench: the save call blocks while SC III reprograms the
+# ScoreLink (status "No Scoreboard data", botConfigurationInProgress true,
+# about 9s), and its verdict for the new code follows about 2.5s later. So
+# every status read after configure() returns belongs to the code just saved.
+# A real scan there (Code 27 set, 10 basketball codes, then football) took
+# 10.7s a code, found Code 23 first try, and put Code 27 back after no match.
+
+SCAN_SECONDS_PER_CODE = 11
+SCAN_VERDICT_WAIT_S = 20.0
+
+# The sport word in SC III's sport names ("Fairplay Football Code 23",
+# "Daktronics 5500 Basketball", "Nevco MPC7 Hockey"). None overlaps another.
+SPORT_WORDS = ("baseball", "basketball", "football", "hockey", "lacrosse", "soccer", "softball",
+               "volleyball", "wrestling", "swimming", "waterpolo", "rodeo", "timer")
+
+
+def status_verdict(desc):
+    """SC III's scoreboard status as one word. "Data is present but not in
+    the proper format" contains "data is present", so it is checked first."""
+    t = str(desc or "").strip().lower()
+    if t == "connected":
+        return "stopped"
+    if "proper format" in t or "not in the correct format" in t:
+        return "wrong"
+    if "no scoreboard" in t:
+        return "none"
+    if "correct format" in t:
+        return "correct"
+    return None
+
+
+def sport_of(name):
+    t = str(name or "").lower().replace(" ", "")
+    return next((w for w in SPORT_WORDS if w in t), None)
+
+
+def _natural(name):
+    return [int(p) if p.isdigit() else p.lower() for p in re.split(r"(\d+)", str(name or ""))]
+
+
+def scan_sports(sports):
+    """The sports a scan can be narrowed to, with how many codes each has."""
+    counts = {}
+    for s in sports:
+        w = sport_of(s.get("name"))
+        if w:
+            counts[w] = counts.get(w, 0) + 1
+    return [{"key": w, "count": counts[w]} for w in SPORT_WORDS if w in counts]
+
+
+def scan_candidates(sports, sport=None, skip_id=None):
+    """The codes to try, in order: the vendor's auto-detect setting first (a
+    console it can read needs no code at all), then the sport's codes in
+    number order. The code SC III is on now is known not to work."""
+    auto = [s for s in sports if "auto detect" in str(s.get("name") or "").lower()]
+    rest = sorted((s for s in sports if s not in auto and (sport is None or sport_of(s.get("name")) == sport)),
+                  key=lambda s: _natural(s.get("name")))
+    return [{"id": s["id"], "name": s.get("name")} for s in auto + rest if s.get("id") != skip_id]
+
+
+def read_scan_status(call):
+    """(verdict, has data, SC III still configuring) from get-status."""
+    st, d = call("GET", "/api/configuration/get-status", timeout=5)
+    if st != 200 or not isinstance(d, dict):
+        raise Sc3Error("ScoreConnect III answered %s for its status" % st)
+    sb = d.get("scoreBoardData") or {}
+    return (status_verdict(sb.get("description") if isinstance(sb, dict) else None),
+            bool(str(d.get("data") or "").strip()), bool(d.get("botConfigurationInProgress")))
+
+
+def _await_verdict(read_status, sleep, clock, wait_s):
+    deadline = clock() + wait_s
+    last = None
+    while True:
+        v, has_data, busy = read_status()
+        if not busy and v == "correct" and has_data:
+            # Read twice: one good packet is not a working setup.
+            sleep(1)
+            v, has_data, busy = read_status()
+            if not busy and v == "correct" and has_data:
+                return "correct"
+        if not busy:
+            if v == "wrong":
+                return "wrong"
+            # "Correct format" with an empty data field reads nothing.
+            last = "none" if v == "correct" else v
+        if clock() >= deadline:
+            return last or "none"
+        sleep(1)
+
+
+def run_scan(candidates, base, original, try_setup, read_status, progress=None, stop=None,
+             sleep=time.sleep, clock=time.monotonic, wait_s=SCAN_VERDICT_WAIT_S):
+    """Try each candidate sport code until SC III reads the console.
+
+    `base` is the rest of the setup (connection, ScoreLink, wireless fields),
+    kept as it is; `original` is the configure() request that puts back the
+    setup the scan started from. Stops at the first code SC III reads and
+    leaves it saved. Otherwise (no match, the tech pressed Stop, the console
+    went quiet, a save failed) it puts the original back.
+
+    Returns {state: found|none|stopped|lost|error, tried, found, restored,
+    message}; `progress(state)` is called as it goes."""
+    progress = progress or (lambda st: None)
+    stop = stop or (lambda: False)
+    out = {"state": "running", "total": len(candidates), "tried": [], "current": None,
+           "found": None, "restored": None, "message": None}
+
+    def end(state, message=None):
+        out["current"] = None
+        out["message"] = message
+        if state != "found":
+            out["state"] = "restoring"
+            progress(out)
+            try:
+                r = try_setup(original)
+                out["restored"] = bool(r.get("ok"))
+                if not r.get("ok"):
+                    out["message"] = ((message + " ") if message else "") + \
+                        "Putting back the original setup failed too: %s" % (r.get("warningMessage") or "no reason given")
+            except Exception as e:
+                out["restored"] = False
+                out["message"] = ((message + " ") if message else "") + "Putting back the original setup failed too: %s" % e
+        out["state"] = state
+        progress(out)
+        return out
+
+    quiet = 0
+    try:
+        for cand in candidates:
+            if stop():
+                return end("stopped")
+            out["current"] = cand
+            progress(out)
+            r = try_setup(dict(base, vendorSportId=cand["id"]))
+            if not r.get("ok"):
+                out["tried"].append(dict(cand, verdict="refused"))
+                return end("error", "ScoreConnect III didn't save %s: %s" % (
+                    cand.get("name"), r.get("warningMessage") or "no reason given"))
+            v = _await_verdict(read_status, sleep, clock, wait_s)
+            out["tried"].append(dict(cand, verdict=v))
+            if v == "correct":
+                out["found"] = cand
+                return end("found")
+            # The scan starts from data SC III can see; two codes in a row with
+            # nothing at all means the console stopped, not that they're wrong.
+            quiet = quiet + 1 if v != "wrong" else 0
+            if quiet >= 2:
+                return end("lost")
+        return end("none")
+    except Exception as e:
+        return end("error", str(e))
 
 
 # ── Tech-confirmed chain ─────────────────────────────────────
@@ -577,6 +740,9 @@ class DemoSc3:
                     "additionalConfiguration": None}
         self.device_type = "ScoreLinkII"
         self.config_problem = None
+        # The sport the demo console sends. None: whatever SC III is set to.
+        self.console_sport = None
+        self.save_delay = 0.0
 
     def _vendor(self, vid):
         return next((v for v in self.cat["vendors"] if v["id"] == vid), None)
@@ -602,6 +768,13 @@ class DemoSc3:
             return 200, self.bot
         if method == "GET" and p == "/api/configuration/get-devices-list":
             return (200, list(self.devices)) if self.devices else (204, None)
+        if method == "GET" and p == "/api/configuration/get-status":
+            v = self.verdict()
+            desc = {"correct": "Data is present and in the correct format",
+                    "wrong": "Data is present but not in the proper format"}.get(v, "No Scoreboard data is being received")
+            return 200, {"botNumber": self.bot, "botConfigurationInProgress": False,
+                         "scoreBoardData": {"description": desc},
+                         "data": "02 000  25 39 49  33110  6 S:S" if v == "correct" else ""}
         if method == "PUT" and p == "/api/configuration/discover-devices":
             self.devices = [{"id": 0, "type": "ScoreLink", "description": "USB ScoreLink"},
                             {"id": 1, "type": "ScoreLinkII", "description": "USB ScoreLinkII"}]
@@ -610,7 +783,17 @@ class DemoSc3:
             return self._set(body or {})
         return 404, None
 
+    def verdict(self):
+        """What SC III makes of the demo console: its own sport reads, another
+        code of the same brand is the wrong format, another brand is nothing."""
+        name = self.cfg.get("vendorSportName")
+        if self.console_sport is None or name == self.console_sport:
+            return "correct"
+        return "wrong" if str(self.console_sport).startswith(str(self.cfg.get("vendorName"))) else "none"
+
     def _set(self, body):
+        if self.save_delay:
+            time.sleep(self.save_delay)
         sport_id, conf_id = body.get("vendorSportId"), body.get("vendorConfigurationId")
         vendor_id = sport = None
         for vid, sports in self.cat["sports"].items():

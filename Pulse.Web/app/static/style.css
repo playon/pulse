@@ -3311,6 +3311,11 @@ button.scc-node:hover { background: var(--c-surface-2); border-color: var(--c-bo
 .scc-warn.is-live { font-weight: 600; }
 .scc-setup > .scc-warn:first-of-type { margin: 0 0 0.6rem; }
 .scc-saved { font-size: 0.85rem; margin: 0 0 0.5rem; color: var(--c-text); }
+.scc-scan p + p { margin-top: 0.4rem; }
+.scc-scan .scc-scan-sport { max-width: 22rem; margin-bottom: 0.6rem; }
+.scc-scan-bar { height: 0.35rem; max-width: 28rem; margin: 0.2rem 0 0.6rem; border-radius: 999px; background: var(--c-border); overflow: hidden; }
+.scc-scan-bar > span { display: block; height: 100%; background: var(--c-status-connecting); transition: width 0.4s ease; }
+@media (prefers-reduced-motion: reduce) { .scc-scan-bar > span { transition: none; } }
 
 @keyframes scc-in { from { opacity: 0; transform: scale(0.97); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) { .scc-img img { animation: none; } }

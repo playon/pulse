@@ -70,3 +70,19 @@ wireless receiver sits next to the VPU and uses no extension.
 - Spectrum MS250: **not compatible**. MSX and MSX5: need a 1/4" jack modification ($175), then the red tip; never the "(RS232)" settings. Data that cycles through test values means TEST MODE: restart the console and start a new game.
 - Varsity, All-Star, Sportable, BSN (one LCD controller): PlayOn custom cable into DIN1 or DIN2; Varsity settings. No wireless.
 - Software scoreboards: ScoreVision and PCScoreboards over the network (same subnet as the VPU). Major Display: **not compatible**, use OCR.
+
+## Finding the code (Pulse's Find the code)
+
+A console sends one data layout per sport code, and ScoreConnect III reads only
+the layout of the code it is set to. With the wrong code (same brand) SC III
+says "Data is present but not in the proper format" with an empty data field;
+with the right one, "Data is present and in the correct format". Measured on
+the Fair-Play MP-70 (board 23), 2026-09-29: every other Fair-Play code tried
+(Football 24/27, Basketball 0-12, Baseball 34) read "not in the proper
+format"; Code 23 read correct. The save blocks while SC III reprograms the
+ScoreLink (about 9s) and the verdict follows at once, about 11s a code.
+
+A Fair-Play console shows its code at startup as "Brd" and a number (Brd 23 =
+Code 23), which is faster than a scan. Not yet benched: whether a wrong
+Daktronics, Nevco or Electro-Mech code also reads "not in the proper format"
+rather than "correct format" (a false match) or "No Scoreboard data".

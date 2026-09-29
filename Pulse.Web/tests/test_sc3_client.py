@@ -359,6 +359,121 @@ class HistoryGate(unittest.TestCase):
         self.assertIsNone(main._sc_config_snapshot(dict(base, dataStatus="No Scoreboard data is being received")))
 
 
+class FindTheCode(unittest.TestCase):
+    """run_scan: try each code until SC III reads the console. Verdicts as
+    measured on vpu-home 2026-09-29 (Fair-Play MP-70 at board 23)."""
+
+    def setUp(self):
+        self.sc3 = c.DemoSc3(CATALOG)
+        self.sc3.devices = [{"id": 0, "type": "ScoreLink"}, {"id": 1, "type": "ScoreLinkII"}]
+        self.fp = c.vendor_detail(self.sc3, 2)["sports"]
+        self.ids = {x["name"]: x["id"] for x in self.fp}
+        self.saves = []
+
+    def _setup(self, req):
+        self.saves.append(req["vendorSportId"])
+        return c.configure(self.sc3, req, "unused", None, read_settings=lambda _p: self.sc3.settings(),
+                           backup=lambda d, s: "backup", sleep=lambda _s: None)
+
+    def _scan(self, candidates, start, read_status=None, stop=None):
+        self.sc3.console_sport = "Fairplay Football Code 23"
+        base = {"vendorConfigurationId": 23, "deviceType": "ScoreLink", "additionalConfiguration": None}
+        original = dict(base, vendorSportId=self.ids[start])
+        self._setup(original)
+        self.saves = []
+        clock = iter(range(0, 100000, 1))
+        return c.run_scan(candidates, base, original, self._setup,
+                          read_status or (lambda: c.read_scan_status(self.sc3)), stop=stop,
+                          sleep=lambda _s: None, clock=lambda: next(clock), wait_s=20)
+
+    def test_verdict_words(self):
+        self.assertEqual(c.status_verdict("Data is present but not in the proper format"), "wrong")
+        self.assertEqual(c.status_verdict("Data is present and in the correct format"), "correct")
+        self.assertEqual(c.status_verdict("No Scoreboard data is being received"), "none")
+        self.assertEqual(c.status_verdict("Connected"), "stopped")
+        self.assertIsNone(c.status_verdict("Something new"))
+
+    def test_candidates_auto_detect_first_then_code_order_without_current(self):
+        dak = c.vendor_detail(self.sc3, 1)["sports"]
+        names = [x["name"] for x in c.scan_candidates(dak, "football", skip_id=180)]
+        self.assertEqual(names[0], "Daktronics Auto Detect")
+        self.assertNotIn("Daktronics 3000 Football", names)
+        self.assertTrue(all("Football" in n for n in names[1:]), names)
+        fb = [x["name"] for x in c.scan_candidates(self.fp, "basketball")]
+        self.assertEqual(fb[:3], ["Fairplay Basketball Code 0", "Fairplay Basketball Code 1", "Fairplay Basketball Code 2"])
+        self.assertEqual(len(c.scan_candidates(self.fp, None, skip_id=self.ids["Fairplay Football Code 24"])), len(self.fp) - 1)
+
+    def test_stops_at_the_code_the_console_sends(self):
+        cands = c.scan_candidates(self.fp, "football", skip_id=self.ids["Fairplay Football Code 24"])
+        r = self._scan(cands, "Fairplay Football Code 24")
+        self.assertEqual(r["state"], "found")
+        self.assertEqual(r["found"]["name"], "Fairplay Football Code 23")
+        self.assertEqual(self.sc3.cfg["vendorSportName"], "Fairplay Football Code 23")
+        self.assertIsNone(r["restored"])
+
+    def test_no_match_puts_the_original_back(self):
+        cands = c.scan_candidates(self.fp, "basketball")
+        r = self._scan(cands, "Fairplay Football Code 24")
+        self.assertEqual(r["state"], "none")
+        self.assertEqual(len(r["tried"]), len(cands))
+        self.assertTrue(all(t["verdict"] == "wrong" for t in r["tried"]))
+        self.assertTrue(r["restored"])
+        self.assertEqual(self.sc3.cfg["vendorSportName"], "Fairplay Football Code 24")
+
+    def test_stop_puts_the_original_back(self):
+        cands = c.scan_candidates(self.fp, "basketball")
+        calls = {"n": 0}
+        def stop():
+            calls["n"] += 1
+            return calls["n"] > 2
+        r = self._scan(cands, "Fairplay Football Code 24", stop=stop)
+        self.assertEqual(r["state"], "stopped")
+        self.assertEqual(len(r["tried"]), 2)
+        self.assertEqual(self.sc3.cfg["vendorSportName"], "Fairplay Football Code 24")
+
+    def test_console_going_quiet_stops_the_scan(self):
+        cands = c.scan_candidates(self.fp, "basketball")
+        r = self._scan(cands, "Fairplay Football Code 24", read_status=lambda: ("none", False, False))
+        self.assertEqual(r["state"], "lost")
+        self.assertEqual(len(r["tried"]), 2)
+        self.assertTrue(r["restored"])
+
+    def test_waits_out_reconfiguring_and_needs_two_good_reads(self):
+        # SC III still reprogramming the ScoreLink, then one stray good read,
+        # then the real verdict: the stray read alone must not count.
+        seq = iter([("none", False, True), ("none", False, True), ("correct", True, False),
+                    ("wrong", False, False)])
+        self.assertEqual(c._await_verdict(lambda: next(seq), lambda _s: None, iter(range(100)).__next__, 20), "wrong")
+        seq = iter([("none", False, True), ("correct", True, False), ("correct", True, False)])
+        self.assertEqual(c._await_verdict(lambda: next(seq), lambda _s: None, iter(range(100)).__next__, 20), "correct")
+        # "Correct" with an empty data field is not a working setup.
+        self.assertNotEqual(c._await_verdict(lambda: ("correct", False, False), lambda _s: None,
+                                             iter(range(100)).__next__, 5), "correct")
+
+    def test_a_refused_save_stops_and_restores(self):
+        cands = [{"id": 999999, "name": "Not a sport"}]
+        r = self._scan(cands, "Fairplay Football Code 24")
+        self.assertEqual(r["state"], "error")
+        self.assertIn("didn't save", r["message"])
+        self.assertTrue(r["restored"])
+
+    def test_configure_without_a_previous_path_writes_none(self):
+        # The scan records the setup it started from once; per-code saves
+        # must not overwrite "Restore previous" with a wrong code.
+        d = tempfile.mkdtemp()
+        try:
+            cwd = os.getcwd()
+            os.chdir(d)
+            try:
+                cands = c.scan_candidates(self.fp, "football", skip_id=self.ids["Fairplay Football Code 24"])
+                self._scan(cands, "Fairplay Football Code 24")
+            finally:
+                os.chdir(cwd)
+            self.assertEqual(os.listdir(d), [])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
 class CopyContract(unittest.TestCase):
     """Every break and symptom the page can pick has words in main.py, and
     every placeholder in those words is one the page fills."""

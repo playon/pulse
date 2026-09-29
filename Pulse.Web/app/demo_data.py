@@ -129,11 +129,16 @@ def _demo_raw_data():
 _SC_SCENARIOS = ("healthy", "no-usb", "serial-failing", "no-data", "stopped", "wrong-format",
                  "intermittent", "sc3-down", "legacy", "ocr")
 _DEMO_FROZEN_RAW = None
+# Set by main.py after a demo save or Find the code lands on the code the
+# demo console sends: "wrong-format" then reads as healthy.
+_DEMO_SC_SETUP_FIXED = False
 
 
 def _demo_sc_scenario():
     import os
     s = os.environ.get("PULSE_DEMO_SC", "healthy").strip().lower()
+    if s == "wrong-format" and _DEMO_SC_SETUP_FIXED:
+        return "healthy"
     return s if s in _SC_SCENARIOS else "healthy"
 
 

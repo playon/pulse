@@ -5113,7 +5113,14 @@ def _sc3_call():
     if DEMO_MODE:
         if _demo_sc3 is None:
             from sc3_demo_catalog import CATALOG
+            from demo_data import _demo_sc_scenario
             _demo_sc3 = sc3_client.DemoSc3(CATALOG)
+            # A save takes seconds on a real unit; the demo scan shows it.
+            _demo_sc3.save_delay = 1.5
+            if _demo_sc_scenario() == "wrong-format":
+                # SC III is set to Daktronics 3000 Football; the console sends
+                # Daktronics Football, so Find the code has something to find.
+                _demo_sc3.console_sport = "Daktronics Football"
         return _demo_sc3
     return sc3_client.http_transport(load_settings().get("scoreConnectUrl", "http://localhost:5000"))
 
@@ -5295,8 +5302,16 @@ SC_CHAIN_COPY = {
         "wrong-format": {
             "title": "The console is sending data, but it doesn't match ScoreConnect's setup, so no score comes through",
             "say": "The cable and console are working. ScoreConnect is set to {sport}, which is not what the console "
-                   "is sending. {codeHint}Use Change setup to pick the sport and code the console is set to.",
+                   "is sending. {codeHint}If the school can read the code off the console, use Change setup to pick "
+                   "it. If not, Find the code tries each of ScoreConnect's {vendor} codes until one reads.",
             "where": ["controller"], "tone": "warning"},
+        # While Find the code runs, the status flips on every code it tries;
+        # this one line stands in for the findings that would flicker.
+        "scanning": {
+            "title": "Pulse is trying ScoreConnect's {vendor} codes to find the one the console sends",
+            "say": "The score is not reaching the stream until a code matches. Progress is under Scoreboard "
+                   "connection below.",
+            "where": ["controller"], "tone": "info"},
         "no-data": {
             "title": "ScoreConnect isn't getting any data it can read from the console",
             "say": "Normal while the console is off. Before a game, ask the school: is the console on and running "
@@ -5508,6 +5523,9 @@ async def _sc3_configure(req):
     except sc3_client.Sc3Error as e:
         return {"error": True, "message": str(e) + ". Nothing was changed."}
     clear_ps_cache()
+    if DEMO_MODE and res.get("ok") and _demo_sc3 is not None:
+        import demo_data
+        demo_data._DEMO_SC_SETUP_FIXED = _demo_sc3.verdict() == "correct"
     # SC III programs the ScoreLink during the save and says so only in its
     # log; a wrong ScoreLink model shows up there as a "Configuration problem".
     if res.get("ok"):
@@ -5529,6 +5547,8 @@ async def api_sc3_configure(request: Request):
     body = await request.json()
     if not isinstance(body, dict) or body.get("confirm") is not True:
         return {"error": True, "message": "Changing ScoreConnect's setup needs explicit confirmation."}
+    if _sc3_scanning():
+        return {"error": True, "message": "Pulse is trying codes right now. Stop it first. Nothing was changed."}
     return await _sc3_configure(body.get("setup"))
 
 
@@ -5538,10 +5558,160 @@ async def api_sc3_restore(request: Request):
     body = await request.json()
     if not isinstance(body, dict) or body.get("confirm") is not True:
         return {"error": True, "message": "Restoring needs explicit confirmation."}
+    if _sc3_scanning():
+        return {"error": True, "message": "Pulse is trying codes right now. Stop it first. Nothing was changed."}
     prev = sc3_client.load_previous(SC3_PREVIOUS_PATH)
     if not prev:
         return {"error": True, "message": "There is no earlier setup saved by Pulse on this VPU."}
     return await _sc3_configure(sc3_client.restore_request(prev))
+
+
+# ── Find the code: try each sport code until SC III reads the console ──
+# Offered only while SC III says the console's data is present but not in the
+# format its setup expects (the wrong-format finding). One scan at a time;
+# setup saves wait for it. The scan loop is sc3_client.run_scan.
+
+import threading as _threading  # noqa: E402
+from datetime import datetime as _scan_dt  # noqa: E402
+
+_sc3_scan = {"state": "idle"}
+_sc3_scan_stop = _threading.Event()
+
+
+def _sc3_scanning():
+    return _sc3_scan.get("state") in ("starting", "running", "restoring")
+
+
+def _sc3_scan_view():
+    v = dict(_sc3_scan)
+    v["tried"] = list(v.get("tried") or [])
+    return v
+
+
+def _sc3_scan_plan(call):
+    """What the scan form needs: the vendor SC III is set to, its sports and
+    how many codes each has. None when SC III has no vendor set."""
+    cur = sc3_client.current(call, _sc3_settings())
+    if not cur.get("vendorId"):
+        return None, cur
+    sports = sc3_client.vendor_detail(call, cur["vendorId"])["sports"]
+    return {"vendorId": cur["vendorId"], "vendorName": cur.get("vendorName"),
+            "currentSport": cur.get("vendorSportName"),
+            "currentSportKey": sc3_client.sport_of(cur.get("vendorSportName")),
+            # Counted as the scan will try them: auto-detect first, the code
+            # SC III is on now left out.
+            "sports": [{"key": x["key"], "count": len(sc3_client.scan_candidates(sports, x["key"], cur.get("vendorSportId")))}
+                       for x in sc3_client.scan_sports(sports)],
+            "allCount": len(sc3_client.scan_candidates(sports, None, cur.get("vendorSportId"))),
+            "secondsPerCode": sc3_client.SCAN_SECONDS_PER_CODE}, cur
+
+
+@app.get("/api/scoreconnect/sc3/scan")
+async def api_sc3_scan_get(plan: int = 0):
+    """The running or last scan; with ?plan=1 also what a new scan would try."""
+    out = {"error": False, "scan": _sc3_scan_view()}
+    if plan and not _sc3_scanning():
+        try:
+            out["plan"], _cur = await asyncio.to_thread(_sc3_scan_plan, _sc3_call())
+        except sc3_client.Sc3Error as e:
+            return {"error": True, "message": str(e), "scan": out["scan"]}
+    return out
+
+
+@app.post("/api/scoreconnect/sc3/scan")
+async def api_sc3_scan_start(request: Request):
+    """Start a scan. Body {confirm: true, sport: "football" | null}; null tries
+    every code the vendor has."""
+    global _sc3_scan
+    body = await request.json()
+    if not isinstance(body, dict) or body.get("confirm") is not True:
+        return {"error": True, "message": "Trying codes changes ScoreConnect's setup and needs explicit confirmation."}
+    if _sc3_scanning():
+        return {"error": True, "message": "Pulse is already trying codes."}
+    sport = body.get("sport")
+    if sport is not None and sport not in sc3_client.SPORT_WORDS:
+        return {"error": True, "message": "Unknown sport"}
+    _sc3_scan = {"state": "starting"}
+    call = _sc3_call()
+    try:
+        verdict, _d, _b = await asyncio.to_thread(sc3_client.read_scan_status, call)
+        if verdict == "correct":
+            _sc3_scan = {"state": "idle"}
+            return {"error": True, "message": "ScoreConnect is already reading the console, so there is no code to find."}
+        plan, cur = await asyncio.to_thread(_sc3_scan_plan, call)
+        if not plan:
+            _sc3_scan = {"state": "idle"}
+            return {"error": True, "message": "ScoreConnect III has no vendor set. Use Change setup to pick the console's brand first."}
+        settings = _sc3_settings() or {}
+        device = settings.get("deviceType") or cur.get("deviceType")
+        if device not in sc3_client.DEVICE_TYPES:
+            _sc3_scan = {"state": "idle"}
+            return {"error": True, "message": "Pulse can't tell which ScoreLink ScoreConnect is using, so it changed nothing. "
+                                              "Use Change setup to pick it."}
+        sports = (await asyncio.to_thread(sc3_client.vendor_detail, call, plan["vendorId"]))["sports"]
+        candidates = sc3_client.scan_candidates(sports, sport, cur.get("vendorSportId"))
+        if not candidates:
+            _sc3_scan = {"state": "idle"}
+            return {"error": True, "message": "ScoreConnect has no other %s codes for %s." % (sport or "", plan["vendorName"])}
+        # One backup and one "Restore previous" for the whole scan: the setup
+        # it started from. Per-code backups would push the real one out of
+        # the ten kept.
+        backup_path = "demo: no backup" if DEMO_MODE else await asyncio.to_thread(sc3_client.backup_settings, SC3_BACKUP_DIR)
+    except sc3_client.Sc3Error as e:
+        _sc3_scan = {"state": "idle"}
+        return {"error": True, "message": str(e) + ". Nothing was changed."}
+    except Exception:
+        _sc3_scan = {"state": "idle"}
+        raise
+    earlier_previous = sc3_client.load_previous(SC3_PREVIOUS_PATH)
+    original = {"vendorSportId": cur["vendorSportId"], "vendorConfigurationId": cur.get("vendorConfigurationId"),
+                "deviceType": device, "additionalConfiguration": cur.get("additionalConfiguration")}
+    base = dict(original)
+    base.pop("vendorSportId")
+
+    def try_setup(req):
+        return sc3_client.configure(call, req, SC3_BACKUP_DIR, None,
+                                    read_settings=(lambda _p: _sc3_settings()), backup=(lambda d, s: backup_path))
+
+    def progress(st):
+        _sc3_scan.update(st)
+
+    def work():
+        res = sc3_client.run_scan(candidates, base, original, try_setup,
+                                  lambda: sc3_client.read_scan_status(call), progress=progress,
+                                  stop=_sc3_scan_stop.is_set)
+        try:
+            if res["state"] == "found":
+                with open(SC3_PREVIOUS_PATH, "w", encoding="utf-8") as f:
+                    json.dump({"savedAt": _scan_dt.now().isoformat(timespec="seconds"), "setup": cur}, f)
+        except OSError:
+            pass
+        clear_ps_cache()
+        if DEMO_MODE:
+            import demo_data
+            demo_data._DEMO_SC_SETUP_FIXED = _demo_sc3.verdict() == "correct"
+        _sc3_scan.update(finishedAt=_scan_dt.now().isoformat(timespec="seconds"))
+        ps_log("sc3-scan", 0, res["state"], "%s: tried %d of %d%s" % (
+            plan["vendorName"], len(res["tried"]), len(candidates),
+            (", found " + res["found"]["name"]) if res.get("found") else ""))
+
+    _sc3_scan_stop.clear()
+    _sc3_scan = {"state": "running", "vendorName": plan["vendorName"], "sport": sport,
+                 "original": cur.get("vendorSportName"), "total": len(candidates), "tried": [],
+                 "current": None, "found": None, "restored": None, "message": None,
+                 "secondsPerCode": sc3_client.SCAN_SECONDS_PER_CODE,
+                 "startedAt": _scan_dt.now().isoformat(timespec="seconds"), "earlierPrevious": bool(earlier_previous)}
+    asyncio.create_task(asyncio.to_thread(work))
+    return {"error": False, "scan": _sc3_scan_view()}
+
+
+@app.post("/api/scoreconnect/sc3/scan/stop")
+async def api_sc3_scan_stop():
+    """Stop after the code being tried, then put the original setup back."""
+    if not _sc3_scanning():
+        return {"error": False, "scan": _sc3_scan_view()}
+    _sc3_scan_stop.set()
+    return {"error": False, "scan": _sc3_scan_view()}
 
 
 @app.get("/api/scoreconnect/history")
