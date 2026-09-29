@@ -22,6 +22,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 
 ## [Unreleased]
 
+### Changed
+- Findings on the Dashboard, Network Test and Camera Connectivity are now one short list: one line per finding, most urgent first, with the fix a click away. A summary at the top says how many stop tonight's game, how many are risks tonight, how many to fix soon, and how many are just worth knowing. "Fix soon" is new: a real problem that won't affect tonight's game, such as a web filter blocking LogMeIn, used to be labelled "Risk tonight". The worth-knowing notes fold into one line, and every tab uses the same words for how serious a finding is.
+
 ### Added
 - The Service Status page now explains why a VPU shows offline in the cloud while the Agent looks fine. If Coordinator can't claim its websocket port, Pulse says so, names the cause (the watchdog is running without administrator rights) and gives you the one command that fixes it. It also flags the underlying problem — a KeepAgentUp scheduled task that is missing, disabled, or not set to run as administrator — which is what puts a unit into this state in the first place. Pulse checks twice a few seconds apart, so a Coordinator that is restarting in a loop no longer reports as healthy.
 - Pulse now checks the last week of games for missing graphics. It flags a VPU where the Pixellot software never passed the scorebug to the video (the "missing graphics" bug: the scoreboard and network are fine, but games stream with no graphics), and a VPU with no scoreboard type selected, which turns graphics off for every game.
