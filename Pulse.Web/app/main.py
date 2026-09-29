@@ -105,7 +105,12 @@ def _sc_config_snapshot(result):
     have no data-present signal, so history records SC III only.)"""
     if not isinstance(result, dict) or not result.get("reachable"):
         return None
-    if "data is present" not in str(result.get("dataStatus") or "").lower():
+    # Only "...and in the correct format" is a working setup. SC III also says
+    # "Data is present but not in the proper format" when the console sends
+    # data the setup can't read: a wrong Fair-Play code did exactly that on
+    # vpu-home (2026-09-29), and the old substring check would have recorded
+    # it here as known-good.
+    if "correct format" not in str(result.get("dataStatus") or "").lower():
         return None
     cfg = result.get("configuration") or {}
     bot = result.get("botStatus") or {}
@@ -5283,6 +5288,15 @@ SC_CHAIN_COPY = {
                    "the console on and running a game? Is the {tip} pushed all the way into {port}? Is the "
                    "9-pin end screwed into the SCOREBOARD port on the {device}? {extensionAsk}",
             "where": ["cable", "extension", "controller"], "tone": "warning"},
+        # Measured on vpu-home 2026-09-29 (Fair-Play MP-70 at board 23): SC III
+        # set to Football Code 24, Basketball Code 1 or Baseball Code 34 says
+        # "Data is present but not in the proper format" with an empty data
+        # field. The cable and console are fine; the setup is not.
+        "wrong-format": {
+            "title": "The console is sending data, but it doesn't match ScoreConnect's setup, so no score comes through",
+            "say": "The cable and console are working. ScoreConnect is set to {sport}, which is not what the console "
+                   "is sending. {codeHint}Use Change setup to pick the sport and code the console is set to.",
+            "where": ["controller"], "tone": "warning"},
         "no-data": {
             "title": "ScoreConnect isn't getting any data it can read from the console",
             "say": "Normal while the console is off. Before a game, ask the school: is the console on and running "
@@ -5377,6 +5391,13 @@ SC_CHAIN_COPY = {
         "coax": "An extension on the BNC tip must be 50-ohm coax. 75-ohm video cable looks the same and will "
                 "not carry the data.",
         "none": "This console's cable is made to length and has no extension.",
+    },
+    # Where a console shows the code ScoreConnect has to match, by brand.
+    # Fair-Play: the startup screen reads e.g. "Brd 23 Group 001" (NFHS
+    # article photo of an MP-70), and "Brd 23" is SC III's "Code 23".
+    "codeHints": {
+        "fairplay": "A Fair-Play console shows its code when it starts up, as \"Brd\" and a number: Brd 23 "
+                    "means ScoreConnect's Code 23. ",
     },
     "guideLines": {
         "sports": "ScoreConnect supports the {model} for: {sports}.",

@@ -346,6 +346,19 @@ class ConsoleGuide(unittest.TestCase):
         self.assertEqual(next(x for x in self.consoles if x["id"] == "nv-mpc")["extension"], "coax")
 
 
+class HistoryGate(unittest.TestCase):
+    """Only a setup SC III reads correctly is recorded as known-good."""
+
+    def test_wrong_format_is_not_a_working_setup(self):
+        import main
+        base = {"reachable": True, "configuration": {"vendor": "Fairplay", "sport": "Fairplay Football Code 24"}}
+        wrong = dict(base, dataStatus="Data is present but not in the proper format")
+        right = dict(base, dataStatus="Data is present and in the correct format")
+        self.assertIsNone(main._sc_config_snapshot(wrong))
+        self.assertIsNotNone(main._sc_config_snapshot(right))
+        self.assertIsNone(main._sc_config_snapshot(dict(base, dataStatus="No Scoreboard data is being received")))
+
+
 class CopyContract(unittest.TestCase):
     """Every break and symptom the page can pick has words in main.py, and
     every placeholder in those words is one the page fills."""

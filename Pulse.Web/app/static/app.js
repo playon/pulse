@@ -8663,7 +8663,8 @@ function renderScoreConnect() {
   // "Connected" is SC III holding the last packet after the console stopped
   // sending, not live data (vpu-home 2026-09-29).
   const hasData = data.dataStatus && !data.dataStatus.toLowerCase().includes("no scoreboard")
-    && data.dataStatus.trim().toLowerCase() !== "connected";
+    && data.dataStatus.trim().toLowerCase() !== "connected"
+    && _sccStatusWord(data.dataStatus) !== "wrongformat";
   const dataReceiving = hasData && data.rawData;
 
   // RTD parsed scores from SC III raw data
@@ -9026,6 +9027,8 @@ function _sccSignals(data) {
     // Packets stopped (a repeated packet, or SC III saying "Connected") versus
     // nothing readable at all ("No Scoreboard data").
     stopped: (_scc.status || _sccStatusWord(data.dataStatus)) === "connected" || (_scc.flow || "") === "stale",
+    // The console sends data but the setup can't read it (wrong code/sport).
+    wrongFormat: (_scc.status || _sccStatusWord(data.dataStatus)) === "wrongformat",
     drops: _scc.drops,
   };
 }
@@ -9057,7 +9060,8 @@ function _sccBreaks(data, sig, parts) {
     var setupBrand = _sccBrandOf((data.configuration || {}).vendor);
     if (parts.controller.src === "confirmed" && setupBrand && parts.controller.value !== setupBrand
         && !(parts.controller.value === "other" && setupBrand === "other")) add("vendor-mismatch");
-    if (sig.flow === "disconnected" || sig.flow === "stale") add(sig.drops >= 2 ? "intermittent" : sig.stopped ? "data-stopped" : "no-data");
+    if (sig.wrongFormat) add("wrong-format");
+    else if (sig.flow === "disconnected" || sig.flow === "stale") add(sig.drops >= 2 ? "intermittent" : sig.stopped ? "data-stopped" : "no-data");
     else if (sig.drops >= 2) add("intermittent");
   }
   var rec = _scRecoveryCache;
@@ -9099,6 +9103,7 @@ function _sccFills(data, parts) {
     drops: _scc.drops,
     pixellotSource: (data.pixellotScore || {}).source || "",
     configProblem: ((_scc.serial || data.sc3Serial || {}).configProblem || "").replace(/\s*If the issue persists.*$/i, ""),
+    codeHint: ((data.chainCopy || {}).codeHints || {})[_sccBrandOf(cfg.vendor)] || "",
     legacy: data.sc2 && /SC I|ScoreConnect$/i.test(data.sc2.productName || data.sc2.hardware || "") ? "ScoreConnect I" : "ScoreConnect II",
     // An extension the school ruled out drops its checks entirely.
     extensionAsk: ext === "none" ? "" : fillsCopy.extensionAsk,
@@ -9116,6 +9121,7 @@ function _sccLinks(sig) {
     : { s: "unknown", w: "Couldn't check" };
   var wire;
   if (sig.sc3 !== "up" || sig.usb === false) wire = { s: "unknown", w: "Not checked" };
+  else if (sig.wrongFormat) wire = { s: "ok", w: "Data arriving" };
   else if (sig.flow === "live") wire = sig.drops >= 2 ? { s: "warn", w: "Dropping out" } : { s: "ok", w: "Data arriving" };
   else if (sig.flow === "stale") wire = { s: "bad", w: "Data stopped" };
   else if (sig.flow === "disconnected") wire = { s: "bad", w: sig.stopped ? "Data stopped" : "No data" };
@@ -9603,7 +9609,9 @@ function _sccSetupDoneHtml(s) {
   var d = cached("scoreconnect");
   var flowing = d && _sccSignals(d).flow === "live";
   var watching = Date.now() < _scc.watchUntil;
-  var dataLine = flowing ? '<p class="scc-status scc-status-ok">' + svgIcon("check", 16) + '<span>Scoreboard data is coming through.</span></p>'
+  var mismatch = d && _sccSignals(d).wrongFormat;
+  var dataLine = mismatch ? '<p class="scc-warn">' + svgIcon("triangle", 14) + '<span>Saved, but ScoreConnect says the console\u2019s data is not in the format this setup expects. Try the sport and code the console is set to.</span></p>'
+    : flowing ? '<p class="scc-status scc-status-ok">' + svgIcon("check", 16) + '<span>Scoreboard data is coming through.</span></p>'
     : watching ? '<p class="scc-note" role="status">Waiting for scoreboard data from the console…</p>'
     : '<p class="scc-note">Saved, but no scoreboard data yet. That is expected if the console is off.</p>';
   var problem = r.configProblem ? '<p class="scc-warn is-live">' + svgIcon("triangle", 14) + '<span>ScoreConnect saved it, but could not set up the ScoreLink: "' +
@@ -9653,7 +9661,7 @@ function _sccBodyHtml(data) {
   var parts = _sccParts(data);
   var sig = _sccSignals(data);
   var breaks = _sccBreaks(data, sig, parts);
-  _scc.sig = JSON.stringify([sig.sc3, sig.usb, sig.flow, sig.stopped, sig.drops >= 2, (sig.serial || {}).state, !!(sig.serial || {}).configProblem, _scc.symptom, _scc.panel]);
+  _scc.sig = JSON.stringify([sig.sc3, sig.usb, sig.flow, sig.stopped, sig.drops >= 2, (sig.serial || {}).state, !!(sig.serial || {}).configProblem, sig.wrongFormat, _scc.symptom, _scc.panel]);
   return _sccStatusHtml(data, sig, breaks) +
     '<div class="scc-track" role="list" aria-label="Scoreboard connection, from the VPU to the console">' + _sccTrackHtml(data, sig, parts, breaks) + '</div>' +
     _sccAskHtml(data) +
@@ -9669,7 +9677,7 @@ function _sccRender(force) {
   if (!d || !body) return;
   if (!force) {
     var sig = _sccSignals(d);
-    var next = JSON.stringify([sig.sc3, sig.usb, sig.flow, sig.stopped, sig.drops >= 2, (sig.serial || {}).state, !!(sig.serial || {}).configProblem, _scc.symptom, _scc.panel]);
+    var next = JSON.stringify([sig.sc3, sig.usb, sig.flow, sig.stopped, sig.drops >= 2, (sig.serial || {}).state, !!(sig.serial || {}).configProblem, sig.wrongFormat, _scc.symptom, _scc.panel]);
     if (next === _scc.sig) return;
   }
   var focusId = document.activeElement && document.activeElement.id;
@@ -9681,7 +9689,13 @@ function _sccRender(force) {
 
 function _sccStatusWord(t) {
   t = String(t || "").trim().toLowerCase();
-  return t === "connected" ? "connected" : t.indexOf("no scoreboard") !== -1 ? "none" : t.indexOf("data is present") !== -1 ? "present" : null;
+  // "Data is present but not in the proper format" also contains "data is
+  // present", so the unreadable case is checked first.
+  if (t === "connected") return "connected";
+  if (t.indexOf("proper format") !== -1 || t.indexOf("not in the correct format") !== -1) return "wrongformat";
+  if (t.indexOf("no scoreboard") !== -1) return "none";
+  if (t.indexOf("correct format") !== -1 || t.indexOf("data is present") !== -1) return "present";
+  return null;
 }
 
 // From the live data poll (every 300ms while the tab is open).

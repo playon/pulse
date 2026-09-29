@@ -121,12 +121,12 @@ def _demo_raw_data():
 # mode shows, so every break the ScoreConnect tab can point at is reachable
 # without a broken VPU:
 #   healthy (default) | no-usb | serial-failing | no-data | stopped |
-#   intermittent | sc3-down | legacy | ocr
+#   wrong-format | intermittent | sc3-down | legacy | ocr
 # "stopped" is a console that went off (or a cable pulled at either end):
 # SC III keeps the last packet and says "Connected". "no-data" is nothing
 # readable at all ("No Scoreboard data"), as with the wrong brand set.
 # Signatures mirror what vpu-home recorded on 2026-09-29.
-_SC_SCENARIOS = ("healthy", "no-usb", "serial-failing", "no-data", "stopped",
+_SC_SCENARIOS = ("healthy", "no-usb", "serial-failing", "no-data", "stopped", "wrong-format",
                  "intermittent", "sc3-down", "legacy", "ocr")
 _DEMO_FROZEN_RAW = None
 
@@ -141,7 +141,7 @@ def _demo_sc_data_flowing():
     """Whether the demo console is sending data right now. Intermittent
     drops out for 4s in every 15s."""
     s = _demo_sc_scenario()
-    if s in ("no-usb", "serial-failing", "no-data", "sc3-down", "legacy"):
+    if s in ("no-usb", "serial-failing", "no-data", "sc3-down", "legacy", "wrong-format"):
         return False
     if s == "intermittent":
         return (int(time.time()) % 15) >= 4
@@ -177,7 +177,8 @@ def _demo_scoreconnect_live():
                 "error": "Connection refused", "ts": datetime.now().isoformat()}
     if not _demo_sc_data_flowing():
         return {"reachable": True, "rawData": None,
-                "dataStatus": "No Scoreboard data is being received",
+                "dataStatus": ("Data is present but not in the proper format" if s == "wrong-format"
+                               else "No Scoreboard data is being received"),
                 "ts": datetime.now().isoformat(), "error": None}
     raw = _demo_raw_data()
     status = "Data is present and in the correct format"
@@ -295,6 +296,7 @@ def _demo_scoreconnect():
     scenario = _demo_sc_scenario()
     has_data = _demo_sc_data_flowing()
     data_status = ("Connected" if scenario == "stopped"
+                   else "Data is present but not in the proper format" if scenario == "wrong-format"
                    else "Data is present and in the correct format" if has_data
                    else "No Scoreboard data is being received")
     raw_data = _demo_raw_data() if has_data else None
