@@ -215,6 +215,12 @@ SC3_LOG_DIR = r"C:\ProgramData\Sportzcast LLC\ScoreConnectIII\Logs"
 _CONFIG_START = "Bot Configuration - Configuration Started"
 _CONFIG_MODE_RX = re.compile(r"Bot Configuration - (ScoreLinkII|ScoreLink) USB Mode")
 _CONFIG_PROBLEM_RX = re.compile(r"Bot Configuration - Configuration problem:\s*(.*)$")
+# What a clean configuration run proves about the hardware (vpu-home,
+# 2026-09-29): a ScoreLink II answers its chip ("ScoreLinkII Chip Unique ID"),
+# a ScoreLink reports its serial interface ("SER Interface Serial number").
+# Windows cannot tell them apart (same USB chip, no USB name), so this is the
+# only measurement of the model.
+_DEVICE_SEEN = (("ScoreLinkII Chip Unique ID", "ScoreLinkII"), ("SER Interface Serial number", "ScoreLink"))
 _SERIAL_OPEN = ("Serial thread started",)
 _SERIAL_FAIL = ("SER BOT failed to connect", "Serial thread error")
 _LOG_TS_RX = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC")
@@ -236,12 +242,16 @@ def read_sc3_serial_state(log_dir=SC3_LOG_DIR, tail=400, now_utc=None):
     except OSError as e:
         return {"state": "unknown", "error": "Could not read ScoreConnect III log: %s" % e}
     state, at, failures = "unknown", None, 0
-    config = {"mode": None, "problem": None, "at": None}
+    config = {"mode": None, "problem": None, "at": None, "seen": None}
     for line in lines:
         m = _LOG_TS_RX.match(line)
         ts = m.group(1).replace(" ", "T") + "Z" if m else None
         if _CONFIG_START in line:
-            config = {"mode": None, "problem": None, "at": ts}
+            config = {"mode": None, "problem": None, "at": ts, "seen": None}
+            continue
+        seen = next((dev for needle, dev in _DEVICE_SEEN if needle in line), None)
+        if seen:
+            config["seen"] = seen
             continue
         mm = _CONFIG_MODE_RX.search(line)
         if mm:
@@ -259,8 +269,11 @@ def read_sc3_serial_state(log_dir=SC3_LOG_DIR, tail=400, now_utc=None):
             continue
         at = ts
     # configMode / configProblem describe the LAST configuration run only.
+    # deviceSeen: the model the last configuration run heard from, only when
+    # that run was clean. A run with a problem proves nothing about the model.
     return {"state": state, "at": at, "failures": failures, "configMode": config["mode"],
-            "configProblem": config["problem"], "configAt": config["at"], "error": None}
+            "configProblem": config["problem"], "configAt": config["at"],
+            "deviceSeen": None if config["problem"] else config["seen"], "error": None}
 
 
 # ── Reads ────────────────────────────────────────────────────

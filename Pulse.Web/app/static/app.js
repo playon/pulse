@@ -8952,7 +8952,10 @@ function _sccParts(data) {
   // Only "ScoreLinkII" is a measurement. Both models share one USB chip id,
   // and the collector's fallback names that chip "ScoreLink": a ScoreLink II
   // on vpu-home read "ScoreLink" (2026-09-29). So "ScoreLink" proves nothing.
-  var measuredModel = /ScoreLinkII/i.test(data.scoreLinkModel || "") ? "ScoreLinkII" : null;
+  // SC III's last clean configuration run names the model it heard from
+  // (read from its log, see read_sc3_serial_state): the only real measurement.
+  var seen = (_scc.serial || data.sc3Serial || {}).deviceSeen;
+  var measuredModel = seen || (/ScoreLinkII/i.test(data.scoreLinkModel || "") ? "ScoreLinkII" : null);
   var c = function(k) { return chain[k] && chain[k].value ? chain[k] : null; };
 
   var device = { value: null, src: "unknown" };
@@ -9570,6 +9573,15 @@ function _sccSetupResult(r) {
   s.phase = "done";
   s.result = r || { error: true, message: "No answer from Pulse" };
   if (r && !r.error && r.ok) {
+    // What the agent picked is what the school said is plugged in: record it,
+    // so the chain's pictures follow the new setup.
+    var a = r.after || {}, upd = { device: a.deviceType || (s.form && s.form.deviceType) || null };
+    var brand = _sccBrandOf(a.vendorName);
+    var had = (((cached("scoreconnect") || {}).chain || {}).controller || {}).value;
+    if (brand) { upd.controller = brand; if (brand !== had) upd.model = null; }
+    apiPost("/api/scoreconnect/chain", { update: upd }).then(function(c) {
+      var d = cached("scoreconnect"); if (c && !c.error && d) { d.chain = c.chain; _sccRender(true); }
+    });
     _scc.watchUntil = Date.now() + 45000;
     setTimeout(function() { _sccRender(true); }, 45500);
     _scc.drops = 0; _scc.wasLive = false; _scc.flow = null; _scc.status = null;

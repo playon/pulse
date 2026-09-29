@@ -138,6 +138,26 @@ class Files(unittest.TestCase):
         s = c.read_sc3_serial_state(self._log(fixed))
         self.assertEqual((s["configMode"], s["configProblem"]), ("ScoreLinkII", None))
 
+    def test_device_model_from_the_last_clean_configuration_run(self):
+        # vpu-home 2026-09-29: ScoreLink II, then swapped for a ScoreLink (1).
+        ii = ["2026-09-29 22:46:05 UTC - Main - Bot Configuration - Configuration Started",
+              "2026-09-29 22:46:05 UTC - Main - Bot Configuration - ScoreLinkII USB Mode",
+              "2026-09-29 22:46:09 UTC - Main - Bot Configuration - ScoreLinkII Chip Unique ID: 0000006CE3BE",
+              "2026-09-29 22:46:13 UTC - Main - Local BotServer - Serial thread started, Baudrate:57600"]
+        self.assertEqual(c.read_sc3_serial_state(self._log(ii))["deviceSeen"], "ScoreLinkII")
+        one = ii + ["2026-09-29 22:48:59 UTC - Main - Bot Configuration - Configuration Started",
+                    "2026-09-29 22:48:59 UTC - Main - Bot Configuration - ScoreLink USB Mode",
+                    "2026-09-29 22:48:59 UTC - Main - Bot Configuration - SER Interface Serial number: 000000652C9B",
+                    "2026-09-29 22:49:09 UTC - Main - Local BotServer - Serial thread started, Baudrate:57600"]
+        s1 = c.read_sc3_serial_state(self._log(one))
+        self.assertEqual((s1["deviceSeen"], s1["configMode"], s1["configProblem"]), ("ScoreLink", "ScoreLink", None))
+        # A run with a configuration problem proves nothing about the model.
+        bad = ["2026-09-29 21:29:16 UTC - Main - Bot Configuration - Configuration Started",
+               "2026-09-29 21:29:16 UTC - Main - Bot Configuration - ScoreLink USB Mode",
+               "2026-09-29 21:29:16 UTC - Main - Bot Configuration - Configuration problem: Unable to communicate "
+               "with the selector chip in the bot."]
+        self.assertIsNone(c.read_sc3_serial_state(self._log(bad))["deviceSeen"])
+
     def test_serial_state_unknown_without_a_log(self):
         self.assertEqual(c.read_sc3_serial_state(os.path.join(self.dir, "none"))["state"], "unknown")
 
