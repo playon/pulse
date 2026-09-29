@@ -6,11 +6,12 @@
     Dot-sourced by Get-CoordinatorHealth.ps1 and Restart-PixellotAgent.ps1.
 
     Reads the task through schtasks.exe, NOT Get-ScheduledTask. The
-    ScheduledTasks module goes through CIM, which answers "Cannot connect to
-    CIM server. Access denied" to a non-elevated token - and Pulse runs
-    non-elevated whenever a tech declines the launcher's UAC prompt. Under
-    that token Get-ScheduledTask reported the task as missing on a real VPU
-    (vpu-home, 2026-09-29) while schtasks /query and /run both worked.
+    ScheduledTasks module goes through CIM, which works for the filtered
+    admin token Pulse gets when a tech declines UAC, but answers "Cannot
+    connect to CIM server. Access denied" to a more restricted token (a
+    Basic User runas on vpu-home, 2026-09-29) - and then reads the task as
+    missing. schtasks /query and /run worked under every token tested, so
+    this is the one path that cannot misreport the task.
 
     /xml gives the locale-independent fields (RunLevel, Enabled, action,
     repetition); /fo CSV /v gives the live Status and the run-as account.

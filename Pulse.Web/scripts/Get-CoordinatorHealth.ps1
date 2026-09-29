@@ -181,7 +181,7 @@ try {
     }
 
     # netstat, not Get-NetTCPConnection: that is CIM-backed and throws "Access
-    # denied" to a non-elevated token, which took the whole collector down.
+    # denied" under a restricted token, which took the whole collector down.
     # A listener's foreign address is always *:0, which avoids matching the
     # localized LISTENING word.
     # Present means HTTP.SYS holds the reservation; it is owned by PID 4 either
