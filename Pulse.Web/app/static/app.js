@@ -9132,7 +9132,11 @@ function _sccDiagnosisHtml(breaks) {
   // its own (unless the agent closed it). The rest stay one line each.
   var top = _sortByTone(breaks, _findingTone)[0];
   if (top && top.t !== "info" && _findingOpen["scchain:" + top.f.title] == null) _findingOpen["scchain:" + top.f.title] = true;
-  var list = findingListHtml(breaks, { scope: "scchain" });
+  var list = findingListHtml(breaks, { scope: "scchain", detailExtra: function(f) {
+    if (f.code !== "sc3-down") return "";
+    return '<div class="scc-picker-foot"><button type="button" class="btn-outline btn-ol-blue" onclick="sccStartSc3(this)">' +
+      svgIcon("play", 14) + ' Start ScoreConnect III</button><span class="scc-save-state" id="scc-start-result" role="status"></span></div>';
+  } });
   return '<div class="scc-findings">' + list.html + '</div>';
 }
 
@@ -9975,9 +9979,47 @@ function _scServiceRecoveryHtml(r) {
         ${on && r.resetPeriodSec ? kvRow("Failure count resets after", _fmtResetPeriod(r.resetPeriodSec)) : ""}
       </div>
       ${evidence ? `<div class="sc3-recovery-evidence">${esc(evidence)}</div>` : ""}
-      ${!on ? `<div class="sc3-recovery-fix">Reinstalling ScoreConnect III from Pulse applies this automatically.</div>` : ""}
+      ${!on ? `<div class="sc3-recovery-fix">
+        <button type="button" class="btn-outline btn-ol-blue" id="sc3-recovery-enable" onclick="sc3EnableRecovery()">${svgIcon("shield", 14)} Turn on crash auto-restart</button>
+        <span class="sc3-recovery-note" id="sc3-recovery-result" role="status">Pulse also turns this on by itself each time it starts.</span>
+      </div>` : ""}
     </div>
   `;
+}
+
+// Apply SC III crash auto-restart now (Set-Sc3ServiceRecovery.ps1), then
+// re-read the panel so "on" is measured, not assumed.
+async function sc3EnableRecovery() {
+  var btn = document.getElementById("sc3-recovery-enable");
+  var out = document.getElementById("sc3-recovery-result");
+  if (btn) btn.disabled = true;
+  if (out) out.textContent = "Turning it on\u2026";
+  var r = await apiPost("/api/scoreconnect/service-recovery/enable", {});
+  if (!r || r.error || !r.configured) {
+    if (out) out.textContent = "Couldn't turn it on: " + ((r && r.message) || "no answer from Pulse");
+    if (btn) btn.disabled = false;
+    return;
+  }
+  _scRecoveryCache = null;
+  _scLoadServiceRecovery();
+}
+
+// Start ScoreConnect III from the chain (the same allowlisted restart the
+// Service Status tab uses; it starts a stopped service), then re-read.
+async function sccStartSc3(btn) {
+  var out = document.getElementById("scc-start-result");
+  if (btn) btn.disabled = true;
+  if (out) out.textContent = "Starting ScoreConnect III\u2026";
+  var r = await apiPost("/api/services/restart", { serviceName: "ScoreConnectIII" });
+  if (!r || !r.success) {
+    if (out) out.textContent = "Couldn't start it: " + ((r && r.message) || "no answer from Pulse");
+    if (btn) btn.disabled = false;
+    return;
+  }
+  if (out) out.textContent = "Started. Reading it again\u2026";
+  dataCache.scoreconnect = null;
+  _scRecoveryCache = null;
+  setTimeout(function() { if (currentPage === "scoreconnect") renderScoreConnect(); }, 2500);
 }
 
 function _fmtResetPeriod(sec) {

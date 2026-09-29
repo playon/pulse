@@ -4478,6 +4478,8 @@ button.scc-node:hover { background: var(--c-surface-2); border-color: var(--c-bo
     background: var(--c-surface-3);
     color: var(--c-muted);
 }
+.sc3-recovery-fix { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; }
+.sc3-recovery-note { color: var(--c-muted); }
 .sc3-recovery-fix {
     background: var(--c-tint-amber);
     color: var(--c-text);
