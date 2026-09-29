@@ -5042,7 +5042,305 @@ async def api_scoreconnect():
         _server_log.warning("ScoreConnect OCR check failed: %s", e)
     if isinstance(result, dict):
         result["scoreboardSource"] = _scoreboard_source(result, ocr)
+        if DEMO_MODE:
+            from demo_data import _demo_sc_scenario_source
+            result["scoreboardSource"] = _demo_sc_scenario_source(result["scoreboardSource"])
+            # After a demo save, report what the simulated SC III now holds.
+            if _demo_sc3 is not None and result.get("configuration"):
+                c = _demo_sc3.cfg
+                result["configuration"] = dict(result["configuration"], vendor=c["vendorName"],
+                                               sport=c["vendorSportName"],
+                                               vendorConfigurationName=c["vendorConfigurationName"])
+        try:
+            result.update(_sc_chain_payload(result))
+        except Exception as e:
+            _server_log.warning("ScoreConnect chain payload failed: %s", e)
+            result["chainError"] = str(e)
     return result
+
+
+# ── ScoreConnect chain: VPU > ScoreLink > cable > extension > console ──
+# The ScoreConnect tab draws the physical chain and points at the link that
+# is broken. Pulse measures three things on it (SC III answering, the
+# ScoreLink on USB plus SC III's own serial log, and whether scoreboard data
+# arrives); everything past the ScoreLink is either inferred from SC III's
+# vendor setting or confirmed by the tech on the phone with the school. The
+# page picks the break from live signals; the words it shows live here.
+
+import sc3_client  # noqa: E402
+
+SC_CHAIN_PATH = _os.path.join(_web_root, "pulse-scoreconnect-chain.json")
+SC3_PREVIOUS_PATH = _os.path.join(_web_root, "pulse-sc3-previous.json")
+SC3_BACKUP_DIR = _os.path.join(_web_root, "sc3-backups")
+_SC_CHAIN_IMG_DIR = _os.path.join(_app_dir, "static", "img", "sc")
+
+_demo_sc3 = None
+
+
+def _sc3_call():
+    """SC III transport: the real local REST API, or the demo simulator."""
+    global _demo_sc3
+    if DEMO_MODE:
+        if _demo_sc3 is None:
+            from sc3_demo_catalog import CATALOG
+            _demo_sc3 = sc3_client.DemoSc3(CATALOG)
+        return _demo_sc3
+    return sc3_client.http_transport(load_settings().get("scoreConnectUrl", "http://localhost:5000"))
+
+
+def _sc3_settings():
+    if DEMO_MODE:
+        return _sc3_call().settings()
+    return sc3_client.read_sc3_settings()
+
+
+def _sc3_serial_state():
+    if DEMO_MODE:
+        from demo_data import _demo_sc_serial_state
+        return _demo_sc_serial_state()
+    return sc3_client.read_sc3_serial_state()
+
+
+def _pixellot_score_source():
+    if DEMO_MODE:
+        return {"source": "SPORTZCAST", "botNumber": "02130", "error": None}
+    return sc3_client.read_graphics_cfg()
+
+
+# Which cable goes with which console. Ian is supplying the Sportzcast chart;
+# until then only rows proven on a bench are listed, and the page shows the
+# cable as the tech's answer without judging whether it fits. Keyed by brand
+# (sc3_client.brand_of) and a lowercase substring of SC III's vendor/sport
+# name. Do not add a row that has not been seen working.
+SC_CABLE_CHART = [
+    # vpu-home 2026-09-29: Daktronics All Sport 5000 on the gray 1/4" cable,
+    # SC III "Daktronics Auto Detect", data present and in the correct format.
+    {"brand": "daktronics", "match": "", "cable": "gray", "evidence": "Daktronics All Sport 5000, vpu-home bench"},
+]
+
+# Every sentence the chain says. Each break: the title is cause + effect, `say`
+# is what the agent reads to the school, `where` names the node(s) to light.
+SC_CHAIN_COPY = {
+    "breaks": {
+        "sc3-down": {
+            "title": "ScoreConnect III isn't answering on this VPU, so no score can reach the stream",
+            "say": "Restart the ScoreConnect III service (Service Status tab). If it keeps stopping, "
+                   "check that it is set to restart itself in the crash auto-restart panel below.",
+            "where": ["vpu"], "tone": "critical"},
+        "usb-missing": {
+            "title": "The ScoreLink isn't plugged into the VPU, so no score can reach the stream",
+            "say": "Ask the school to find the {device} and follow its USB cable to the VPU. Unplug it and "
+                   "plug it into a different USB port on the back of the VPU. This page shows it the moment "
+                   "Windows sees it.",
+            "where": ["usb"], "tone": "critical"},
+        "serial-failing": {
+            "title": "Windows sees the ScoreLink, but ScoreConnect can't open it",
+            "say": "Ask the school to unplug the ScoreLink's USB cable, wait ten seconds, and plug it back in. "
+                   "If this stays, restart the ScoreConnect III service.",
+            "where": ["usb", "device"], "tone": "critical"},
+        "device-mismatch": {
+            "title": "ScoreConnect is set up for a {sc3Device}, but the school says a {device} is plugged in",
+            "say": "Change ScoreConnect's device to match with Change setup below. The two models do not "
+                   "talk to ScoreConnect the same way.",
+            "where": ["device"], "tone": "warning"},
+        "vendor-mismatch": {
+            "title": "ScoreConnect is set for {vendor}, but the console is a {brand}, so the score will be wrong or missing",
+            "say": "Use Change setup below to pick the console's brand and sport. The brand and model are "
+                   "printed on the front of the console.",
+            "where": ["controller"], "tone": "warning"},
+        "no-data": {
+            "title": "No scoreboard data is reaching ScoreConnect",
+            "say": "This is normal while the console is off. Before a game, ask the school: is the console on "
+                   "and running a game? Is the {cable} cable pushed all the way into the console? {extensionAsk}"
+                   "Pick what they are seeing below to narrow it down.",
+            "where": ["cable", "extension", "controller"], "tone": "warning"},
+        "frozen": {
+            "title": "The console keeps sending the same data, so the score on the stream is stuck",
+            "say": "Ask the school to check the console is in a game, not a menu or setup screen. Turning the "
+                   "console off and on usually clears it.",
+            "where": ["controller"], "tone": "warning"},
+        "intermittent": {
+            "title": "Scoreboard data keeps dropping out ({drops} times since this page opened)",
+            "say": "That is usually a loose cable. Ask the school to push the cable in firmly at the console "
+                   "and at the ScoreLink. {extensionDrop}",
+            "where": ["cable", "extension"], "tone": "warning"},
+        "pixellot-ocr": {
+            "title": "Pixellot is set to read the score from the OCR camera, so it ignores ScoreConnect",
+            "say": "If this venue's score comes from ScoreConnect, Pixellot's scoreboard source has to be "
+                   "changed to Sportzcast. That is set in Pixellot's venue setup, not in Pulse.",
+            "where": ["vpu"], "tone": "warning"},
+        "pixellot-other": {
+            "title": "Pixellot's scoreboard source is set to {pixellotSource}",
+            "say": "Pulse has not confirmed that this setting reads ScoreConnect's data. If data arrives here "
+                   "but the stream shows no score, check this first.",
+            "where": ["vpu"], "tone": "info"},
+    },
+    "healthy": "Scoreboard data is arriving, so every link from the VPU to the console is working.",
+    "legacy": "This VPU runs {legacy}. Pulse can see the ScoreLink but not live scoreboard data, so the "
+              "cable and console links can't be checked from here.",
+    "ocr": "The OCR camera reads the score on this VPU, so ScoreConnect isn't needed.",
+    "symptoms": {
+        "no-score": {
+            "label": "No score on the stream",
+            "where": ["cable", "extension", "controller"],
+            "checks": [
+                "Is the console on, with a game running (not a menu or setup screen)?",
+                "Is the {cable} cable pushed all the way into the console?",
+                "Is the other end of the cable pushed all the way into the {device}?",
+                "{extensionCheck}",
+                "If data is arriving here but the stream still has no score, the break is after ScoreConnect: "
+                "check Pixellot's scoreboard source and the scorebug on the Graphics tab.",
+            ]},
+        "wrong-score": {
+            "label": "Score is wrong",
+            "where": ["controller"],
+            "checks": [
+                "ScoreConnect is set for {vendor}, {sport}. Ask the school for the brand and model printed on "
+                "the front of the console.",
+                "If the brand or sport is different, use Change setup. A wrong sport inside the right brand "
+                "still looks like good data to ScoreConnect, so only the school can spot it.",
+                "If the setup matches, ask whether the console itself shows the right score. ScoreConnect "
+                "only copies what the console sends.",
+            ]},
+        "freezes": {
+            "label": "Score freezes or lags",
+            "where": ["controller", "extension"],
+            "checks": [
+                "Is the console still in the game, not a menu or setup screen?",
+                "Turn the console off and on.",
+                "{extensionFreeze}",
+            ]},
+        "drops": {
+            "label": "Score drops in and out",
+            "where": ["cable", "extension"],
+            "checks": [
+                "Push the cable in firmly at the console and at the {device}.",
+                "{extensionDrop}",
+                "Make sure the cable is not pulled tight or pinched under the table.",
+            ]},
+    },
+    "fills": {
+        "extensionAsk": "If there is an extension cable, are both of its joins pushed in? ",
+        "extensionCheck": "If there is an extension cable, check both of its joins are pushed in.",
+        "extensionFreeze": "If there is an extension cable, try the cable without it.",
+        "extensionDrop": "If there is an extension cable, check both of its joins, then try without it.",
+    },
+    "saveWarning": "Saving restarts ScoreConnect's connection to the console. The score stops for about 15 "
+                   "seconds (measured on a bench unit).",
+    "saveWarningLive": "Scoreboard data is arriving right now. Saving stops the score on the stream for about "
+                       "15 seconds while ScoreConnect reconnects.",
+}
+
+
+def _sc_chain_images():
+    try:
+        return sorted(n for n in _os.listdir(_SC_CHAIN_IMG_DIR) if n.lower().endswith((".png", ".jpg", ".webp")))
+    except OSError:
+        return []
+
+
+def _sc_chain_basis(result):
+    cfg = (result or {}).get("configuration") or {}
+    return {"vendorName": cfg.get("vendor"), "scoreLinkModel": (result or {}).get("scoreLinkModel") or None}
+
+
+def _sc_chain_payload(result):
+    """The chain's extra facts on the /api/scoreconnect payload. Each read
+    fails on its own and says so; none of them blocks the page."""
+    out = {
+        "chain": sc3_client.chain_with_staleness(sc3_client.load_chain(SC_CHAIN_PATH), _sc_chain_basis(result)),
+        "chainImages": _sc_chain_images(),
+        "chainCopy": SC_CHAIN_COPY,
+        "cableChart": SC_CABLE_CHART,
+        "pixellotScore": _pixellot_score_source(),
+        "sc3Previous": sc3_client.load_previous(SC3_PREVIOUS_PATH),
+    }
+    if result.get("reachable"):
+        out["sc3Device"] = _sc3_settings()
+        out["sc3Serial"] = _sc3_serial_state()
+    return out
+
+
+@app.post("/api/scoreconnect/chain")
+async def api_scoreconnect_chain_save(request: Request):
+    """Save what the school confirmed about a chain part (cable, extension,
+    console, ScoreLink model/colour). Stored on the VPU next to the config
+    history so the next call starts from it."""
+    body = await request.json()
+    update = body.get("update") if isinstance(body, dict) else None
+    if not isinstance(update, dict) or not update:
+        return {"error": True, "message": "Nothing to save."}
+    sc = await _run_sc_status(load_settings().get("scoreConnectUrl", "http://localhost:5000"), timeout=15)
+    try:
+        chain = sc3_client.save_chain(SC_CHAIN_PATH, sc3_client.load_chain(SC_CHAIN_PATH),
+                                      update, _sc_chain_basis(sc))
+    except ValueError as e:
+        return {"error": True, "message": str(e)}
+    except OSError as e:
+        return {"error": True, "message": "Could not save on this VPU: %s" % e}
+    return {"error": False, "chain": sc3_client.chain_with_staleness(chain, _sc_chain_basis(sc))}
+
+
+@app.get("/api/scoreconnect/sc3/setup")
+async def api_sc3_setup():
+    """What the setup editor needs to open: SC III's current setup (ids, not
+    just names), its vendor list, and the bot number it is using."""
+    call = _sc3_call()
+    try:
+        cur = await asyncio.to_thread(sc3_client.current, call, _sc3_settings())
+        cat = await asyncio.to_thread(sc3_client.catalog, call)
+    except sc3_client.Sc3Error as e:
+        return {"error": True, "message": str(e)}
+    return {"error": False, "current": cur, "vendors": cat["vendors"],
+            "previous": sc3_client.load_previous(SC3_PREVIOUS_PATH)}
+
+
+@app.get("/api/scoreconnect/sc3/vendor/{vendor_id}")
+async def api_sc3_vendor(vendor_id: int):
+    """Sports and connection types for one vendor. Connection-type ids are
+    per vendor, so the editor re-fetches on every vendor change."""
+    try:
+        return dict(await asyncio.to_thread(sc3_client.vendor_detail, _sc3_call(), vendor_id), error=False)
+    except sc3_client.Sc3Error as e:
+        return {"error": True, "message": str(e)}
+
+
+async def _sc3_configure(req):
+    try:
+        res = await asyncio.to_thread(
+            sc3_client.configure, _sc3_call(), req, SC3_BACKUP_DIR, SC3_PREVIOUS_PATH,
+            read_settings=(lambda _p: _sc3_settings()),
+            backup=((lambda d, s: "demo: no backup") if DEMO_MODE else sc3_client.backup_settings))
+    except ValueError as e:
+        return {"error": True, "message": str(e)}
+    except sc3_client.Sc3Error as e:
+        return {"error": True, "message": str(e) + ". Nothing was changed."}
+    clear_ps_cache()
+    return dict(res, error=False)
+
+
+@app.post("/api/scoreconnect/sc3/configure")
+async def api_sc3_configure(request: Request):
+    """Pulse's second write action: change SC III's vendor, sport, connection
+    type, ScoreLink device and bot number. SC III's settings file is backed up
+    first (no backup, no write), SC III validates the setup itself, and the
+    setup it replaced is kept for one-step restore."""
+    body = await request.json()
+    if not isinstance(body, dict) or body.get("confirm") is not True:
+        return {"error": True, "message": "Changing ScoreConnect's setup needs explicit confirmation."}
+    return await _sc3_configure(body.get("setup"))
+
+
+@app.post("/api/scoreconnect/sc3/restore")
+async def api_sc3_restore(request: Request):
+    """Put back the setup the last Pulse save replaced."""
+    body = await request.json()
+    if not isinstance(body, dict) or body.get("confirm") is not True:
+        return {"error": True, "message": "Restoring needs explicit confirmation."}
+    prev = sc3_client.load_previous(SC3_PREVIOUS_PATH)
+    if not prev:
+        return {"error": True, "message": "There is no earlier setup saved by Pulse on this VPU."}
+    return await _sc3_configure(sc3_client.restore_request(prev))
 
 
 @app.get("/api/scoreconnect/history")
@@ -5102,8 +5400,16 @@ async def api_scoreconnect_live():
 async def api_scoreconnect_scorelink():
     """Live check of the ScoreLink USB device (a light WMI query). Polled by
     the Score Connect page every few seconds to flag a USB disconnect — which
-    drops scoreboard data the same way the controller powering off does."""
-    return await run_ps("Get-ScoreLinkStatus.ps1", timeout=8)
+    drops scoreboard data the same way the controller powering off does.
+    Carries SC III's serial state from its own log, the one signal that tells
+    "Windows sees it" apart from "ScoreConnect can open it"."""
+    res = await run_ps("Get-ScoreLinkStatus.ps1", timeout=8)
+    if isinstance(res, dict):
+        try:
+            res["sc3Serial"] = await asyncio.to_thread(_sc3_serial_state)
+        except Exception as e:
+            res["sc3Serial"] = {"state": "unknown", "error": str(e)}
+    return res
 
 
 @app.post("/api/scoreconnect/install-sc3")

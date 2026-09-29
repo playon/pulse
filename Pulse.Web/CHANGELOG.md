@@ -26,6 +26,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - Findings on the Dashboard, Network Test and Camera Connectivity are now one short list: one line per finding, most urgent first, with the fix a click away. A summary at the top says how many stop tonight's game, how many are risks tonight, how many to fix soon, and how many are just worth knowing. "Fix soon" is new: a real problem that won't affect tonight's game, such as a web filter blocking LogMeIn, used to be labelled "Risk tonight". The worth-knowing notes fold into one line, and every tab uses the same words for how serious a finding is.
 
 ### Added
+- ScoreConnect tab: a picture of the scoreboard connection (VPU, ScoreLink, cable, extension, console) that shows which link is broken, what to tell the school, and a "What is the school seeing?" checklist. What the school confirms (cable, extension, console) is remembered on the VPU for the next call.
+- ScoreConnect tab: change ScoreConnect III's vendor, sport, connection type, ScoreLink and bot number from Pulse, with a review before saving and one-click undo.
 - Pulse now checks the last week of games for missing graphics. It flags a VPU where the Pixellot software never passed the scorebug to the video (the "missing graphics" bug: the scoreboard and network are fine, but games stream with no graphics), and a VPU with no scoreboard type selected, which turns graphics off for every game.
 
 ### Fixed

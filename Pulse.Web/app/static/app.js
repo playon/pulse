@@ -8523,6 +8523,7 @@ function _scNoServiceText(data) {
 function renderScoreConnect() {
   const data = cached("scoreconnect");
   if (!data) { $page().innerHTML = sectionLoading("ScoreConnect"); fetchSection("scoreconnect"); return; }
+  _sccReset();
   // Only fatal when there's nothing to render. A legacy SC I/II box reports the
   // SC III endpoint as unreachable but still returns usable `sc2` data — don't
   // discard it. run_ps transport failures set `message`; the script's own
@@ -8591,14 +8592,6 @@ function renderScoreConnect() {
       </div>
     </div>` : "";
 
-  const slCard = data.scoreLinkConnected != null && anySC ? `
-    <div class="card sc-sl-card mt-4">
-      ${sectionTitle("link", "ScoreLink Device")}
-      <div id="sc3-scorelink" class="sc-scorelink ${data.scoreLinkConnected ? "sc-scorelink-ok" : "sc-scorelink-err"}">
-        <span class="sc-scorelink-dot"></span>
-        <span class="font-semibold">${esc(data.scoreLinkStatusLabel || (data.scoreLinkConnected ? "ScoreLink Connected" : "ScoreLink Not Detected"))}</span>
-      </div>
-    </div>` : "";
 
   // Page subtitle reflects the single active version (ScoreConnect III takes
   // precedence when present — it's the live data source). We never show both.
@@ -8618,7 +8611,10 @@ function renderScoreConnect() {
       </button>`
     )}
 
-    <!-- HERO: Live Scoreboard — only for validated vendor/sport combos -->
+    <!-- The physical chain, VPU to console, and where it is broken -->
+    ${scChainHtml(data)}
+
+    <!-- Live Scoreboard — shown whenever the parser can read the feed -->
     ${showScoreboard ? `
     <div class="sc-board sc-board-hero" id="sc3-hero-board">
       <div class="sc-header">
@@ -8682,9 +8678,6 @@ function renderScoreConnect() {
       </div>
     </div>
     ` : !(sc2 && sc2.reachable) ? `<div class="sc-board sc-board-hero sc-board-empty">${esc(_scNoServiceText(data))}</div>` : ""}
-
-    <!-- ScoreLink USB device — directly below the scoreboard hero -->
-    ${slCard}
 
     <!-- ScoreConnect → SC III Upgrade Prompt -->
     ${sc2 && sc2.reachable && !isDetected ? `
@@ -8790,6 +8783,712 @@ function renderScoreConnect() {
   } else {
     _sc3StopLivePoll();
   }
+}
+
+// ── ScoreConnect chain ───────────────────────────────────────
+// The physical path the score travels: VPU > ScoreLink (USB) > cable >
+// optional extension > scoreboard console. The top of the ScoreConnect tab
+// draws it and points at the link that is broken.
+//
+// Two kinds of fact, never drawn the same:
+//   measured  SC III answering, the ScoreLink on USB, SC III's serial state
+//             (its own log), and whether scoreboard data arrives. Data
+//             arriving proves every physical link at once.
+//   told      which cable, whether there is an extension, the console brand,
+//             the ScoreLink II colour: inferred from SC III's setup or the
+//             cable chart, or confirmed by the tech on the phone with the
+//             school (saved on the VPU, see /api/scoreconnect/chain).
+// Every sentence comes from main.py (SC_CHAIN_COPY); this file only picks.
+
+var _scc = {
+  flow: null,        // live stage: live | stale | disconnected | offline
+  usb: null,         // true | false | null (not checked)
+  serial: null,      // SC III serial state from its log
+  drops: 0,          // live -> no data transitions since the page opened
+  wasLive: false,
+  symptom: null,     // open symptom id
+  panel: null,       // open picker: device | cable | extension | controller | setup
+  sig: "",           // last drawn signal signature (redraw only on change)
+  setup: null,       // setup editor state
+  watchUntil: 0,     // after a save: watch for data until this time
+  showOnOcr: false,  // tech opened the chain on an OCR-scored unit
+};
+
+var _SCC_BRANDS = {
+  daktronics: "Daktronics", fairplay: "Fair-Play", nevco: "Nevco",
+  electromech: "Electro-Mech", other: "Other brand",
+};
+var _SCC_CABLES = { multitip: "Multi-tip", gray: "Gray 1/4\"", red: "Red", bnc: "Black BNC" };
+var _SCC_DEVICES = { ScoreLink: "ScoreLink", ScoreLinkII: "ScoreLink II" };
+var _SCC_COLORS = { yellow: "Black and yellow", blue: "Black and blue" };
+
+// Image file stem per part. Files live in static/img/sc/; a missing file
+// draws a labelled frame instead, so images can be dropped in one at a time.
+function _sccImgKey(part, v) {
+  if (part === "vpu") return "vpu";
+  if (part === "device") {
+    if (v.value === "ScoreLink") return "device-scorelink";
+    if (v.value === "ScoreLinkII") return v.color ? "device-scorelink2-" + v.color : "device-scorelink2";
+    return null;
+  }
+  if (part === "extension") return "extension";
+  if (!v.value) return null;
+  return part + "-" + v.value;
+}
+
+function _sccBrandOf(vendor) {
+  var v = (vendor || "").toLowerCase().replace(/[-\s]/g, "");
+  if (!v) return null;
+  var brands = ["daktronics", "fairplay", "nevco", "electromech"];
+  for (var i = 0; i < brands.length; i++) if (v.indexOf(brands[i]) === 0) return brands[i];
+  return "other";
+}
+
+function _sccWhen(iso) {
+  if (!iso) return "";
+  var d = new Date(iso);
+  if (isNaN(d)) return "";
+  return d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
+}
+
+// Fill {placeholders} from the chain's own facts. Unknown keys become "".
+function _sccFill(text, f) {
+  return String(text || "").replace(/\{(\w+)\}/g, function(_, k) { return f[k] != null ? f[k] : ""; });
+}
+
+// What each part is, and how Pulse knows.
+//   src: detected | confirmed | setup | chart | unknown ; stale: basis changed
+function _sccParts(data) {
+  var chain = data.chain || {};
+  var cfg = data.configuration || {};
+  var sc3dev = (data.sc3Device || {}).deviceType || null;
+  var measuredModel = /II/.test(data.scoreLinkModel || "") ? "ScoreLinkII" : (data.scoreLinkModel ? "ScoreLink" : null);
+  var c = function(k) { return chain[k] && chain[k].value ? chain[k] : null; };
+
+  var device = { value: null, color: c("deviceColor") ? chain.deviceColor.value : null, src: "unknown" };
+  if (measuredModel) device = { value: measuredModel, color: device.color, src: "detected" };
+  else if (c("device")) device = { value: chain.device.value, color: device.color, src: "confirmed", at: chain.device.at, stale: chain.device.stale };
+  else if (sc3dev) device = { value: sc3dev, color: device.color, src: "setup" };
+
+  var brandSetup = _sccBrandOf(cfg.vendor);
+  var controller = c("controller")
+    ? { value: chain.controller.value, src: "confirmed", at: chain.controller.at, stale: chain.controller.stale }
+    : brandSetup ? { value: brandSetup, src: "setup" } : { value: null, src: "unknown" };
+  controller.model = cfg.sport ? String(cfg.sport).replace(new RegExp("^" + (cfg.vendor || "") + "\\s*", "i"), "") : "";
+
+  var cable = { value: null, src: "unknown" };
+  if (c("cable")) cable = { value: chain.cable.value, src: "confirmed", at: chain.cable.at, stale: chain.cable.stale };
+  else {
+    var row = (data.cableChart || []).filter(function(r) {
+      return r.brand === controller.value && (!r.match || (cfg.sport || "").toLowerCase().indexOf(r.match) !== -1);
+    })[0];
+    if (row) cable = { value: row.cable, src: "chart" };
+  }
+  var extension = c("extension")
+    ? { value: chain.extension.value, src: "confirmed", at: chain.extension.at, stale: chain.extension.stale }
+    : { value: null, src: "unknown" };
+  return { device: device, cable: cable, extension: extension, controller: controller };
+}
+
+function _sccSrcText(p) {
+  if (p.stale) return "Check again: setup changed";
+  if (p.src === "detected") return "Detected";
+  if (p.src === "confirmed") return "Confirmed " + _sccWhen(p.at);
+  if (p.src === "setup") return "From ScoreConnect setup";
+  if (p.src === "chart") return "From cable chart";
+  return "Not confirmed";
+}
+
+function _sccLabel(part, p) {
+  if (part === "device") return p.value ? _SCC_DEVICES[p.value] + (p.value === "ScoreLinkII" && p.color ? " · " + (p.color === "blue" ? "Blue" : "Yellow") : "") : "Which ScoreLink?";
+  if (part === "cable") return p.value ? _SCC_CABLES[p.value] : "Which cable?";
+  if (part === "extension") return p.value === "yes" ? "Extension cable" : "";
+  if (part === "controller") return p.value ? _SCC_BRANDS[p.value] : "Which console?";
+  return "";
+}
+
+// Live signals as the chain reads them. The payload seeds them; the live
+// and USB polls keep them current.
+function _sccSignals(data) {
+  var legacy = !data.reachable && data.sc2 && data.sc2.reachable;
+  var dataNow = data.dataStatus && data.rawData && data.dataStatus.toLowerCase().indexOf("no scoreboard") === -1;
+  return {
+    sc3: data.reachable ? "up" : legacy ? "legacy" : "down",
+    usb: _scc.usb != null ? _scc.usb : (data.scoreLinkConnected == null ? null : !!data.scoreLinkConnected),
+    serial: _scc.serial || data.sc3Serial || null,
+    flow: _scc.flow || (data.reachable ? (dataNow ? "live" : "disconnected") : "offline"),
+    drops: _scc.drops,
+  };
+}
+
+// The breaks on the chain, most upstream first. Each is a finding record the
+// shared findings list can draw, plus `where` (the parts to light).
+function _sccBreaks(data, sig, parts) {
+  var copy = (data.chainCopy || {}).breaks || {};
+  var fills = _sccFills(data, parts);
+  var out = [];
+  function add(code, extra) {
+    var c = copy[code];
+    if (!c) return;
+    var f = Object.assign({}, fills, extra || {});
+    out.push({ code: code, severity: c.tone, title: _sccFill(c.title, f),
+               recommendation: _sccFill(c.say, f), where: c.where || [] });
+  }
+  var ser = sig.serial || {};
+  if (sig.sc3 === "down") add("sc3-down");
+  else if (sig.usb === false) add("usb-missing");
+  else if (sig.sc3 === "up" && ser.state === "failing" && (ser.failures || 0) >= 2) add("serial-failing");
+  else if (sig.sc3 === "up") {
+    if (parts.device.src === "confirmed" && fills.sc3Device && parts.device.value !== (data.sc3Device || {}).deviceType) add("device-mismatch");
+    var setupBrand = _sccBrandOf((data.configuration || {}).vendor);
+    if (parts.controller.src === "confirmed" && setupBrand && parts.controller.value !== setupBrand
+        && !(parts.controller.value === "other" && setupBrand === "other")) add("vendor-mismatch");
+    if (sig.flow === "disconnected") add(sig.drops >= 2 ? "intermittent" : "no-data");
+    else if (sig.flow === "stale") add("frozen");
+    else if (sig.drops >= 2) add("intermittent");
+  }
+  var px = data.pixellotScore || {};
+  if (!px.error && px.source && px.source !== "SPORTZCAST") add(px.source === "OCR" ? "pixellot-ocr" : "pixellot-other");
+  return out;
+}
+
+function _sccFills(data, parts) {
+  var cfg = data.configuration || {};
+  var ext = parts.extension.value;
+  var fillsCopy = (data.chainCopy || {}).fills || {};
+  var sc3dev = (data.sc3Device || {}).deviceType;
+  return {
+    device: parts.device.value ? _SCC_DEVICES[parts.device.value] : "ScoreLink",
+    sc3Device: sc3dev ? _SCC_DEVICES[sc3dev] : "",
+    cable: parts.cable.value ? _SCC_CABLES[parts.cable.value].toLowerCase() : "scoreboard",
+    vendor: cfg.vendor || "no vendor",
+    // "Daktronics 3000 Football" under vendor "Daktronics" reads as "3000 Football".
+    sport: cfg.sport ? (String(cfg.sport).replace(new RegExp("^" + (cfg.vendor || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s+", "i"), "") || cfg.sport) : "no sport",
+    brand: parts.controller.value ? _SCC_BRANDS[parts.controller.value] : "",
+    drops: _scc.drops,
+    pixellotSource: (data.pixellotScore || {}).source || "",
+    legacy: data.sc2 && /SC I|ScoreConnect$/i.test(data.sc2.productName || data.sc2.hardware || "") ? "ScoreConnect I" : "ScoreConnect II",
+    // An extension the school ruled out drops its checks entirely.
+    extensionAsk: ext === "none" ? "" : fillsCopy.extensionAsk,
+    extensionCheck: ext === "none" ? "" : fillsCopy.extensionCheck,
+    extensionFreeze: ext === "none" ? "" : fillsCopy.extensionFreeze,
+    extensionDrop: ext === "none" ? "" : fillsCopy.extensionDrop,
+  };
+}
+
+// State of each link. usb is measured; the rest are proven together by data.
+function _sccLinks(sig) {
+  var usb = sig.usb === false ? { s: "bad", w: "Not plugged in" }
+    : (sig.serial && sig.serial.state === "failing" && (sig.serial.failures || 0) >= 2) ? { s: "bad", w: "Can't open" }
+    : sig.usb === true ? { s: "ok", w: "Working" }
+    : { s: "unknown", w: "Couldn't check" };
+  var wire;
+  if (sig.sc3 !== "up" || sig.usb === false) wire = { s: "unknown", w: "Not checked" };
+  else if (sig.flow === "live") wire = sig.drops >= 2 ? { s: "warn", w: "Dropping out" } : { s: "ok", w: "Data arriving" };
+  else if (sig.flow === "stale") wire = { s: "warn", w: "Data frozen" };
+  else if (sig.flow === "disconnected") wire = { s: "bad", w: "No data" };
+  else wire = { s: "unknown", w: "Not checked" };
+  return { usb: usb, wire: wire };
+}
+
+function _sccImgHtml(data, part, p, label) {
+  var key = _sccImgKey(part, p || {});
+  var have = data.chainImages || [];
+  var file = key && have.filter(function(n) { return n.replace(/\.(png|jpe?g|webp)$/i, "") === key; })[0];
+  if (file) return '<img src="/static/img/sc/' + esc(file) + '" alt="" decoding="async">';
+  return '<span class="scc-ph" aria-hidden="true">' + esc(label || "") + '</span>';
+}
+
+function _sccNodeHtml(data, part, p, lit, brk) {
+  var role = { vpu: "VPU", device: "ScoreConnect device", cable: "Cable", extension: "Extension", controller: "Scoreboard console" }[part];
+  var label = part === "vpu" ? "This VPU" : _sccLabel(part, p);
+  var cls = "scc-node" + (brk ? " is-break" : "") + (lit ? " is-lit" : "") + (_scc.panel === part ? " is-open" : "");
+  var src, sub = "";
+  if (part === "vpu") {
+    var px = data.pixellotScore || {};
+    src = px.error ? "Couldn't read Pixellot's setting"
+      : px.source ? "Pixellot reads: " + (px.source === "SPORTZCAST" ? "ScoreConnect" : px.source === "OCR" ? "OCR camera" : px.source)
+      : "Pixellot source unknown";
+  } else {
+    src = _sccSrcText(p);
+    if (part === "controller" && p.model && p.src === "setup") sub = '<span class="scc-node-model">' + esc(p.model) + '</span>';
+  }
+  var srcCls = "scc-src" + (p && p.stale ? " scc-src-stale" : p && (p.src === "detected" || p.src === "confirmed") ? " scc-src-known" : "");
+  var inner = '<span class="scc-img">' + _sccImgHtml(data, part, p, label) + '</span>' +
+    '<span class="scc-node-text"><span class="sr-only">' + esc(role) + ': </span>' +
+    '<span class="scc-node-name">' + esc(label) + '</span>' + sub +
+    '<span class="' + srcCls + '">' + esc(src) + '</span>' +
+    (brk ? '<span class="sr-only">Problem here.</span>' : "") + '</span>';
+  if (part === "vpu") return '<div class="' + cls + '" role="listitem">' + inner + '</div>';
+  return '<div class="scc-slot" role="listitem"><button type="button" id="scc-n-' + part + '" class="' + cls + '" aria-expanded="' + (_scc.panel === part) + '" aria-controls="scc-panel"' +
+    ' onclick="sccTogglePanel(\'' + part + '\')" title="Change what is plugged in">' + inner + '</button></div>';
+}
+
+// A quiet link carries its word for screen readers only: the three cable
+// links share one state, so only the first says it out loud on screen.
+function _sccLinkHtml(l, name, brk, extraHtml, quiet) {
+  return '<div class="scc-link scc-link-' + l.s + (brk ? " is-break" : "") + '" role="listitem">' +
+    '<span class="scc-wire" aria-hidden="true"></span>' +
+    '<span class="scc-link-label' + (quiet ? " sr-only" : "") + '">' + (name ? '<span class="scc-link-name">' + esc(name) + '</span> ' : "") + esc(l.w) + '</span>' +
+    (extraHtml || "") + '</div>';
+}
+
+// The track: nodes and links. Redrawn whole when a signal changes.
+function _sccTrackHtml(data, sig, parts, breaks) {
+  var links = _sccLinks(sig);
+  var top = breaks.filter(function(b) { return b.severity !== "info"; })[0];
+  var where = top ? top.where : [];
+  var sym = _scc.symptom && ((data.chainCopy || {}).symptoms || {})[_scc.symptom];
+  var lit = sym ? sym.where : [];
+  var isBreak = function(k) { return where.indexOf(k) !== -1; };
+  var isLit = function(k) { return lit.indexOf(k) !== -1; };
+  var hasExt = parts.extension.value === "yes";
+  var addExt = hasExt ? "" : '<button type="button" id="scc-n-ext-add" class="scc-ext-add" onclick="sccTogglePanel(\'extension\')" aria-controls="scc-panel"' +
+    ' aria-expanded="' + (_scc.panel === "extension") + '">' + svgIcon("link", 12) + ' Extension?' +
+    (parts.extension.value === "none" ? '<span class="sr-only"> None confirmed</span>' : "") + '</button>';
+  var wireBrk = isBreak("cable") || isBreak("extension");
+  var h = _sccNodeHtml(data, "vpu", null, isLit("vpu"), isBreak("vpu")) +
+    _sccLinkHtml(links.usb, "USB", isBreak("usb")) +
+    _sccNodeHtml(data, "device", parts.device, isLit("device"), isBreak("device")) +
+    _sccLinkHtml(links.wire, "", wireBrk) +
+    _sccNodeHtml(data, "cable", parts.cable, isLit("cable"), isBreak("cable"));
+  if (hasExt) {
+    h += _sccLinkHtml(links.wire, "", wireBrk, "", true) +
+      _sccNodeHtml(data, "extension", parts.extension, isLit("extension"), isBreak("extension"));
+  }
+  h += _sccLinkHtml(links.wire, "", wireBrk || isBreak("controller"), addExt, true) +
+    _sccNodeHtml(data, "controller", parts.controller, isLit("controller"), isBreak("controller"));
+  return h;
+}
+
+function _sccStatusHtml(data, sig, breaks) {
+  var copy = data.chainCopy || {};
+  var act = breaks.filter(function(b) { return b.severity !== "info"; });
+  if (sig.sc3 === "legacy") return '<p class="scc-status scc-status-unknown">' + esc(_sccFill(copy.legacy, _sccFills(data, _sccParts(data)))) + '</p>';
+  if (act.length) return "";
+  if (sig.flow === "live") return '<p class="scc-status scc-status-ok">' + svgIcon("check", 16) + '<span>' + esc(copy.healthy) + '</span></p>';
+  return '<p class="scc-status scc-status-unknown">' + svgIcon("info", 16) + '<span>Pulse is still checking the link to the console.</span></p>';
+}
+
+function _sccDiagnosisHtml(breaks) {
+  if (!breaks.length) return "";
+  // The top break's "what to say" is the point of the chain, so it opens on
+  // its own (unless the agent closed it). The rest stay one line each.
+  var top = _sortByTone(breaks, _findingTone)[0];
+  if (top && top.t !== "info" && _findingOpen["scchain:" + top.f.title] == null) _findingOpen["scchain:" + top.f.title] = true;
+  var list = findingListHtml(breaks, { scope: "scchain" });
+  return '<div class="scc-findings">' + list.html + '</div>';
+}
+
+function _sccAskHtml(data) {
+  var syms = (data.chainCopy || {}).symptoms || {};
+  var ids = Object.keys(syms);
+  if (!ids.length) return "";
+  return '<div class="scc-ask"><span class="scc-ask-q" id="scc-ask-q">What is the school seeing?</span>' +
+    '<div class="scc-ask-chips" role="group" aria-labelledby="scc-ask-q">' +
+    ids.map(function(id) {
+      var on = _scc.symptom === id;
+      return '<button type="button" id="scc-chip-' + id + '" class="scc-chip' + (on ? " is-on" : "") + '" aria-pressed="' + on + '" onclick="sccSymptom(\'' + id + '\')">' + esc(syms[id].label) + '</button>';
+    }).join("") + '</div></div>';
+}
+
+function _sccSymptomHtml(data, parts) {
+  var s = _scc.symptom && ((data.chainCopy || {}).symptoms || {})[_scc.symptom];
+  if (!s) return "";
+  var f = _sccFills(data, parts);
+  var checks = s.checks.map(function(c) { return _sccFill(c, f).trim(); }).filter(Boolean);
+  var setupBtn = _scc.symptom === "wrong-score" && data.reachable && _scc.panel !== "setup"
+    ? '<button type="button" class="btn-outline btn-ol-blue" onclick="sccTogglePanel(\'setup\')">' + svgIcon("settings", 14) + ' Change setup</button>' : "";
+  return '<div class="scc-checks"><h3 class="scc-sub">Ask the school, in this order</h3><ol>' +
+    checks.map(function(c) { return "<li>" + esc(c) + "</li>"; }).join("") + '</ol>' + setupBtn + '</div>';
+}
+
+// ── Part pickers ─────────────────────────────────────────────
+
+function _sccPickerHtml(data, part, parts) {
+  var p = parts[part];
+  var opts;
+  if (part === "device") opts = [
+    { v: { device: "ScoreLink", deviceColor: null }, label: "ScoreLink", on: p.value === "ScoreLink", img: { value: "ScoreLink" } },
+    { v: { device: "ScoreLinkII", deviceColor: "yellow" }, label: "ScoreLink II", sub: _SCC_COLORS.yellow, on: p.value === "ScoreLinkII" && p.color === "yellow", img: { value: "ScoreLinkII", color: "yellow" } },
+    { v: { device: "ScoreLinkII", deviceColor: "blue" }, label: "ScoreLink II", sub: _SCC_COLORS.blue, on: p.value === "ScoreLinkII" && p.color === "blue", img: { value: "ScoreLinkII", color: "blue" } },
+  ];
+  else if (part === "cable") opts = Object.keys(_SCC_CABLES).map(function(k) {
+    return { v: { cable: k }, label: _SCC_CABLES[k], on: p.src === "confirmed" && p.value === k, img: { value: k } };
+  });
+  else if (part === "extension") opts = [
+    { v: { extension: "none" }, label: "No extension", on: p.value === "none", noImg: true },
+    { v: { extension: "yes" }, label: "Extension in line", on: p.value === "yes", img: { value: "yes" } },
+  ];
+  else opts = Object.keys(_SCC_BRANDS).map(function(k) {
+    return { v: { controller: k }, label: _SCC_BRANDS[k], on: p.src === "confirmed" && p.value === k, img: { value: k } };
+  });
+  var q = { device: "Which ScoreLink is plugged into the VPU?", cable: "Which cable runs from the ScoreLink to the console?",
+            extension: "Is there an extension cable between them?", controller: "What brand is the scoreboard console?" }[part];
+  var note = part === "device" && p.src === "detected" ? "Windows reports this model, so it is not a guess." : "";
+  var clear = { device: { device: null, deviceColor: null }, cable: { cable: null }, extension: { extension: null }, controller: { controller: null } }[part];
+  var footer = part === "controller" && data.reachable
+    ? '<button type="button" class="btn-outline btn-ol-blue" onclick="sccTogglePanel(\'setup\')">' + svgIcon("settings", 14) + ' Change ScoreConnect setup</button>' : "";
+  return '<div class="scc-picker"><h3 class="scc-sub">' + esc(q) + '</h3>' +
+    (note ? '<p class="scc-note">' + esc(note) + '</p>' : "") +
+    '<div class="scc-options" role="radiogroup" aria-label="' + esc(q) + '">' +
+    opts.map(function(o) {
+      return '<button type="button" role="radio" aria-checked="' + !!o.on + '" class="scc-opt' + (o.on ? " is-on" : "") + '"' +
+        " onclick='sccConfirm(" + esc(JSON.stringify(o.v)) + ")'>" +
+        (o.noImg ? '<span class="scc-img scc-img-none">' + svgIcon("x", 20) + '</span>' : '<span class="scc-img">' + _sccImgHtml(data, part, o.img, o.label) + '</span>') +
+        '<span class="scc-opt-label">' + esc(o.label) + '</span>' +
+        (o.sub ? '<span class="scc-opt-sub">' + esc(o.sub) + '</span>' : "") + '</button>';
+    }).join("") + '</div>' +
+    '<div class="scc-picker-foot">' +
+      "<button type=\"button\" class=\"btn-outline btn-ol-muted\" onclick='sccConfirm(" + esc(JSON.stringify(clear)) + ")'>Not sure</button>" +
+      footer + '<span class="scc-save-state" id="scc-save-state" role="status"></span>' +
+    '</div></div>';
+}
+
+async function sccConfirm(update) {
+  var st = document.getElementById("scc-save-state");
+  if (st) st.textContent = "Saving…";
+  var r = await apiPost("/api/scoreconnect/chain", { update: update });
+  var d = cached("scoreconnect");
+  if (r && !r.error && d) {
+    d.chain = r.chain;
+    _scc.panel = null;
+    _sccRender(true);
+  } else if (st) {
+    st.textContent = "Couldn't save: " + ((r && r.message) || "no answer from Pulse");
+  }
+}
+
+function sccTogglePanel(part) {
+  _scc.panel = _scc.panel === part ? null : part;
+  if (_scc.panel === "setup") _sccSetupOpen();
+  _sccRender(true);
+  var el = document.getElementById("scc-panel");
+  if (el && _scc.panel) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+function sccSymptom(id) {
+  _scc.symptom = _scc.symptom === id ? null : id;
+  _sccRender(true);
+}
+
+// ── ScoreConnect III setup editor ────────────────────────────
+// Change vendor, sport, connection type, ScoreLink device and bot number.
+// Pulse's second write action (after Storage Cleanup): review before save,
+// SC III validates, the replaced setup stays one click away.
+
+async function _sccSetupOpen() {
+  _scc.setup = { phase: "loading" };
+  var r = await api("/api/scoreconnect/sc3/setup");
+  if (!r || r.error) { _scc.setup = { phase: "error", message: (r && r.message) || "No answer from ScoreConnect III" }; _sccRender(true); return; }
+  var cur = r.current || {};
+  var parts = _sccParts(cached("scoreconnect") || {});
+  _scc.setup = {
+    phase: "edit", cur: cur, vendors: r.vendors || [], previous: r.previous,
+    form: {
+      vendorId: cur.vendorId || null, vendorSportId: cur.vendorSportId || null,
+      vendorConfigurationId: cur.vendorConfigurationId || null,
+      deviceType: cur.deviceType || (parts.device.value || null),
+      botNumber: cur.botNumber != null ? cur.botNumber : 0,
+      add: Object.assign({}, cur.additionalConfiguration || {}),
+    },
+    detail: null,
+  };
+  if (cur.vendorId) await _sccSetupVendor(cur.vendorId, true);
+  _sccRender(true);
+}
+
+async function _sccSetupVendor(vid, keep) {
+  var s = _scc.setup;
+  s.form.vendorId = vid ? Number(vid) : null;
+  s.detail = null;
+  if (!keep) { s.form.vendorSportId = null; s.form.vendorConfigurationId = null; s.form.add = {}; }
+  if (!vid) return;
+  s.loadingVendor = true;
+  _sccRender(true);
+  var d = await api("/api/scoreconnect/sc3/vendor/" + Number(vid));
+  s.loadingVendor = false;
+  if (!d || d.error) { s.vendorError = (d && d.message) || "Couldn't load this vendor's sports"; return; }
+  s.vendorError = null;
+  s.detail = d;
+  if (!keep && d.connections.length === 1) s.form.vendorConfigurationId = d.connections[0].id;
+}
+
+function sccSetupField(name, value) {
+  var s = _scc.setup;
+  if (!s || !s.form) return;
+  if (name === "vendorId") { _sccSetupVendor(value).then(function() { _sccRender(true); }); return; }
+  if (name.indexOf("add.") === 0) s.form.add[name.slice(4)] = value;
+  else s.form[name] = value === "" ? null : (name === "deviceType" ? value : Number(value));
+  if (name === "vendorConfigurationId") s.form.add = {};
+  _sccRender(true);
+}
+
+function _sccSetupConn(s) {
+  return s.detail && s.detail.connections.filter(function(c) { return c.id === s.form.vendorConfigurationId; })[0];
+}
+
+function _sccSetupIncomplete(s) {
+  var f = s.form, conn = _sccSetupConn(s);
+  if (!f.vendorId) return "Pick the console's vendor.";
+  if (!f.vendorSportId) return "Pick the sport.";
+  if (!conn) return "Pick the connection type.";
+  if (!f.deviceType) return "Pick which ScoreLink is plugged in.";
+  var missing = (conn.fields || []).filter(function(fl) { return fl.type === "int" && (f.add[fl.key] == null || f.add[fl.key] === ""); });
+  if (missing.length) return "Fill in " + missing.map(function(m) { return m.label.toLowerCase(); }).join(" and ") + ".";
+  if (f.botNumber == null || isNaN(f.botNumber) || f.botNumber < 0 || f.botNumber > 99999) return "Bot number must be 0 to 99999.";
+  return null;
+}
+
+function _sccSetupChanges(s) {
+  var f = s.form, cur = s.cur || {};
+  var vendor = (s.vendors.filter(function(v) { return v.id === f.vendorId; })[0] || {}).name;
+  var sport = ((s.detail && s.detail.sports) || []).filter(function(x) { return x.id === f.vendorSportId; })[0];
+  var conn = _sccSetupConn(s);
+  var rows = [
+    ["Vendor", cur.vendorName, vendor],
+    ["Sport", cur.vendorSportName, sport && sport.name],
+    ["Connection", cur.vendorConfigurationName, conn && conn.name],
+    ["ScoreLink", _SCC_DEVICES[cur.deviceType] || "Not known", _SCC_DEVICES[f.deviceType]],
+    ["Bot number", cur.botNumber != null ? String(cur.botNumber) : "Not set", f.botNumber === 0 ? "0 (ScoreConnect assigns one)" : String(f.botNumber)],
+  ];
+  (conn && conn.fields || []).forEach(function(fl) {
+    var was = (cur.additionalConfiguration || {})[fl.key];
+    var now = f.add[fl.key];
+    rows.push([fl.label, was == null ? "Not set" : String(was), fl.type === "bool" ? (now ? "Yes" : "No") : String(now)]);
+  });
+  return rows.map(function(r) { return { label: r[0], was: r[1] || "Not set", now: r[2] || "Not set", changed: String(r[1] || "") !== String(r[2] || "") }; });
+}
+
+function _sccSetupHtml(data) {
+  var s = _scc.setup;
+  var head = '<h3 class="scc-sub">ScoreConnect III setup</h3>';
+  if (!s || s.phase === "loading") return '<div class="scc-setup">' + head + '<p class="scc-note">Reading ScoreConnect III’s setup…</p></div>';
+  if (s.phase === "error") return '<div class="scc-setup">' + head + '<p class="scc-error">Couldn’t read ScoreConnect III’s setup: ' + esc(s.message) + '</p>' +
+    '<button type="button" class="btn-outline btn-ol-muted" onclick="sccTogglePanel(\'setup\');sccTogglePanel(\'setup\')">Try again</button></div>';
+  if (s.phase === "saving") return '<div class="scc-setup">' + head + '<p class="scc-note" role="status">' + esc(s.message) + '</p></div>';
+  if (s.phase === "done") return '<div class="scc-setup">' + head + _sccSetupDoneHtml(s) + '</div>';
+  if (s.phase === "review") return '<div class="scc-setup">' + head + _sccSetupReviewHtml(data, s) + '</div>';
+
+  var f = s.form;
+  var chainVendors = s.vendors.filter(function(v) { return v.brand && v.brand !== "other"; });
+  var opt = function(v, label, on) { return '<option value="' + esc(v) + '"' + (on ? " selected" : "") + '>' + esc(label) + '</option>'; };
+  var vendorSel = '<select id="scc-f-vendor" onchange="sccSetupField(\'vendorId\', this.value)">' + opt("", "Pick a vendor", !f.vendorId) +
+    '<optgroup label="Common consoles">' + chainVendors.map(function(v) { return opt(v.id, v.name, v.id === f.vendorId); }).join("") + '</optgroup>' +
+    '<optgroup label="All vendors">' + s.vendors.filter(function(v) { return chainVendors.indexOf(v) === -1; }).map(function(v) { return opt(v.id, v.name, v.id === f.vendorId); }).join("") + '</optgroup></select>';
+  var sports = (s.detail && s.detail.sports) || [];
+  var sportSel = s.loadingVendor ? '<span class="scc-note">Loading sports…</span>'
+    : s.vendorError ? '<span class="scc-error">' + esc(s.vendorError) + '</span>'
+    : '<select id="scc-f-sport" onchange="sccSetupField(\'vendorSportId\', this.value)"' + (sports.length ? "" : " disabled") + '>' + opt("", sports.length ? "Pick a sport" : "No sports for this vendor", !f.vendorSportId) +
+      sports.map(function(x) { return opt(x.id, x.name, x.id === f.vendorSportId); }).join("") + '</select>';
+  var conns = (s.detail && s.detail.connections) || [];
+  var connSel = '<select id="scc-f-conn" onchange="sccSetupField(\'vendorConfigurationId\', this.value)"' + (conns.length ? "" : " disabled") + '>' + opt("", "Pick a connection", !f.vendorConfigurationId) +
+    conns.map(function(c) { return opt(c.id, c.name, c.id === f.vendorConfigurationId); }).join("") + '</select>';
+  var conn = _sccSetupConn(s);
+  var extra = (conn && conn.fields || []).map(function(fl, i) {
+    var id = "scc-f-add" + i;
+    if (fl.type === "bool") return '<label class="scc-check"><input type="checkbox" id="' + id + '"' + (f.add[fl.key] ? " checked" : "") +
+      ' onchange="sccSetupField(\'add.' + esc(fl.key) + '\', this.checked)"> ' + esc(fl.label) + '</label>';
+    if (!fl.key) return '<p class="scc-note">ScoreConnect also asks for: ' + esc(fl.raw) + '. Set it in the ScoreConnect III page.</p>';
+    return '<label class="scc-field" for="' + id + '"><span>' + esc(fl.label) + (fl.hint && fl.hint.toLowerCase() !== fl.label.toLowerCase() ? ' <span class="scc-hint">(' + esc(fl.hint) + ' on the console)</span>' : "") + '</span>' +
+      '<input type="number" id="' + id + '" inputmode="numeric"' + (fl.min != null ? ' min="' + fl.min + '" max="' + fl.max + '"' : "") +
+      ' value="' + esc(f.add[fl.key] != null ? f.add[fl.key] : "") + '" onchange="sccSetupField(\'add.' + esc(fl.key) + '\', this.value === \'\' ? null : Number(this.value))">' +
+      (fl.min != null ? '<span class="scc-hint">' + fl.min + " to " + fl.max + '</span>' : "") + '</label>';
+  }).join("");
+  var instr = (conn && conn.instructions || []).map(function(t) { return '<p class="scc-note">' + esc(t) + '</p>'; }).join("");
+  var dev = ["ScoreLink", "ScoreLinkII"].map(function(t) {
+    return '<label class="scc-radio"><input type="radio" name="scc-f-dev" value="' + t + '"' + (f.deviceType === t ? " checked" : "") +
+      ' onchange="sccSetupField(\'deviceType\', this.value)"> ' + _SCC_DEVICES[t] + '</label>';
+  }).join("");
+  var inc = _sccSetupIncomplete(s);
+  var prev = s.previous && s.previous.setup;
+  return '<div class="scc-setup">' + head +
+    '<div class="scc-form">' +
+      '<label class="scc-field" for="scc-f-vendor"><span>Vendor</span>' + vendorSel + '</label>' +
+      '<label class="scc-field" for="scc-f-sport"><span>Sport</span>' + sportSel + '</label>' +
+      '<label class="scc-field" for="scc-f-conn"><span>Connection</span>' + connSel + '</label>' +
+      extra + instr +
+      '<fieldset class="scc-field"><legend>ScoreLink plugged in</legend><div class="scc-radios">' + dev + '</div></fieldset>' +
+      '<label class="scc-field" for="scc-f-bot"><span>Bot number</span><input type="number" id="scc-f-bot" min="0" max="99999" value="' + esc(f.botNumber) + '"' +
+        ' onchange="sccSetupField(\'botNumber\', this.value)"><span class="scc-hint">0 lets ScoreConnect assign one</span></label>' +
+    '</div>' +
+    '<div class="scc-picker-foot">' +
+      '<button type="button" class="btn-outline btn-ol-blue"' + (inc ? " disabled" : "") + ' onclick="sccSetupReview()">Review changes</button>' +
+      '<button type="button" class="btn-outline btn-ol-muted" onclick="sccTogglePanel(\'setup\')">Cancel</button>' +
+      (inc ? '<span class="scc-note">' + esc(inc) + '</span>' : "") +
+      (prev ? '<button type="button" class="btn-outline btn-ol-muted scc-restore" onclick="sccSetupRestore()">' + svgIcon("refresh", 14) + ' Restore ' + esc(prev.vendorSportName || "previous setup") + '</button>' : "") +
+    '</div></div>';
+}
+
+function sccSetupReview() {
+  if (_sccSetupIncomplete(_scc.setup)) return;
+  _scc.setup.phase = "review";
+  _sccRender(true);
+}
+
+function _sccSetupReviewHtml(data, s) {
+  var rows = _sccSetupChanges(s);
+  var changed = rows.filter(function(r) { return r.changed; }).length;
+  var copy = data.chainCopy || {};
+  var live = _sccSignals(data).flow === "live";
+  return '<table class="scc-diff"><thead><tr><th scope="col">Setting</th><th scope="col">Now</th><th scope="col">After saving</th></tr></thead><tbody>' +
+    rows.map(function(r) {
+      return '<tr class="' + (r.changed ? "is-changed" : "") + '"><th scope="row">' + esc(r.label) + '</th><td>' + esc(r.was) + '</td><td>' + esc(r.now) +
+        (r.changed ? '<span class="sr-only"> (changed)</span>' : "") + '</td></tr>';
+    }).join("") + '</tbody></table>' +
+    '<p class="scc-warn' + (live ? " is-live" : "") + '">' + svgIcon("triangle", 14) + '<span>' + esc(live ? copy.saveWarningLive : copy.saveWarning) + '</span></p>' +
+    '<div class="scc-picker-foot">' +
+      '<button type="button" class="btn-outline btn-ol-blue"' + (changed ? "" : " disabled") + ' onclick="sccSetupSave()">Save to ScoreConnect</button>' +
+      '<button type="button" class="btn-outline btn-ol-muted" onclick="_scc.setup.phase=\'edit\';_sccRender(true)">Back</button>' +
+      (changed ? "" : '<span class="scc-note">Nothing has changed yet.</span>') +
+    '</div>';
+}
+
+async function sccSetupSave() {
+  var s = _scc.setup, f = s.form, conn = _sccSetupConn(s);
+  var add = null;
+  if (conn && conn.fields && conn.fields.length) {
+    add = {};
+    conn.fields.forEach(function(fl) { if (fl.key) add[fl.key] = fl.type === "bool" ? !!f.add[fl.key] : f.add[fl.key]; });
+  }
+  s.phase = "saving";
+  s.message = "Saving to ScoreConnect III. It backs up the current setup, finds the ScoreLink if it needs to, then reconnects to the console. This takes up to a minute.";
+  _sccRender(true);
+  var r = await apiPost("/api/scoreconnect/sc3/configure", { confirm: true, setup: {
+    vendorSportId: f.vendorSportId, vendorConfigurationId: f.vendorConfigurationId,
+    deviceType: f.deviceType, botNumber: f.botNumber, additionalConfiguration: add } });
+  _sccSetupResult(r);
+}
+
+async function sccSetupRestore() {
+  var s = _scc.setup;
+  var prev = s.previous && s.previous.setup;
+  if (!prev) return;
+  if (!window.confirm("Put back " + (prev.vendorName || "") + " " + (prev.vendorSportName || "") + "? The score stops for about 15 seconds while ScoreConnect reconnects.")) return;
+  s.phase = "saving";
+  s.message = "Putting back the earlier setup…";
+  _sccRender(true);
+  _sccSetupResult(await apiPost("/api/scoreconnect/sc3/restore", { confirm: true }));
+}
+
+function _sccSetupResult(r) {
+  var s = _scc.setup;
+  s.phase = "done";
+  s.result = r || { error: true, message: "No answer from Pulse" };
+  if (r && !r.error && r.ok) {
+    _scc.watchUntil = Date.now() + 45000;
+    setTimeout(function() { _sccRender(true); }, 45500);
+    _scc.drops = 0; _scc.wasLive = false; _scc.flow = null;
+    dataCache.scoreconnect = null;   // re-read the new setup on the next render
+    fetchSection("scoreconnect");
+  }
+  _sccRender(true);
+}
+
+function _sccSetupDoneHtml(s) {
+  var r = s.result || {};
+  if (r.error) return '<p class="scc-error">' + esc(r.message) + '</p>' + _sccSetupAgainHtml();
+  if (!r.ok) {
+    var need = (r.requiredFields || []).map(function(f) { return f.label; }).join(", ");
+    return '<p class="scc-error">ScoreConnect III didn’t save it: ' + esc(r.warningMessage || "no reason given") +
+      (need ? ". It needs: " + esc(need) : "") + '. Nothing was changed.</p>' + _sccSetupAgainHtml();
+  }
+  var a = r.after || {};
+  var d = cached("scoreconnect");
+  var flowing = d && _sccSignals(d).flow === "live";
+  var watching = Date.now() < _scc.watchUntil;
+  var dataLine = flowing ? '<p class="scc-status scc-status-ok">' + svgIcon("check", 16) + '<span>Scoreboard data is coming through.</span></p>'
+    : watching ? '<p class="scc-note" role="status">Waiting for scoreboard data from the console…</p>'
+    : '<p class="scc-note">Saved, but no scoreboard data yet. That is expected if the console is off.</p>';
+  return '<p class="scc-saved">Saved. ScoreConnect III now reports ' + esc([a.vendorSportName, a.vendorConfigurationName, _SCC_DEVICES[a.deviceType], a.botNumber != null ? "bot " + a.botNumber : null].filter(Boolean).join(" · ")) +
+    (r.discovered ? " (it found the ScoreLink first)" : "") + '.</p>' + dataLine +
+    '<div class="scc-picker-foot"><button type="button" class="btn-outline btn-ol-muted" onclick="sccTogglePanel(\'setup\')">Close</button>' +
+    '<button type="button" class="btn-outline btn-ol-muted scc-restore" onclick="_sccSetupOpen().then(function(){ sccSetupRestore(); })">' + svgIcon("refresh", 14) + ' Undo this change</button></div>';
+}
+
+function _sccSetupAgainHtml() {
+  return '<div class="scc-picker-foot"><button type="button" class="btn-outline btn-ol-blue" onclick="_scc.setup.phase=\'edit\';_sccRender(true)">Back to the setup</button>' +
+    '<button type="button" class="btn-outline btn-ol-muted" onclick="sccTogglePanel(\'setup\')">Close</button></div>';
+}
+
+// ── Assembly + live updates ──────────────────────────────────
+
+function _sccPanelHtml(data, parts) {
+  if (!_scc.panel) return "";
+  if (_scc.panel === "setup") return _sccSetupHtml(data);
+  return _sccPickerHtml(data, _scc.panel, parts);
+}
+
+// The chain section. OCR units get one line; units with no ScoreConnect at
+// all get nothing (the empty hero below already says why).
+function scChainHtml(data) {
+  var src = data.scoreboardSource || {};
+  var copy = data.chainCopy;
+  if (!copy) return data.chainError ? '<div class="card scc"><p class="scc-error">Couldn’t draw the scoreboard connection: ' + esc(data.chainError) + '</p></div>' : "";
+  var anySC = data.reachable || (data.sc2 && data.sc2.reachable);
+  // OCR reads the score: ScoreConnect is optional, so the chain folds away
+  // behind one line, still one click from view for a venue that has both.
+  if (src.source === "ocr" && src.ok && !_scc.showOnOcr) {
+    return '<div class="card scc scc-collapsed"><p class="scc-status scc-status-ok">' + svgIcon("check", 16) + '<span>' + esc(copy.ocr) + '</span></p>' +
+      (anySC ? '<button type="button" class="btn-outline btn-ol-muted scc-show" onclick="_scc.showOnOcr=true;renderScoreConnect()">Show the ScoreConnect connection</button>' : "") + '</div>';
+  }
+  if (!anySC && !(data.error && data.scoreLinkConnected != null)) return "";
+  return '<section class="card scc" id="sc-chain" aria-labelledby="scc-title">' +
+    '<div class="scc-head"><h2 class="scc-title" id="scc-title">Scoreboard connection</h2>' +
+      (data.reachable ? '<button type="button" class="btn-outline btn-ol-blue" onclick="sccTogglePanel(\'setup\')" aria-controls="scc-panel" aria-expanded="' + (_scc.panel === "setup") + '">' + svgIcon("settings", 14) + ' Change setup</button>' : "") +
+    '</div>' +
+    '<div id="scc-body">' + _sccBodyHtml(data) + '</div>' +
+  '</section>';
+}
+
+function _sccBodyHtml(data) {
+  var parts = _sccParts(data);
+  var sig = _sccSignals(data);
+  var breaks = _sccBreaks(data, sig, parts);
+  _scc.sig = JSON.stringify([sig.sc3, sig.usb, sig.flow, sig.drops >= 2, (sig.serial || {}).state, _scc.symptom, _scc.panel]);
+  return _sccStatusHtml(data, sig, breaks) +
+    '<div class="scc-track" role="list" aria-label="Scoreboard connection, from the VPU to the console">' + _sccTrackHtml(data, sig, parts, breaks) + '</div>' +
+    _sccDiagnosisHtml(breaks) +
+    _sccAskHtml(data) +
+    '<div id="scc-panel" class="scc-panel">' + _sccPanelHtml(data, parts) + _sccSymptomHtml(data, parts) + '</div>';
+}
+
+// Redraw the chain body. `force` for user actions; live ticks redraw only
+// when a signal the chain draws actually changed. Focus stays on the control
+// the user was using.
+function _sccRender(force) {
+  var d = cached("scoreconnect");
+  var body = document.getElementById("scc-body");
+  if (!d || !body) return;
+  if (!force) {
+    var sig = _sccSignals(d);
+    var next = JSON.stringify([sig.sc3, sig.usb, sig.flow, sig.drops >= 2, (sig.serial || {}).state, _scc.symptom, _scc.panel]);
+    if (next === _scc.sig) return;
+  }
+  var focusId = document.activeElement && document.activeElement.id;
+  body.innerHTML = _sccBodyHtml(d);
+  if (focusId) { var el = document.getElementById(focusId); if (el) el.focus(); }
+}
+
+// From the live data poll (every 300ms while the tab is open).
+function _sccOnLive(stage) {
+  if (stage === "live") _scc.wasLive = true;
+  if (_scc.flow === "live" && stage === "disconnected" && _scc.wasLive) _scc.drops++;
+  _scc.flow = stage;
+  _sccRender(false);
+}
+
+// From the ScoreLink USB poll (every 5s).
+function _sccOnUsb(sl) {
+  if (sl && sl.connected != null) _scc.usb = !!sl.connected;
+  if (sl && sl.sc3Serial) _scc.serial = sl.sc3Serial;
+  _sccRender(false);
+}
+
+// A fresh page render starts a fresh session of live signals, but keeps what
+// the tech has open.
+function _sccReset() {
+  _scc.flow = null; _scc.usb = null; _scc.serial = null; _scc.drops = 0; _scc.wasLive = false; _scc.sig = "";
 }
 
 // ── SC III Live Score Polling ────────────────────────────────
@@ -8973,17 +9672,12 @@ function _sc3StopUsbPoll() {
 function _sc3StartUsbPoll() {
   _sc3StopUsbPoll();
   async function tick() {
-    if (currentPage !== "scoreconnect" || !document.getElementById("sc3-scorelink")) {
+    if (currentPage !== "scoreconnect" || !document.getElementById("sc-chain")) {
       _sc3StopUsbPoll();
       return;
     }
     var sl = await api("/api/scoreconnect/scorelink");
-    var el = document.getElementById("sc3-scorelink");
-    if (el && sl && sl.connected != null) {
-      el.className = "sc-scorelink " + (sl.connected ? "sc-scorelink-ok" : "sc-scorelink-err");
-      var label = sl.statusLabel || (sl.connected ? "ScoreLink Connected" : "ScoreLink device disconnected");
-      el.innerHTML = '<span class="sc-scorelink-dot"></span><span class="font-semibold">' + esc(label) + '</span>';
-    }
+    if (sl && !sl.error) _sccOnUsb(sl);
     _sc3UsbPoll = setTimeout(tick, _SC3_USB_POLL_MS);
   }
   // First check after one interval (initial state already rendered server-side).
@@ -9019,6 +9713,7 @@ function _sc3StartLivePoll(vendor, sport, showScoreboard) {
     }
 
     var st = _sc3ComputeStage(live);
+    _sccOnLive(st.stage);
 
     // Always refresh the raw-data readout (shown for any SC III vendor).
     if (live && live.rawData) {

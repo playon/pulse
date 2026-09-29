@@ -117,11 +117,72 @@ def _demo_raw_data():
     )
 
 
+# ScoreConnect chain scenarios. PULSE_DEMO_SC picks which chain state demo
+# mode shows, so every break the ScoreConnect tab can point at is reachable
+# without a broken VPU:
+#   healthy (default) | no-usb | serial-failing | no-data | frozen |
+#   intermittent | sc3-down | legacy | ocr
+# Signatures mirror what vpu-home recorded on 2026-09-29.
+_SC_SCENARIOS = ("healthy", "no-usb", "serial-failing", "no-data", "frozen",
+                 "intermittent", "sc3-down", "legacy", "ocr")
+_DEMO_FROZEN_RAW = None
+
+
+def _demo_sc_scenario():
+    import os
+    s = os.environ.get("PULSE_DEMO_SC", "healthy").strip().lower()
+    return s if s in _SC_SCENARIOS else "healthy"
+
+
+def _demo_sc_data_flowing():
+    """Whether the demo console is sending data right now. Intermittent
+    drops out for 4s in every 15s."""
+    s = _demo_sc_scenario()
+    if s in ("no-usb", "serial-failing", "no-data", "sc3-down", "legacy"):
+        return False
+    if s == "intermittent":
+        return (int(time.time()) % 15) >= 4
+    return True
+
+
+def _demo_sc_serial_state():
+    if _demo_sc_scenario() == "serial-failing":
+        return {"state": "failing", "at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "failures": 6, "error": None}
+    return {"state": "open", "at": (datetime.utcnow() - timedelta(hours=2)).isoformat(timespec="seconds") + "Z",
+            "failures": 0, "error": None}
+
+
+def _demo_sc_scenario_source(src):
+    """The demo unit has an OCR camera, which makes ScoreConnect optional and
+    folds the chain away. Only the "ocr" scenario keeps that; the others make
+    ScoreConnect the score source so the chain they describe is on screen."""
+    if _demo_sc_scenario() == "ocr":
+        return {"source": "ocr", "ok": True, "issue": None, "ocrConnected": True,
+                "ocrPort": "Port 3", "scoreConnectRunning": True, "ocrKnown": True}
+    running = _demo_sc_scenario() not in ("sc3-down",)
+    return {"source": "scoreconnect", "ok": running, "issue": None if running else "scoreconnect-down",
+            "ocrConnected": False, "ocrPort": None, "scoreConnectRunning": running, "ocrKnown": True}
+
+
 def _demo_scoreconnect_live():
     """Lightweight live-poll demo data — mirrors Get-ScoreConnectLive.ps1."""
+    global _DEMO_FROZEN_RAW
+    s = _demo_sc_scenario()
+    if s in ("sc3-down", "legacy"):
+        return {"reachable": False, "rawData": None, "dataStatus": None,
+                "error": "Connection refused", "ts": datetime.now().isoformat()}
+    if not _demo_sc_data_flowing():
+        return {"reachable": True, "rawData": None,
+                "dataStatus": "No Scoreboard data is being received",
+                "ts": datetime.now().isoformat(), "error": None}
+    raw = _demo_raw_data()
+    if s == "frozen":
+        _DEMO_FROZEN_RAW = _DEMO_FROZEN_RAW or raw
+        raw = _DEMO_FROZEN_RAW
     return {
         "reachable": True,
-        "rawData": _demo_raw_data(),
+        "rawData": raw,
         "dataStatus": "Data is present and in the correct format",
         "ts": datetime.now().isoformat(),
         "error": None,
@@ -227,14 +288,17 @@ def _demo_scoreconnect():
     Bot number is intentionally included but is notoriously stale on real
     hardware — SC III often reports a previous unit's number until reset.
     """
-    has_data = True
-    data_status = "Data is present and in the correct format"
+    scenario = _demo_sc_scenario()
+    has_data = _demo_sc_data_flowing()
+    data_status = ("Data is present and in the correct format" if has_data
+                   else "No Scoreboard data is being received")
     raw_data = _demo_raw_data() if has_data else None
 
     bot_id = str(random.randint(10000, 99999))
     bot_connected = random.choice([True, False])
 
-    return {
+    usb = scenario != "no-usb"
+    payload = {
         "reachable": True,
         "baseUrl": "http://localhost:5000",
         "version": "1.4.0.10",
@@ -242,10 +306,12 @@ def _demo_scoreconnect():
         "rawData": raw_data,
         "networkStatus": "Internet is detected",
         "hasLocalStream": has_data,  # local stream tracks data presence
+        # Matches the demo SC III simulator (sc3_client.DemoSc3), so the setup
+        # editor and the status payload describe the same unit.
         "configuration": {
             "vendor": "Daktronics",
-            "sport": "Daktronics Football",
-            "vendorConfigurationName": "Wireless",
+            "sport": "Daktronics 3000 Football",
+            "vendorConfigurationName": "Wired",
         },
         "botStatus": {
             "isConnected": bot_connected,
@@ -253,10 +319,12 @@ def _demo_scoreconnect():
             "botServerAddress": None,
             "lastErrorMessage": None,
         },
-        "scoreLinkConnected": True,
-        "scoreLinkPort": "COM7",
-        "scoreLinkModel": "ScoreLink",
-        "scoreLinkStatusLabel": "ScoreLink device connected (COM7)",
+        "scoreLinkConnected": usb,
+        "scoreLinkPort": "COM7" if usb else "",
+        # Blank, as on vpu-home: Windows gave the device no name, so Pulse
+        # cannot tell a ScoreLink from a ScoreLink II on its own.
+        "scoreLinkModel": "",
+        "scoreLinkStatusLabel": "ScoreLink device connected (COM7)" if usb else "ScoreLink not connected",
         "error": None,
         "sc2": {
             "reachable": True,
@@ -287,6 +355,13 @@ def _demo_scoreconnect():
             "error": None,
         },
     }
+    if scenario in ("sc3-down", "legacy"):
+        payload.update({"reachable": False, "version": None, "dataStatus": None, "rawData": None,
+                        "hasLocalStream": None, "configuration": None, "botStatus": None,
+                        "error": "ScoreConnect III is not answering on http://localhost:5000"})
+        if scenario == "sc3-down":
+            payload["sc2"] = None
+    return payload
 
 
 # ── Synthetic camera CGI probe (demo mode) ───────────────────
@@ -1094,10 +1169,11 @@ DEMO = {
         "daysBack": 7,
         "error": None,
     },
-    "Get-ScoreLinkStatus.ps1": lambda **kw: {
-        "connected": True, "port": "COM7", "model": "ScoreLink",
-        "statusLabel": "ScoreLink device connected (COM7)",
-    },
+    "Get-ScoreLinkStatus.ps1": lambda **kw: (
+        {"connected": False, "port": "", "model": "", "statusLabel": "ScoreLink not connected"}
+        if _demo_sc_scenario() == "no-usb" else
+        {"connected": True, "port": "COM7", "model": "",
+         "statusLabel": "ScoreLink device connected (COM7)"}),
     "Get-PixellotConfig.ps1": lambda **kw: {
         # Camera firmware / tvMode / serial mirror the live CGI probe
         # (_probe_camera_ip in main.py) — Admin:1234 param.cgi, same data the
