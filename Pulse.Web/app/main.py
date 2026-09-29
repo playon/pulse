@@ -5139,8 +5139,10 @@ def _pixellot_score_source():
 # Source: NFHS "Scoreboard Controllers" support article (Mar 2026), digested in
 # docs/scoreboard-controllers.md; change the two together. The multi-tip
 # cable's 9-pin end goes into the ScoreLink's SCOREBOARD port and one of its
-# three tips (red 1/4", gray 1/4", black BNC) into the console. Bench-proven:
-# All Sport 5000 on the gray tip (vpu-home, 2026-09-29).
+# three tips (red 1/4", gray 1/4", black BNC) into the console. Bench-proven
+# on vpu-home, 2026-09-29: All Sport 5000 on the gray tip (ScoreLink II,
+# 19200 baud) and Fair-Play MP-70 on the red tip (ScoreLink, 57600 baud), both
+# with the score read correctly off the live console.
 #   tip        gray | red | bnc | custom | wireless | None (not compatible)
 #   extension  trs (1/4" stereo) | coax (50-ohm only) | none
 #   match      lowercase substrings of SC III's vendor + sport names that

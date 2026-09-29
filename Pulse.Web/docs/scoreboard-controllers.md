@@ -3,9 +3,11 @@
 Source: NFHS Network support article "Scoreboard Controllers" (Mar 18, 2026,
 support.nfhsnetwork.com/s/article/Scoreboard-Controllers), exported to PDF by
 Ian 2026-09-29. This digest is the source for `SC_CONSOLES` in `app/main.py`;
-change the two together. Bench check: Daktronics All Sport 5000 on the gray
-tip, J-port, SC III "Daktronics Auto Detect", data present (vpu-home,
-2026-09-29).
+change the two together. Bench checks (vpu-home, 2026-09-29), each with the
+score read correctly off the live console: Daktronics All Sport 5000 on the
+gray tip, J port, ScoreLink II, SC III "Daktronics Auto Detect", 19200 baud;
+Fair-Play MP-70 on the red tip, ScoreLink (1), SC III "Fairplay Football Code
+23", 57600 baud.
 
 ## The cable
 
