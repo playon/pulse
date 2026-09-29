@@ -76,6 +76,7 @@ const NAV_SECTIONS = [
     { id: "scoreconnect", label: "ScoreConnect", icon: "monitor" },
     { id: "audio", label: "Audio", icon: "mic" },
     { id: "services", label: "Service Status", icon: "server" },
+    { id: "reboots", label: "Power Events", icon: "power" },
   ]},
   { label: "PIXELLOT CONFIGURATION", pages: [
     { id: "pixellot-software", label: "Pixellot Software", icon: "folder-code" },
@@ -87,7 +88,6 @@ const NAV_SECTIONS = [
     { id: "applications", label: "Applications", icon: "copy" },
     { id: "disk-health", label: "Disks", icon: "hdd" },
     { id: "environment", label: "Environment", icon: "globe" },
-    { id: "reboots", label: "Power Events", icon: "power" },
   ]},
   { label: "DATA LOGS", pages: [
     { id: "pixellot-logs", label: "Pixellot Logs", icon: "logs" },
