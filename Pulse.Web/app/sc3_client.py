@@ -18,8 +18,14 @@ What was measured on a real unit (vpu-home, SC III, 2026-09-29):
     the missing fields named; the saved config is untouched. A valid save
     takes several seconds.
   - botNumber 0 makes SC III assign itself a bot number.
+The bot number is reported, never edited (Ian, 2026-09-29): SC III's save
+call requires one, so every save sends back the bot SC III already has and
+ignores any bot number in the request.
   - Connection-type ids are per vendor, so they are always re-fetched after a
     vendor change.
+SC III's own GUI form has no bot number field (vpu-home 2026-09-29): the bot
+comes from the ScoreLink through Sportzcast's cloud ("Cloud BotServer -
+Response: BOT=51244" for the device's MAC).
 Saves always send isCloudMode false: local decode, which is how Pixellot reads
 the score on port 1402. No venue uses cloud mode (Ian, 2026-09-29).
 """
@@ -144,9 +150,13 @@ def read_sc3_settings(path=SC3_SETTINGS_PATH):
         parms = parms[slot] if 0 <= slot < len(parms) and isinstance(parms[slot], dict) else (dicts[0] if dicts else {})
     if not isinstance(parms, dict):
         return {"error": "ScoreConnect III settings are in a shape Pulse does not know"}
+    bot = parms.get("botnumber")
     return {
         "deviceType": device_type_of(parms.get("scorelink_desc")),
         "port": parms.get("port") or None,
+        # The bot SC III has saved. Its API can report a stale number, so a
+        # save sends this back (see configure()). 0 means none set.
+        "botNumber": bot if isinstance(bot, int) and not isinstance(bot, bool) else None,
         "error": None,
     }
 
@@ -306,7 +316,10 @@ def current(call, settings=None):
         "vendorConfigurationId": cfg.get("vendorConfigurationId"),
         "vendorConfigurationName": cfg.get("vendorConfigurationName"),
         "additionalConfiguration": cfg.get("additionalConfiguration"),
-        "botNumber": bot if bst == 200 and isinstance(bot, int) else None,
+        # The bot SC III has saved (settings.json), else what its API reports.
+        # This is also exactly what a save sends back (configure()).
+        "botNumber": settings.get("botNumber") if isinstance(settings.get("botNumber"), int)
+                     else (bot if bst == 200 and isinstance(bot, int) else None),
         "deviceType": settings.get("deviceType"),
         "devicesFound": [d.get("type") for d in devices if isinstance(d, dict)],
     }
@@ -361,9 +374,6 @@ def validate_request(req):
     dt = req.get("deviceType")
     if dt not in DEVICE_TYPES:
         raise ValueError("Pick which ScoreLink is plugged in")
-    bot = _int(req.get("botNumber", 0), "Bot number")
-    if bot < 0 or bot > 99999:
-        raise ValueError("Bot number must be 0 to 99999")
     add = req.get("additionalConfiguration")
     if add is not None:
         if not isinstance(add, dict):
@@ -378,7 +388,6 @@ def validate_request(req):
     return {
         "vendorSportId": _int(req.get("vendorSportId"), "Sport"),
         "vendorConfigurationId": _int(req.get("vendorConfigurationId"), "Connection type"),
-        "botNumber": bot,
         "deviceType": dt,
         "additionalConfiguration": add,
     }
@@ -394,7 +403,20 @@ def configure(call, req, backup_dir, previous_path, settings_path=SC3_SETTINGS_P
       5. read back what SC III now reports.
     Returns {ok, before, after, warningMessage, requiredFields, discovered}."""
     want = validate_request(req)
-    before = current(call, read_settings(settings_path) if read_settings else None)
+    settings = read_settings(settings_path) if read_settings else None
+    before = current(call, settings)
+    # Send back the bot SC III already has, never one from the page: first the
+    # value SC III saved in settings.json (its API can be stale), else what its
+    # API reports. "No bot" (0) goes back as 0, exactly what SC III had. If
+    # neither can be read, do not guess: change nothing.
+    stored = (settings or {}).get("botNumber")
+    bot = stored if isinstance(stored, int) else before.get("botNumber")
+    if isinstance(bot, int) and bot < 0:
+        bot = 0
+    if bot is None:
+        return {"ok": False, "discovered": False, "before": before, "backup": None, "requiredFields": [],
+                "warningMessage": "Pulse could not read ScoreConnect III's bot number, so it changed nothing "
+                                  "(saving without it would give this VPU a new bot)."}
     backup_path = backup(backup_dir, settings_path)
 
     st, devices = call("GET", "/api/configuration/get-devices-list")
@@ -413,7 +435,7 @@ def configure(call, req, backup_dir, previous_path, settings_path=SC3_SETTINGS_P
     body = {
         "deviceId": dev.get("id"),
         "vendorSportId": want["vendorSportId"],
-        "botNumber": want["botNumber"],
+        "botNumber": bot,
         "isCloudMode": False,
         "vendorConfigurationId": want["vendorConfigurationId"],
         "additionalConfiguration": want["additionalConfiguration"],
@@ -452,7 +474,6 @@ def restore_request(previous):
     return {
         "vendorSportId": s.get("vendorSportId"),
         "vendorConfigurationId": s.get("vendorConfigurationId"),
-        "botNumber": s.get("botNumber") or 0,
         "deviceType": s.get("deviceType") or "ScoreLinkII",
         "additionalConfiguration": s.get("additionalConfiguration"),
     }
@@ -604,6 +625,7 @@ class DemoSc3:
             self.config_problem = ("Unable to communicate with the selector chip in the bot. Please retry the "
                                    "bot configuration. If the issue persists, contact support for further "
                                    "assistance.") if dev["type"] == "ScoreLink" else None
+        self.bot_sent = body.get("botNumber")
         self.bot = body.get("botNumber") or 51244
         self.cfg = {"vendorId": vendor_id, "vendorName": self._vendor(vendor_id)["description"],
                     "vendorSportId": sport_id, "vendorSportName": sport["description"],

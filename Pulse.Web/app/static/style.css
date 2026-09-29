@@ -3272,7 +3272,9 @@ button.scc-node:hover { background: var(--c-surface-2); border-color: var(--c-bo
 .scc-ext.is-break { border: 1px solid var(--c-accent-red); background: var(--c-tint-red-faint); }
 .scc-ext.is-stale { color: var(--c-accent-amber); }
 
-.scc-findings { margin-top: 0.75rem; }
+/* Findings sit first on the tab, in the same card every tab uses. */
+#scc-findings-wrap > .card { margin-top: 1.25rem; }
+#page > #scc-findings-wrap + .card { margin-top: 1.25rem; }
 .scc-ask { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; margin-top: 1rem; }
 .scc-ask-q { font-size: 0.8rem; font-weight: 600; color: var(--c-muted); }
 .scc-ask-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
@@ -3320,6 +3322,7 @@ button.scc-node:hover { background: var(--c-surface-2); border-color: var(--c-bo
 }
 .scc-field select:focus-visible, .scc-field input:focus-visible { outline: 2px solid var(--c-accent-blue); outline-offset: 1px; }
 .scc-field select:disabled { opacity: 0.6; }
+.scc-readonly { padding: 0.45rem 0; font-size: 0.85rem; font-weight: 600; color: var(--c-text); font-variant-numeric: tabular-nums; }
 .scc-radios { display: flex; gap: 1rem; flex-wrap: wrap; padding-top: 0.3rem; }
 .scc-radio, .scc-check { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; color: var(--c-text); }
 .scc-radio input, .scc-check input { accent-color: var(--c-accent-blue); }

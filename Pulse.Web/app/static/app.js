@@ -8643,7 +8643,12 @@ function renderScoreConnect() {
   if (data.error && !data.reachable && !(data.sc2 && data.sc2.reachable)) {
     // Still surface the recorded configuration history — "what was this box
     // configured as before it went down" is exactly when it's most useful.
-    $page().innerHTML = errorBox(data.message || (typeof data.error === "string" ? data.error : null))
+    // SC III down on load: the findings (with Start ScoreConnect III) and the
+    // chain still draw, since that is exactly when the agent needs them.
+    _sccReset();
+    $page().innerHTML = '<div id="scc-findings-wrap">' + _sccFindingsTopHtml(data) + '</div>'
+      + scChainHtml(data)
+      + errorBox(data.message || (typeof data.error === "string" ? data.error : null))
       + '<div id="sc-config-history-wrap">' + (_scHistCache ? _scConfigHistoryHtml(_scHistCache, null) : "") + "</div>";
     _scLoadConfigHistory(null);
     return;
@@ -8725,7 +8730,8 @@ function renderScoreConnect() {
       </button>`
     )}
 
-    <!-- The physical chain, VPU to console, and where it is broken -->
+    <!-- Findings first, like every other tab; then the physical chain -->
+    <div id="scc-findings-wrap">${_sccFindingsTopHtml(data)}</div>
     ${scChainHtml(data)}
 
     <!-- Live Scoreboard — shown whenever the parser can read the feed -->
@@ -9248,7 +9254,17 @@ function _sccDiagnosisHtml(breaks) {
     return '<div class="scc-picker-foot"><button type="button" class="btn-outline btn-ol-blue" onclick="sccStartSc3(this)">' +
       svgIcon("play", 14) + ' Start ScoreConnect III</button><span class="scc-save-state" id="scc-start-result" role="status"></span></div>';
   } });
-  return '<div class="scc-findings">' + list.html + '</div>';
+  // Same card as every other tab's findings, first on the page (Ian).
+  return '<div class="card" id="scc-findings-card">' +
+    '<div class="findings-hdr">' + sectionTitle("alert", "Findings") + list.summary + '</div>' +
+    list.html + '</div>';
+}
+
+// The findings card for the top of the tab; empty when there is nothing.
+function _sccFindingsTopHtml(data) {
+  if (!data.chainCopy) return "";
+  var parts = _sccParts(data), sig = _sccSignals(data);
+  return _sccDiagnosisHtml(_sccBreaks(data, sig, parts));
 }
 
 function _sccAskHtml(data) {
@@ -9390,7 +9406,6 @@ async function _sccSetupOpen() {
       vendorId: cur.vendorId || null, vendorSportId: cur.vendorSportId || null,
       vendorConfigurationId: cur.vendorConfigurationId || null,
       deviceType: cur.deviceType || (parts.device.value || null),
-      botNumber: cur.botNumber != null ? cur.botNumber : 0,
       add: Object.assign({}, cur.additionalConfiguration || {}),
     },
     detail: null,
@@ -9437,7 +9452,6 @@ function _sccSetupIncomplete(s) {
   if (!f.deviceType) return "Pick which ScoreLink is plugged in.";
   var missing = (conn.fields || []).filter(function(fl) { return fl.type === "int" && (f.add[fl.key] == null || f.add[fl.key] === ""); });
   if (missing.length) return "Fill in " + missing.map(function(m) { return m.label.toLowerCase(); }).join(" and ") + ".";
-  if (f.botNumber == null || isNaN(f.botNumber) || f.botNumber < 0 || f.botNumber > 99999) return "Bot number must be 0 to 99999.";
   return null;
 }
 
@@ -9451,7 +9465,8 @@ function _sccSetupChanges(s) {
     ["Sport", cur.vendorSportName, sport && sport.name],
     ["Connection", cur.vendorConfigurationName, conn && conn.name],
     ["ScoreLink", _SCC_DEVICES[cur.deviceType] || "Not known", _SCC_DEVICES[f.deviceType]],
-    ["Bot number", cur.botNumber != null ? String(cur.botNumber) : "Not set", f.botNumber === 0 ? "0 (ScoreConnect assigns one)" : String(f.botNumber)],
+    // Reported, never edited: the save keeps SC III's own bot number.
+    ["Bot number", cur.botNumber != null ? String(cur.botNumber) : "Not set", cur.botNumber != null ? String(cur.botNumber) : "Not set"],
   ];
   (conn && conn.fields || []).forEach(function(fl) {
     var was = (cur.additionalConfiguration || {})[fl.key];
@@ -9472,18 +9487,23 @@ function _sccSetupHtml(data) {
   if (s.phase === "review") return '<div class="scc-setup">' + head + _sccSetupReviewHtml(data, s) + '</div>';
 
   var f = s.form;
-  var chainVendors = s.vendors.filter(function(v) { return v.brand && v.brand !== "other"; });
+  // Common consoles: the four chain brands plus Spectrum and Varsity (Ian).
+  var chainVendors = s.vendors.filter(function(v) {
+    return (v.brand && v.brand !== "other") || /^(spectrum|varsity)/i.test(v.name || "");
+  });
   var opt = function(v, label, on) { return '<option value="' + esc(v) + '"' + (on ? " selected" : "") + '>' + esc(label) + '</option>'; };
-  var vendorSel = '<select id="scc-f-vendor" onchange="sccSetupField(\'vendorId\', this.value)">' + opt("", "Pick a vendor", !f.vendorId) +
+  // A "Pick a ..." prompt shows until something is chosen but can't itself be chosen.
+  var prompt = function(label, on) { return '<option value="" disabled' + (on ? " selected" : "") + '>' + esc(label) + '</option>'; };
+  var vendorSel = '<select id="scc-f-vendor" onchange="sccSetupField(\'vendorId\', this.value)">' + prompt("Pick a vendor", !f.vendorId) +
     '<optgroup label="Common consoles">' + chainVendors.map(function(v) { return opt(v.id, v.name, v.id === f.vendorId); }).join("") + '</optgroup>' +
     '<optgroup label="All vendors">' + s.vendors.filter(function(v) { return chainVendors.indexOf(v) === -1; }).map(function(v) { return opt(v.id, v.name, v.id === f.vendorId); }).join("") + '</optgroup></select>';
   var sports = (s.detail && s.detail.sports) || [];
   var sportSel = s.loadingVendor ? '<span class="scc-note">Loading sports…</span>'
     : s.vendorError ? '<span class="scc-error">' + esc(s.vendorError) + '</span>'
-    : '<select id="scc-f-sport" onchange="sccSetupField(\'vendorSportId\', this.value)"' + (sports.length ? "" : " disabled") + '>' + opt("", sports.length ? "Pick a sport" : "No sports for this vendor", !f.vendorSportId) +
+    : '<select id="scc-f-sport" onchange="sccSetupField(\'vendorSportId\', this.value)"' + (sports.length ? "" : " disabled") + '>' + prompt(sports.length ? "Pick a sport" : "No sports for this vendor", !f.vendorSportId) +
       sports.map(function(x) { return opt(x.id, x.name, x.id === f.vendorSportId); }).join("") + '</select>';
   var conns = (s.detail && s.detail.connections) || [];
-  var connSel = '<select id="scc-f-conn" onchange="sccSetupField(\'vendorConfigurationId\', this.value)"' + (conns.length ? "" : " disabled") + '>' + opt("", "Pick a connection", !f.vendorConfigurationId) +
+  var connSel = '<select id="scc-f-conn" onchange="sccSetupField(\'vendorConfigurationId\', this.value)"' + (conns.length ? "" : " disabled") + '>' + prompt("Pick a connection", !f.vendorConfigurationId) +
     conns.map(function(c) { return opt(c.id, c.name, c.id === f.vendorConfigurationId); }).join("") + '</select>';
   var conn = _sccSetupConn(s);
   var extra = (conn && conn.fields || []).map(function(fl, i) {
@@ -9518,8 +9538,8 @@ function _sccSetupHtml(data) {
       '<label class="scc-field" for="scc-f-conn"><span>Connection</span>' + connSel + '</label>' +
       extra + instr +
       '<fieldset class="scc-field"><legend>ScoreLink plugged in</legend><div class="scc-radios">' + dev + '</div></fieldset>' +
-      '<label class="scc-field" for="scc-f-bot"><span>Bot number</span><input type="number" id="scc-f-bot" min="0" max="99999" value="' + esc(f.botNumber) + '"' +
-        ' onchange="sccSetupField(\'botNumber\', this.value)"><span class="scc-hint">0 lets ScoreConnect assign one</span></label>' +
+      '<div class="scc-field"><span>Bot number</span><span class="scc-readonly">' + esc(s.cur.botNumber != null ? String(s.cur.botNumber) : "Not set") + '</span>' +
+        '<span class="scc-hint">Set by ScoreConnect III from the ScoreLink. Pulse reports it and saving keeps it as it is.</span></div>' +
     '</div>' +
     '<div class="scc-picker-foot">' +
       '<button type="button" class="btn-outline btn-ol-blue"' + (inc ? " disabled" : "") + ' onclick="sccSetupReview()">Review changes</button>' +
@@ -9565,7 +9585,7 @@ async function sccSetupSave() {
   _sccRender(true);
   var r = await apiPost("/api/scoreconnect/sc3/configure", { confirm: true, setup: {
     vendorSportId: f.vendorSportId, vendorConfigurationId: f.vendorConfigurationId,
-    deviceType: f.deviceType, botNumber: f.botNumber, additionalConfiguration: add } });
+    deviceType: f.deviceType, additionalConfiguration: add } });
   _sccSetupResult(r);
 }
 
@@ -9659,7 +9679,6 @@ function _sccBodyHtml(data) {
   _scc.sig = JSON.stringify([sig.sc3, sig.usb, sig.flow, sig.stopped, sig.drops >= 2, (sig.serial || {}).state, !!(sig.serial || {}).configProblem, _scc.symptom, _scc.panel]);
   return _sccStatusHtml(data, sig, breaks) +
     '<div class="scc-track" role="list" aria-label="Scoreboard connection, from the VPU to the console">' + _sccTrackHtml(data, sig, parts, breaks) + '</div>' +
-    _sccDiagnosisHtml(breaks) +
     _sccAskHtml(data) +
     '<div id="scc-panel" class="scc-panel">' + _sccPanelHtml(data, parts) + _sccSymptomHtml(data, parts) + '</div>';
 }
@@ -9678,6 +9697,8 @@ function _sccRender(force) {
   }
   var focusId = document.activeElement && document.activeElement.id;
   body.innerHTML = _sccBodyHtml(d);
+  var top = document.getElementById("scc-findings-wrap");
+  if (top) top.innerHTML = _sccFindingsTopHtml(d);
   if (focusId) { var el = document.getElementById(focusId); if (el) el.focus(); }
 }
 

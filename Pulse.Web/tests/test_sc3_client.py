@@ -83,7 +83,7 @@ class Files(unittest.TestCase):
 
     def test_settings_json_device(self):
         p = self._write("settings.json", '{"parms": {"scorelink_desc": "USB ScoreLinkII", "port": "COM4"}}')
-        self.assertEqual(c.read_sc3_settings(p), {"deviceType": "ScoreLinkII", "port": "COM4", "error": None})
+        self.assertEqual(c.read_sc3_settings(p), {"deviceType": "ScoreLinkII", "port": "COM4", "botNumber": None, "error": None})
         self.assertEqual(c.device_type_of("USB ScoreLink"), "ScoreLink")
 
     def test_settings_json_parms_is_a_list_per_slot(self):
@@ -91,7 +91,7 @@ class Files(unittest.TestCase):
         p = self._write("settings.json", '{"slot": 1, "slots": 2, "parms": ['
                         '{"scorelink_desc": "USB ScoreLink", "port": "COM3"},'
                         '{"scorelink_desc": "USB ScoreLinkII", "port": "COM8"}]}')
-        self.assertEqual(c.read_sc3_settings(p), {"deviceType": "ScoreLinkII", "port": "COM8", "error": None})
+        self.assertEqual(c.read_sc3_settings(p), {"deviceType": "ScoreLinkII", "port": "COM8", "botNumber": None, "error": None})
         p = self._write("settings.json", '{"slot": 0, "slots": 1, "parms": [{"scorelink_desc": "USB ScoreLinkII", "port": "COM8"}]}')
         self.assertEqual(c.read_sc3_settings(p)["deviceType"], "ScoreLinkII")
         p = self._write("settings.json", '{"parms": "nonsense"}')
@@ -214,9 +214,41 @@ class Configure(unittest.TestCase):
                         read_settings=None, backup=boom, sleep=lambda _s: None)
         self.assertEqual(self.sc3.cfg["vendorSportId"], 180)
 
+    def test_bot_number_is_kept_whatever_the_request_says(self):
+        self.assertEqual(self.sc3.bot, 54025)
+        r = self._go(vendorSportId=10, vendorConfigurationId=17, botNumber=12345)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.sc3.bot, 54025)
+        self.assertEqual(r["after"]["botNumber"], 54025)
+
+    def test_saved_bot_beats_a_stale_api_bot_and_no_bot_stays_no_bot(self):
+        # settings.json says 51244 while the API reports a stale 54025: 51244 goes back.
+        r = c.configure(self.sc3, {"vendorSportId": 10, "vendorConfigurationId": 17, "deviceType": "ScoreLinkII"},
+                        self.dir, self.prev, read_settings=lambda _p: dict(self.sc3.settings(), botNumber=51244),
+                        backup=lambda d, s: "backup", sleep=lambda _s: None)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.sc3.bot_sent, 51244)
+        # SC III has no bot saved (0): Pulse sends 0 back, never a number of its own.
+        r = c.configure(self.sc3, {"vendorSportId": 180, "vendorConfigurationId": 11, "deviceType": "ScoreLinkII"},
+                        self.dir, self.prev, read_settings=lambda _p: dict(self.sc3.settings(), botNumber=0),
+                        backup=lambda d, s: "backup", sleep=lambda _s: None)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.sc3.bot_sent, 0)
+
+    def test_unreadable_bot_number_refuses_the_write(self):
+        real = self.sc3.__call__
+        def call(method, path, body=None, timeout=6):
+            if path == "/api/configuration/get-bot-number":
+                return 500, None
+            return real(method, path, body, timeout)
+        r = c.configure(call, {"vendorSportId": 10, "vendorConfigurationId": 17, "deviceType": "ScoreLinkII"},
+                        self.dir, self.prev, read_settings=None, backup=lambda d, s: "backup", sleep=lambda _s: None)
+        self.assertFalse(r["ok"])
+        self.assertIn("bot number", r["warningMessage"])
+        self.assertEqual(self.sc3.cfg["vendorSportId"], 180)
+
     def test_request_validation(self):
         for bad, msg in (({"deviceType": "USB"}, "ScoreLink"),
-                         ({"botNumber": 100000}, "0 to 99999"),
                          ({"vendorSportId": "x"}, "whole number")):
             req = {"vendorSportId": 10, "vendorConfigurationId": 17, "botNumber": 0, "deviceType": "ScoreLink"}
             req.update(bad)
