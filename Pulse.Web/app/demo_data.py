@@ -1330,7 +1330,7 @@ DEMO = {
             "elevated": True,
             "repeatIntervalMinutes": 1,
             "action": "C:\\Pixellot\\bin\\KeepAgentUp.exe",
-            "source": "Get-ScheduledTask",
+            "source": "schtasks",
         },
         "processes": [
             {"name": "KeepAgentUp", "pidFirst": 9940, "pidSecond": 9940,

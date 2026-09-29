@@ -56,6 +56,8 @@ $wsPort        = 9001
 $wsPrefix      = 'http://+:9001/'
 $taskName      = 'KeepAgentUp'
 
+. (Join-Path $PSScriptRoot '_WatchdogTask.ps1')
+
 # Log signatures. Line numbers are part of the signature - the failing catch
 # block (218) and the success path (206) are in the same Start() method, so the
 # pair tells you which branch ran.
@@ -88,67 +90,6 @@ function Get-ProcOwner {
         }
     } catch { }
     return $null
-}
-
-function Get-WatchdogTask {
-    $info = [ordered]@{
-        present               = $false
-        state                 = $null
-        runAs                 = $null
-        runLevel              = $null
-        elevated              = $null
-        repeatIntervalMinutes = $null
-        action                = $null
-        source                = $null
-    }
-    try {
-        $t = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-        if ($t) {
-            $info.present  = $true
-            $info.source   = 'Get-ScheduledTask'
-            $info.state    = [string]$t.State
-            $info.runAs    = [string]$t.Principal.UserId
-            $info.runLevel = [string]$t.Principal.RunLevel
-            # RunLevel Highest is the elevated token Coordinator inherits.
-            $info.elevated = ($info.runLevel -eq 'Highest')
-            $act = @($t.Actions)
-            if ($act.Count -gt 0) { $info.action = [string]$act[0].Execute }
-            foreach ($trg in @($t.Triggers)) {
-                if ($trg.Repetition -and $trg.Repetition.Interval) {
-                    # ISO-8601 duration, e.g. PT1M. A healthy box self-heals
-                    # within one interval, so "the process is missing" only
-                    # matters alongside a broken task.
-                    $iso = [string]$trg.Repetition.Interval
-                    $m = [regex]::Match($iso, 'PT(?:(\d+)H)?(?:(\d+)M)?')
-                    if ($m.Success) {
-                        $mins = 0
-                        if ($m.Groups[1].Value) { $mins += ([int]$m.Groups[1].Value) * 60 }
-                        if ($m.Groups[2].Value) { $mins += [int]$m.Groups[2].Value }
-                        if ($mins -gt 0) { $info.repeatIntervalMinutes = $mins }
-                    }
-                    break
-                }
-            }
-            return $info
-        }
-    } catch { }
-
-    # Fallback for images where the ScheduledTasks module is unavailable.
-    try {
-        $raw = & schtasks.exe /query /tn $taskName /fo LIST /v 2>$null
-        if ($LASTEXITCODE -eq 0 -and $raw) {
-            $info.present = $true
-            $info.source  = 'schtasks'
-            foreach ($line in $raw) {
-                if ($line -match '^\s*Status:\s*(.+?)\s*$')        { $info.state = $Matches[1] }
-                if ($line -match '^\s*Run As User:\s*(.+?)\s*$')   { $info.runAs = $Matches[1] }
-                if ($line -match '^\s*Task To Run:\s*(.+?)\s*$')   { $info.action = $Matches[1] }
-            }
-            # schtasks /v does not print RunLevel, so elevation stays unknown
-            # rather than being guessed.
-        }
-    } catch { }
-    return $info
 }
 
 function Get-LogSignatureHits {
@@ -239,9 +180,14 @@ try {
         urlAclDetail    = $null
     }
 
-    $listen = @(Get-NetTCPConnection -State Listen -LocalPort $wsPort -ErrorAction SilentlyContinue)
+    # netstat, not Get-NetTCPConnection: that is CIM-backed and throws "Access
+    # denied" to a non-elevated token, which took the whole collector down.
+    # A listener's foreign address is always *:0, which avoids matching the
+    # localized LISTENING word.
     # Present means HTTP.SYS holds the reservation; it is owned by PID 4 either
     # way, so we record only presence, never the owner.
+    $listenRx = '^\s*TCP\s+\S+:' + $wsPort + '\s+\S+:0\s'
+    $listen = @(& netstat.exe -ano -p TCP 2>$null | Where-Object { $_ -match $listenRx })
     $ws.listening = ($listen.Count -gt 0)
 
     if (Test-Path -LiteralPath $logDir) {
@@ -274,7 +220,7 @@ try {
     }
 
     # --- why the token could be wrong ---------------------------------------
-    $task = Get-WatchdogTask
+    $task = Get-KeepAgentUpTask -TaskName $taskName
 
     $uacEnabled = $null
     try {

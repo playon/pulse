@@ -45,6 +45,8 @@ $ErrorActionPreference = 'Stop'
 $keepAgentPath = 'C:\pixellot\bin\keepagentup.exe'
 $taskName      = 'KeepAgentUp'
 
+. (Join-Path $PSScriptRoot '_WatchdogTask.ps1')
+
 # Agent/coordinator may be installed as Windows services, or run as bare
 # processes under the keepagentup watchdog (common on fleet VPUs, where no
 # service exists at all). Check both so status doesn't read 'NotFound' on a
@@ -92,22 +94,8 @@ function Test-IsElevated {
     }
 }
 
-function Get-WatchdogTaskState {
-    $info = [ordered]@{ present = $false; state = $null; runLevel = $null; elevated = $null }
-    try {
-        $t = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-        if ($t) {
-            $info.present  = $true
-            $info.state    = [string]$t.State
-            $info.runLevel = [string]$t.Principal.RunLevel
-            $info.elevated = ($info.runLevel -eq 'Highest')
-        }
-    } catch { }
-    return $info
-}
-
 try {
-    $task       = Get-WatchdogTaskState
+    $task       = Get-KeepAgentUpTask -TaskName $taskName
     $isElevated = Test-IsElevated
     $before     = Get-StackState
 
