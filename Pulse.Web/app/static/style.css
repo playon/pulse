@@ -3017,7 +3017,6 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
 .sc-board-hero .sc-score-sep  { font-size: 2.2rem; }
 .sc-board-hero .sc-clock      { font-size: 1.8rem; }
 .sc-board-hero .sc-period-label { font-size: 1.5rem; font-weight: 800; color: var(--c-board-text); letter-spacing: 0.04em; margin-bottom: 0.15rem; }
-.sc-board-hero .sc-data-desc  { font-size: 1.05rem; font-weight: 700; color: var(--c-board-text-2); letter-spacing: 0.06em; margin-top: 0.35rem; }
 .sc-board-hero .sc-poss       { width: 10px; height: 10px; }
 .sc-board-hero .sc-stat-val   { font-size: 1.15rem; }
 .sc-board-hero .sc-stat-lbl   { font-size: 0.55rem; }
@@ -3041,8 +3040,6 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
     gap: 0;
     margin-bottom: 1rem;
 }
-.sc-team-home, .sc-team-away { display: flex; flex-direction: column; gap: 2px; }
-.sc-team-away { text-align: right; align-items: flex-end; }
 /* Live-score columns: caption, team name and score share one centre line on
    both sides, so the two scores mirror each other across the clock. */
 .sc-score-col {
@@ -3138,36 +3135,10 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
     letter-spacing: 0.04em;
 }
 
-/* Data status indicator (receiving / no data) */
-.sc-data-status {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 10px;
-}
-@keyframes sc-pulse {
-    0%, 100% { box-shadow: 0 0 10px rgba(34, 197, 94, 0.6); }
-    50% { box-shadow: 0 0 18px rgba(34, 197, 94, 0.9); }
-}
 @keyframes pulse-live {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.3; }
 }
-.sc-data-label {
-    font-size: 1.6rem;
-    font-weight: 800;
-    color: var(--c-on-accent);
-    letter-spacing: -0.01em;
-}
-.sc-data-desc {
-    font-size: 0.7rem;
-    color: var(--c-board-muted);
-    text-align: center;
-    margin-top: 2px;
-    font-family: inherit;
-}
-.sc-board-hero .sc-data-label { font-size: 2rem; }
-.sc-board-hero .sc-data-dot { width: 16px; height: 16px; }
 
 /* Raw scoreboard data string (Daktronics RTD etc.) */
 .sc-raw-data {
@@ -3176,13 +3147,6 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
     background: var(--c-board-bg-deep);
     border: 1px solid var(--c-board-line);
     border-radius: 6px;
-}
-.sc-raw-label {
-    font-size: 0.5rem;
-    font-weight: 700;
-    letter-spacing: 0.1em;
-    color: var(--c-board-muted);
-    margin-bottom: 4px;
 }
 .sc-raw-value {
     font-size: 0.75rem;
@@ -3210,6 +3174,17 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
 .scc-collapsed { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; }
 .scc-collapsed .scc-status { margin: 0; }
 .scc-show { flex: none; }
+
+/* ScoreConnect III details: quiet reference, below the working area. */
+.kv-contents { display: contents; }
+.scd .kv-grid { grid-template-columns: 150px 1fr; }
+.scd-more { margin-top: 0.85rem; border-top: 1px solid var(--c-border); padding-top: 0.7rem; }
+.scd-more > summary { cursor: pointer; font-size: 0.8rem; font-weight: 600; color: var(--c-muted); list-style-position: inside; }
+.scd-more > summary:hover { color: var(--c-text); }
+.scd-more > summary:focus-visible { outline: 2px solid var(--c-accent-blue); outline-offset: 2px; border-radius: 2px; }
+.scd-more[open] > summary { margin-bottom: 0.6rem; }
+.scd-count { font-weight: 500; color: var(--c-dim); margin-left: 0.25rem; }
+.scd-note { font-size: 0.75rem; color: var(--c-muted); margin: 0 0 0.6rem; line-height: 1.5; }
 .scc-picker, .scc-setup { min-width: 0; }
 
 .scc-track { --scc-node-w: 8.5rem; --scc-wire-y: 3.4rem; display: flex; align-items: flex-start; margin: 1.1rem 0 0.4rem; }
@@ -4447,45 +4422,6 @@ button.scc-node:hover { background: var(--c-surface-2); border-color: var(--c-bo
     word-break: break-word;
     max-height: 200px;
     overflow-y: auto;
-}
-
-/* ── SC III crash auto-restart panel ────────────────────────── */
-.sc3-recovery { box-shadow: inset 0 0 0 1px var(--c-border); border-radius: 6px; }
-.sc3-recovery-on { box-shadow: inset 0 0 0 1px var(--c-accent-green); }
-.sc3-recovery-off { box-shadow: inset 0 0 0 1px var(--c-accent-amber); }
-.sc3-recovery-head {
-    display: flex;
-    align-items: flex-start;
-    gap: 0.7rem;
-}
-.sc3-recovery-icon {
-    flex: none;
-    margin-top: 1px;
-    line-height: 0;
-}
-.sc3-recovery-on .sc3-recovery-icon { color: var(--c-accent-green); }
-.sc3-recovery-off .sc3-recovery-icon { color: var(--c-accent-amber); }
-.sc3-recovery-sub {
-    margin-top: 0.2rem;
-    font-size: 0.8rem;
-    line-height: 1.5;
-    color: var(--c-muted);
-}
-.sc3-recovery-evidence,
-.sc3-recovery-fix {
-    margin-top: 0.7rem;
-    padding: 8px 10px;
-    border-radius: 6px;
-    font-size: 0.78rem;
-    line-height: 1.5;
-    background: var(--c-surface-3);
-    color: var(--c-muted);
-}
-.sc3-recovery-fix { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; }
-.sc3-recovery-note { color: var(--c-muted); }
-.sc3-recovery-fix {
-    background: var(--c-tint-amber);
-    color: var(--c-text);
 }
 
 /* ── Share over LAN ────────────────────────────────────────── */

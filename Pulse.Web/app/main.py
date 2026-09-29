@@ -5293,6 +5293,12 @@ SC_CHAIN_COPY = {
             "say": "That is usually a loose cable. Ask the school to push the cable in firmly at the console "
                    "and at the ScoreLink. {extensionDrop}",
             "where": ["cable", "extension"], "tone": "warning"},
+        "no-recovery": {
+            "title": "ScoreConnect III won't restart itself after its known crash",
+            "say": "It has a crash that stops the service. With auto-restart on, Windows restarts it within "
+                   "seconds instead of leaving the scoreboard down until someone notices. Pulse turns this on "
+                   "each time it starts; it did not take on this VPU, so use the button below.",
+            "where": ["vpu"], "tone": "soon"},
         # Pixellot's scoreboard source (graphics.cfg [GENERAL] TYPE) is Pixellot's
         # own configuration, read-only here. It is what the unit is set to use,
         # not a fault, and Pulse never changes it: that is done in VPU Manager

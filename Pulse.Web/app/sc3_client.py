@@ -569,7 +569,7 @@ class DemoSc3:
         return next((v for v in self.cat["vendors"] if v["id"] == vid), None)
 
     def settings(self):
-        return {"deviceType": self.device_type, "port": "COM7", "error": None}
+        return {"deviceType": self.device_type, "port": "COM7", "botNumber": self.bot, "error": None}
 
     def __call__(self, method, path, body=None, timeout=6):
         p = path

@@ -8695,21 +8695,6 @@ function renderScoreConnect() {
   const visitorLabel = sc2Teams.visitor || "GUEST";
   const homeLabel = sc2Teams.home || "HOME";
 
-  // Build BOT and ScoreLink cards independently
-  const botCard = botStatus.isConnected != null ? `
-    <div class="card">
-      ${sectionTitle("globe", "Cloud (Bot) Status")}
-      <div class="kv-grid">
-        ${kvRowHtml("Status", botStatus.isConnected
-          ? badge("Connected", "pass")
-          : badge("Not connected", "fail"))}
-        ${botStatus.scoreConnectId ? kvRowHtml("ScoreConnect ID",
-          `${esc(botStatus.scoreConnectId)} <span class="text-pulse-dim ml-1" style="font-size:0.85em;cursor:help" title="ScoreConnect III reports this ID at startup. If the BOT service has reconfigured since, the displayed value can briefly lag.">${svgIcon("info", 12)}</span>`)
-          : ""}
-        ${kvRow("Bot Server", botStatus.botServerAddress)}
-        ${botStatus.lastErrorMessage ? kvRowHtml("Last Error", `<span class="text-pulse-muted">${esc(botStatus.lastErrorMessage)}</span>`) : ""}
-      </div>
-    </div>` : "";
 
 
   // Page subtitle reflects the single active version (ScoreConnect III takes
@@ -8774,30 +8759,11 @@ function renderScoreConnect() {
         </div>
       </div>
     </div>
-    ` : isDetected ? `
-    <!-- SC III detected but vendor/sport not yet validated — show status, NOT guessed scores -->
-    <div class="sc-board sc-board-hero" id="sc3-hero-board">
-      <div class="sc-header">
-        <div class="sc-team-home">
-          <div class="sc-team-label">Vendor</div>
-          <div class="sc-team-name">${esc(config.vendor || "—")}</div>
-        </div>
-        <div class="sc-center">
-          <div class="sc-data-status"><span class="sc-data-label">${dataReceiving ? "Receiving Data" : "No Data"}</span></div>
-          <div id="sc3-live-badge" style="margin-top:0.4rem;font-size:0.62rem;letter-spacing:0.1em;color:${dataReceiving ? "var(--c-board-ok)" : "var(--c-board-bad)"};display:flex;align-items:center;justify-content:center;gap:0.3rem">
-            ${_sc3StageBadge(dataReceiving ? "live" : "disconnected", 0)}
-          </div>
-          ${dataReceiving
-            ? `<div class="sc-data-desc" style="margin-top:0.6rem;max-width:360px;line-height:1.4">Receiving data, but Pulse couldn't parse this feed${config.vendor ? " (" + esc(config.vendor) + ")" : ""} — raw data shown below.</div>`
-            : `<div class="sc-data-desc" style="margin-top:0.6rem;max-width:360px;line-height:1.4">Waiting for scoreboard data…</div>`}
-        </div>
-        <div class="sc-team-away">
-          <div class="sc-team-label">Sport</div>
-          <div class="sc-team-name">${esc(config.sport || "—")}</div>
-        </div>
-      </div>
-    </div>
-    ` : !(sc2 && sc2.reachable) ? `<div class="sc-board sc-board-hero sc-board-empty">${esc(_scNoServiceText(data))}</div>` : ""}
+    ` : isDetected ? "" /* No score to show: the findings and the chain above
+       already say why, and a black "No Data" block only repeated them. It
+       comes back on its own once a readable feed arrives (promotion in the
+       live poll). Data Pulse cannot read opens the raw data in the details. */
+    : !(sc2 && sc2.reachable) ? `<div class="sc-board sc-board-hero sc-board-empty">${esc(_scNoServiceText(data))}</div>` : ""}
 
     <!-- ScoreConnect → SC III Upgrade Prompt -->
     ${sc2 && sc2.reachable && !isDetected ? `
@@ -8855,42 +8821,37 @@ function renderScoreConnect() {
       </div>` : ""}
     </div>` : ""}
 
-    <!-- ScoreConnect III — status, configuration, and live data (all grouped) -->
+    <!-- ScoreConnect III details: only what the chain and scoreboard above do
+         not already say. Raw data and previous setups fold away. -->
     ${isDetected ? `
-    <div class="card mt-4">
+    <div class="card mt-4 scd" id="sc3-details">
       ${sectionTitle("server", "ScoreConnect III")}
       <div class="kv-grid">
-        ${kvRowHtml("Status", `<span id="sc3-svc-status">${_sc3SvcStatusHtml("live")}</span>`)}
-        ${kvRowHtml("Scoreboard Data", `<span id="sc3-data-status">${_sc3DataStatusHtml(dataReceiving ? "live" : "disconnected", 0, data.dataStatus)}</span>`)}
+        ${kvRowHtml("Service", `<span id="sc3-svc-status">${_sc3SvcStatusHtml("live")}</span>`)}
         ${kvRow("Version", version)}
-        ${kvRow("Base URL", data.baseUrl)}
-        ${config.vendor ? kvRow("Vendor", config.vendor) : ""}
-        ${config.sport ? kvRow("Sport", config.sport) : ""}
-        ${config.vendorConfigurationName ? kvRow("Connection Type", config.vendorConfigurationName) : ""}
-        ${config.device ? kvRow("Device", config.device) : ""}
-        ${config.serialPort ? kvRow("Serial Port", config.serialPort) : ""}
-        ${config.firmware ? kvRow("Firmware", config.firmware) : ""}
-        ${config.eventType ? kvRow("Event Type", config.eventType) : ""}
-        ${kvRow("Network", data.networkStatus)}
-        ${kvRowHtml("Scoreboard feed reaching the VPU", data.hasLocalStream != null
-          ? (data.hasLocalStream ? '<span class="status-pass">Yes</span>' : '<span class="status-fail">No</span>')
-          : '—')}
+        ${kvRow("Setup", [config.vendor, _sccShortSport(config.vendor, config.sport), config.vendorConfigurationName].filter(Boolean).join(" · ") || null)}
+        ${data.scoreLinkPort ? kvRow("ScoreLink port", data.scoreLinkPort) : ""}
+        ${kvRow("Bot number", _sccBotNumber(data))}
+        ${botStatus.isConnected != null ? kvRowHtml("Cloud connection", botStatus.isConnected
+          ? "Connected"
+          : "Not connected" + (botStatus.lastErrorMessage ? ' <span class="text-pulse-muted">(' + esc(botStatus.lastErrorMessage) + ')</span>' : "")) : ""}
+        ${data.networkStatus ? kvRow("Internet", data.networkStatus.replace(/^Internet is /i, "").replace(/^./, function(m) { return m.toUpperCase(); })) : ""}
+        <div id="sc3-recovery-wrap" class="kv-contents">${_scServiceRecoveryHtml(_scRecoveryCache)}</div>
       </div>
       ${data.rawData ? `
-      <div class="sc-raw-data" style="margin-top:0.85rem">
-        <div class="sc-raw-label">RAW SCOREBOARD DATA (ScoreConnect III)</div>
-        <div class="sc-raw-value" id="sc3-raw-value">${esc(data.rawData)}</div>
-      </div>` : ""}
-    </div>` : ""}
-
-    <!-- Crash auto-restart status (async — see _scLoadServiceRecovery) -->
-    <div id="sc3-recovery-wrap">${_scRecoveryCache ? _scServiceRecoveryHtml(_scRecoveryCache) : ""}</div>
-
-    <!-- Cloud BOT (ScoreLink panel moved up under the hero) -->
-    ${botCard ? `<div class="mt-4">${botCard}</div>` : ""}
-
-    <!-- Previous scoreboard configurations recorded on this VPU -->
-    <div id="sc-config-history-wrap">${_scHistCache ? _scConfigHistoryHtml(_scHistCache, data) : ""}</div>
+      <details class="scd-more"${dataReceiving && !showScoreboard ? " open" : ""}>
+        <summary>Raw scoreboard data</summary>
+        ${dataReceiving && !showScoreboard ? `<p class="scd-note">Data is arriving, but Pulse can't turn this console's feed into a score, so it is shown as ScoreConnect sends it.</p>` : ""}
+        <div class="sc-raw-data">
+          <div class="sc-raw-value" id="sc3-raw-value">${esc(data.rawData)}</div>
+        </div>
+      </details>` : ""}
+      <details class="scd-more" id="sc-config-history-details"${_scHistCache && _scHistCache.length ? "" : " hidden"}>
+        <summary>Previous setups on this VPU <span class="scd-count" id="sc-config-history-count">${_scHistCache && _scHistCache.length ? _scHistCache.length : ""}</span></summary>
+        <div id="sc-config-history-wrap">${_scHistCache ? _scConfigHistoryHtml(_scHistCache, data, true) : ""}</div>
+      </details>
+    </div>` : `
+    <div id="sc-config-history-wrap">${_scHistCache ? _scConfigHistoryHtml(_scHistCache, data) : ""}</div>`}
   `;
   _scLoadConfigHistory(data);
   _scLoadServiceRecovery();
@@ -9096,6 +9057,8 @@ function _sccBreaks(data, sig, parts) {
     if (sig.flow === "disconnected" || sig.flow === "stale") add(sig.drops >= 2 ? "intermittent" : sig.stopped ? "data-stopped" : "no-data");
     else if (sig.drops >= 2) add("intermittent");
   }
+  var rec = _scRecoveryCache;
+  if (sig.sc3 !== "legacy" && rec && !rec.error && rec.installed && !rec.recoveryConfigured) add("no-recovery");
   var px = data.pixellotScore || {};
   if (!px.error && px.source && px.source !== "SPORTZCAST") add(px.source === "OCR" ? "pixellot-ocr" : "pixellot-other");
   return out;
@@ -9250,6 +9213,8 @@ function _sccDiagnosisHtml(breaks) {
   var top = _sortByTone(breaks, _findingTone)[0];
   if (top && top.t !== "info" && _findingOpen["scchain:" + top.f.title] == null) _findingOpen["scchain:" + top.f.title] = true;
   var list = findingListHtml(breaks, { scope: "scchain", detailExtra: function(f) {
+    if (f.code === "no-recovery") return '<div class="scc-picker-foot"><button type="button" class="btn-outline btn-ol-blue" id="sc3-recovery-enable" onclick="sc3EnableRecovery()">' +
+      svgIcon("shield", 14) + ' Turn on crash auto-restart</button><span class="scc-save-state" id="sc3-recovery-result" role="status"></span></div>';
     if (f.code !== "sc3-down") return "";
     return '<div class="scc-picker-foot"><button type="button" class="btn-outline btn-ol-blue" onclick="sccStartSc3(this)">' +
       svgIcon("play", 14) + ' Start ScoreConnect III</button><span class="scc-save-state" id="scc-start-result" role="status"></span></div>';
@@ -9939,7 +9904,7 @@ function _sc3StartLivePoll(vendor, sport, showScoreboard) {
   // variant has the score elements to update.
   async function tick() {
     // Self-terminate if the user navigated away from the page.
-    if (currentPage !== "scoreconnect" || !document.getElementById("sc3-hero-board")) {
+    if (currentPage !== "scoreconnect" || !_sc3LiveTarget()) {
       _sc3StopLivePoll();
       return;
     }
@@ -9949,7 +9914,7 @@ function _sc3StartLivePoll(vendor, sport, showScoreboard) {
     // Bail if a newer poll superseded this one during the await (generation
     // token), or the user navigated away.
     if (myGen !== _sc3PollGen) return;
-    if (currentPage !== "scoreconnect" || !document.getElementById("sc3-hero-board")) {
+    if (currentPage !== "scoreconnect" || !_sc3LiveTarget()) {
       _sc3StopLivePoll();
       return;
     }
@@ -10022,6 +9987,12 @@ function _sc3StartLivePoll(vendor, sport, showScoreboard) {
   tick();
 }
 
+// The live poll feeds the scoreboard, the chain and the details card; it runs
+// while any of them is on screen.
+function _sc3LiveTarget() {
+  return document.getElementById("sc3-hero-board") || document.getElementById("sc-chain") || document.getElementById("sc3-details");
+}
+
 function _sc3SetText(id, text) {
   var el = document.getElementById(id);
   if (el && el.textContent !== text) el.textContent = text;
@@ -10048,7 +10019,14 @@ function _scLoadServiceRecovery() {
     _scRecoveryCache = d || null;
     var w = document.getElementById("sc3-recovery-wrap");
     if (w && currentPage === "scoreconnect") w.innerHTML = _scServiceRecoveryHtml(_scRecoveryCache);
-  }).catch(function() {});
+    var top = document.getElementById("scc-findings-wrap");
+    var cd = cached("scoreconnect");
+    if (top && cd && currentPage === "scoreconnect") top.innerHTML = _sccFindingsTopHtml(cd);
+  }).catch(function() {
+    _scRecoveryCache = { error: true };
+    var w = document.getElementById("sc3-recovery-wrap");
+    if (w) w.innerHTML = _scServiceRecoveryHtml(_scRecoveryCache);
+  });
 }
 
 function _scAgoLabel(iso) {
@@ -10064,94 +10042,33 @@ function _scAgoLabel(iso) {
   return days + (days === 1 ? " day ago" : " days ago");
 }
 
+// Crash auto-restart as one row of the details card. When it is off, the
+// Findings card carries it (with the button); here it is just the fact.
 function _scServiceRecoveryHtml(r) {
-  // Nothing to say when there is no SC III service on the box (a legacy
-  // SC I/II unit) or the collector failed outright.
-  if (!r || r.error || !r.installed) return "";
-
-  var on = !!r.recoveryConfigured;
-  var days = r.daysBack || 7;
-  var crashes = r.crashCount || 0;
-  var recovered = r.autoRecoveredCount || 0;
-  var lastAgo = _scAgoLabel(r.lastAutoRestart);
-
-  // Evidence beats assertion: if SCM has actually caught a crash on this unit,
-  // say so — that is the difference between "configured" and "known working".
-  var evidence = "";
-  if (on && recovered > 0) {
-    evidence = "Windows has already caught " + recovered +
-      (recovered === 1 ? " crash" : " crashes") + " on this VPU in the last " + days + " days" +
-      (lastAgo ? " (most recent " + lastAgo + ")" : "") + ".";
-  } else if (on && crashes === 0) {
-    evidence = "No ScoreConnect III crashes recorded in the last " + days + " days.";
-  } else if (!on && crashes > 0) {
-    evidence = "ScoreConnect III has crashed " + crashes +
-      (crashes === 1 ? " time" : " times") + " in the last " + days +
-      " days with no automatic restart — the scoreboard stayed down until someone noticed.";
+  if (r == null) return kvRowHtml("Crash auto-restart", '<span class="text-pulse-muted">Checking\u2026</span>');
+  if (r.error) return kvRowHtml("Crash auto-restart", '<span class="status-warn">Couldn\u2019t check</span>');
+  if (!r.installed) return "";
+  var days = r.daysBack || 7, recovered = r.autoRecoveredCount || 0, crashes = r.crashCount || 0;
+  if (r.recoveryConfigured) {
+    var note = recovered > 0 ? "caught " + recovered + (recovered === 1 ? " crash" : " crashes") + " in " + days + " days"
+      : crashes === 0 ? "no crashes in " + days + " days" : "";
+    return kvRowHtml("Crash auto-restart", '<span class="status-pass">On</span>' + (note ? ' <span class="text-pulse-muted">\u00b7 ' + esc(note) + '</span>' : ""));
   }
-
-  return `
-    <div class="card mt-4 sc3-recovery ${on ? "sc3-recovery-on" : "sc3-recovery-off"}">
-      <div class="sc3-recovery-head">
-        <span class="sc3-recovery-icon">${svgIcon(on ? "check" : "alert", 18)}</span>
-        <div>
-          <div class="font-semibold">${on
-            ? "Crash auto-restart is active on this VPU"
-            : "Crash auto-restart is not configured"}</div>
-          <div class="sc3-recovery-sub">${on
-            ? "Windows restarts ScoreConnect III by itself if it crashes, so a crash costs seconds instead of the rest of the event."
-            : "ScoreConnect III has a known crash that kills the service. Without this, Windows leaves it stopped and the scoreboard stays dark until someone restarts it by hand."}</div>
-        </div>
-      </div>
-      <div class="kv-grid" style="margin-top:0.7rem">
-        ${kvRowHtml("Service", `<span class="${r.status === "Running" ? "status-pass" : "status-fail"}">${esc(r.status || "Unknown")}</span>`)}
-        ${kvRowHtml("Recovery", on
-          ? `<span class="status-pass">${esc(r.actionSummary || "Configured")}</span>`
-          : `<span class="status-warn">${esc(r.actionSummary || "Not configured")}</span>`)}
-        ${on && r.resetPeriodSec ? kvRow("Failure count resets after", _fmtResetPeriod(r.resetPeriodSec)) : ""}
-      </div>
-      ${evidence ? `<div class="sc3-recovery-evidence">${esc(evidence)}</div>` : ""}
-      ${!on ? `<div class="sc3-recovery-fix">
-        <button type="button" class="btn-outline btn-ol-blue" id="sc3-recovery-enable" onclick="sc3EnableRecovery()">${svgIcon("shield", 14)} Turn on crash auto-restart</button>
-        <span class="sc3-recovery-note" id="sc3-recovery-result" role="status">Pulse also turns this on by itself each time it starts.</span>
-      </div>` : ""}
-    </div>
-  `;
+  return kvRowHtml("Crash auto-restart", '<span class="status-warn">Off</span>' +
+    (crashes ? ' <span class="text-pulse-muted">\u00b7 ' + crashes + (crashes === 1 ? " crash" : " crashes") + " in " + days + " days, not restarted</span>" : ""));
 }
 
-// Apply SC III crash auto-restart now (Set-Sc3ServiceRecovery.ps1), then
-// re-read the panel so "on" is measured, not assumed.
-async function sc3EnableRecovery() {
-  var btn = document.getElementById("sc3-recovery-enable");
-  var out = document.getElementById("sc3-recovery-result");
-  if (btn) btn.disabled = true;
-  if (out) out.textContent = "Turning it on\u2026";
-  var r = await apiPost("/api/scoreconnect/service-recovery/enable", {});
-  if (!r || r.error || !r.configured) {
-    if (out) out.textContent = "Couldn't turn it on: " + ((r && r.message) || "no answer from Pulse");
-    if (btn) btn.disabled = false;
-    return;
-  }
-  _scRecoveryCache = null;
-  _scLoadServiceRecovery();
+// Pieces of the details card.
+function _sccShortSport(vendor, sport) {
+  if (!sport) return "";
+  return String(sport).replace(new RegExp("^" + String(vendor || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s+", "i"), "") || sport;
 }
-
-// Start ScoreConnect III from the chain (the same allowlisted restart the
-// Service Status tab uses; it starts a stopped service), then re-read.
-async function sccStartSc3(btn) {
-  var out = document.getElementById("scc-start-result");
-  if (btn) btn.disabled = true;
-  if (out) out.textContent = "Starting ScoreConnect III\u2026";
-  var r = await apiPost("/api/services/restart", { serviceName: "ScoreConnectIII" });
-  if (!r || !r.success) {
-    if (out) out.textContent = "Couldn't start it: " + ((r && r.message) || "no answer from Pulse");
-    if (btn) btn.disabled = false;
-    return;
-  }
-  if (out) out.textContent = "Started. Reading it again\u2026";
-  dataCache.scoreconnect = null;
-  _scRecoveryCache = null;
-  setTimeout(function() { if (currentPage === "scoreconnect") renderScoreConnect(); }, 2500);
+function _sccBotNumber(data) {
+  // The bot SC III saved (settings.json), else what its API reported.
+  var saved = (data.sc3Device || {}).botNumber;
+  if (typeof saved === "number") return saved > 0 ? String(saved) : "None set";
+  var api = (data.botStatus || {}).scoreConnectId;
+  return api ? String(api) : null;
 }
 
 function _fmtResetPeriod(sec) {
@@ -10176,11 +10093,17 @@ function _scLoadConfigHistory(current) {
   api("/api/scoreconnect/history").then(function(d) {
     _scHistCache = (d && d.entries) || [];
     var w = document.getElementById("sc-config-history-wrap");
-    if (w && currentPage === "scoreconnect") w.innerHTML = _scConfigHistoryHtml(_scHistCache, current);
+    var box = document.getElementById("sc-config-history-details");
+    if (w && currentPage === "scoreconnect") w.innerHTML = _scConfigHistoryHtml(_scHistCache, current, !!box);
+    if (box) {
+      box.hidden = !_scHistCache.length;
+      var n = document.getElementById("sc-config-history-count");
+      if (n) n.textContent = _scHistCache.length || "";
+    }
   }).catch(function() {});
 }
 
-function _scConfigHistoryHtml(entries, current) {
+function _scConfigHistoryHtml(entries, current, bare) {
   if (!entries || !entries.length) return "";
   function fv(v) { return v == null ? "" : String(v); }
   var cfg = current && current.configuration || {};
@@ -10225,6 +10148,8 @@ function _scConfigHistoryHtml(entries, current) {
     "</details>";
   }).join("");
 
+  var note = '<p class="scd-note">Recorded each time the setup changes while scoreboard data is flowing.</p>';
+  if (bare) return note + items;
   return '<div class="card mt-4">' +
     sectionTitle("clock", "Previous Configurations") +
     '<div class="text-pulse-muted" style="font-size:0.75rem;margin:-0.25rem 0 0.6rem;line-height:1.5">' +
