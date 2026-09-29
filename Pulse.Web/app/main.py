@@ -5151,8 +5151,8 @@ SC_CHAIN_COPY = {
         "no-data": {
             "title": "No scoreboard data is reaching ScoreConnect",
             "say": "This is normal while the console is off. Before a game, ask the school: is the console on "
-                   "and running a game? Is the {cable} cable pushed all the way into the console? {extensionAsk}"
-                   "Pick what they are seeing below to narrow it down.",
+                   "and running a game? Is the Power light on the {device} green? Is the {cable} cable pushed all "
+                   "the way into the console? {extensionAsk}Pick what they are seeing below to narrow it down.",
             "where": ["cable", "extension", "controller"], "tone": "warning"},
         "frozen": {
             "title": "The console keeps sending the same data, so the score on the stream is stuck",
@@ -5185,6 +5185,7 @@ SC_CHAIN_COPY = {
             "where": ["cable", "extension", "controller"],
             "checks": [
                 "Is the console on, with a game running (not a menu or setup screen)?",
+                "Is the Power light on the {device} green?",
                 "Is the {cable} cable pushed all the way into the console?",
                 "Is the other end of the cable pushed all the way into the {device}?",
                 "{extensionCheck}",
@@ -5219,11 +5220,19 @@ SC_CHAIN_COPY = {
                 "Make sure the cable is not pulled tight or pinched under the table.",
             ]},
     },
+    # Extension wording by what the school said: not asked yet, or confirmed
+    # in line. "No extension" drops these lines altogether.
     "fills": {
         "extensionAsk": "If there is an extension cable, are both of its joins pushed in? ",
         "extensionCheck": "If there is an extension cable, check both of its joins are pushed in.",
         "extensionFreeze": "If there is an extension cable, try the cable without it.",
         "extensionDrop": "If there is an extension cable, check both of its joins, then try without it.",
+    },
+    "fillsExtension": {
+        "extensionAsk": "Are both joins of the extension cable pushed in? ",
+        "extensionCheck": "Check both joins of the extension cable are pushed in.",
+        "extensionFreeze": "Try the cable without the extension.",
+        "extensionDrop": "Check both joins of the extension cable, then try without it.",
     },
     "saveWarning": "Saving restarts ScoreConnect's connection to the console. The score stops for about 15 "
                    "seconds (measured on a bench unit).",
@@ -5264,7 +5273,7 @@ def _sc_chain_payload(result):
 @app.post("/api/scoreconnect/chain")
 async def api_scoreconnect_chain_save(request: Request):
     """Save what the school confirmed about a chain part (cable, extension,
-    console, ScoreLink model/colour). Stored on the VPU next to the config
+    console, ScoreLink model). Stored on the VPU next to the config
     history so the next call starts from it."""
     body = await request.json()
     update = body.get("update") if isinstance(body, dict) else None

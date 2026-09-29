@@ -3222,7 +3222,7 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
 }
 button.scc-node { cursor: pointer; }
 button.scc-node:hover { background: var(--c-surface-2); border-color: var(--c-border); }
-.scc-node:focus-visible, .scc-opt:focus-visible, .scc-chip:focus-visible, .scc-ext-add:focus-visible {
+.scc-node:focus-visible, .scc-opt:focus-visible, .scc-chip:focus-visible, .scc-ext:focus-visible {
   outline: 2px solid var(--c-accent-blue); outline-offset: 2px;
 }
 .scc-node.is-open { background: var(--c-surface-2); border-color: var(--c-border); }
@@ -3239,7 +3239,6 @@ button.scc-node:hover { background: var(--c-surface-2); border-color: var(--c-bo
   border: 1px dashed var(--c-dim); border-radius: 0.25rem;
   font-size: 0.68rem; line-height: 1.25; color: var(--c-dim);
 }
-.scc-img-none { color: var(--c-dim); }
 .scc-node-name { font-size: 0.82rem; font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
 .scc-node-model { font-size: 0.72rem; color: var(--c-muted); line-height: 1.25; }
 .scc-src { font-size: 0.7rem; color: var(--c-dim); line-height: 1.3; }
@@ -3261,12 +3260,17 @@ button.scc-node:hover { background: var(--c-surface-2); border-color: var(--c-bo
 .scc-link-bad .scc-link-label { color: var(--c-accent-red); }
 .scc-link-warn .scc-link-label { color: var(--c-accent-amber); }
 .scc-link-unknown .scc-link-label { color: var(--c-dim); }
-.scc-ext-add {
+.scc-ext {
   display: inline-flex; align-items: center; gap: 0.25rem; margin-top: 0.45rem; padding: 0.15rem 0.55rem;
   border: 1px dashed var(--c-border); border-radius: 999px; background: var(--c-surface);
   font: inherit; font-size: 0.68rem; color: var(--c-muted); cursor: pointer; white-space: nowrap;
 }
-.scc-ext-add:hover { border-color: var(--c-accent-blue); color: var(--c-accent-blue); }
+.scc-ext:hover { border-color: var(--c-accent-blue); color: var(--c-accent-blue); }
+.scc-ext.is-yes { border-style: solid; color: var(--c-text); font-weight: 600; }
+.scc-ext.is-none { border-style: solid; }
+.scc-ext.is-lit { border: 1px solid var(--c-accent-blue); background: var(--c-tint-blue-faint); }
+.scc-ext.is-break { border: 1px solid var(--c-accent-red); background: var(--c-tint-red-faint); }
+.scc-ext.is-stale { color: var(--c-accent-amber); }
 
 .scc-findings { margin-top: 0.75rem; }
 .scc-ask { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; margin-top: 1rem; }
@@ -3288,6 +3292,9 @@ button.scc-node:hover { background: var(--c-surface-2); border-color: var(--c-bo
 .scc-checks ol { margin: 0 0 0.85rem; padding-left: 1.25rem; list-style: decimal; font-size: 0.84rem; line-height: 1.5; max-width: 72ch; }
 .scc-checks li + li { margin-top: 0.35rem; }
 .scc-options { display: grid; grid-template-columns: repeat(auto-fill, minmax(7.5rem, 1fr)); gap: 0.6rem; }
+.scc-options-text { grid-template-columns: repeat(auto-fill, minmax(10rem, 13rem)); }
+.scc-options-text .scc-opt { padding: 0.65rem 0.75rem; }
+.scc-note-above { margin: -0.25rem 0 0.7rem; }
 .scc-opt {
   display: flex; flex-direction: column; align-items: center; gap: 0.15rem; padding: 0.5rem;
   border: 1px solid var(--c-border); border-radius: 0.5rem; background: var(--c-surface);
@@ -3339,7 +3346,7 @@ button.scc-node:hover { background: var(--c-surface-2); border-color: var(--c-bo
   .scc-link-warn .scc-wire { background: repeating-linear-gradient(180deg, var(--c-status-warn) 0 7px, transparent 7px 12px); }
   .scc-link-unknown .scc-wire { background: repeating-linear-gradient(180deg, var(--c-status-down) 0 4px, transparent 4px 9px); }
   .scc-link-label { margin: 0; text-align: left; }
-  .scc-ext-add { margin: 0; }
+  .scc-ext { margin: 0; }
   .scc-restore { margin-left: 0; }
 }
 

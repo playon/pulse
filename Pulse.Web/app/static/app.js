@@ -8794,8 +8794,8 @@ function renderScoreConnect() {
 //   measured  SC III answering, the ScoreLink on USB, SC III's serial state
 //             (its own log), and whether scoreboard data arrives. Data
 //             arriving proves every physical link at once.
-//   told      which cable, whether there is an extension, the console brand,
-//             the ScoreLink II colour: inferred from SC III's setup or the
+//   told      which cable, whether there is an extension, the console
+//             brand: inferred from SC III's setup or the
 //             cable chart, or confirmed by the tech on the phone with the
 //             school (saved on the VPU, see /api/scoreconnect/chain).
 // Every sentence comes from main.py (SC_CHAIN_COPY); this file only picks.
@@ -8820,7 +8820,6 @@ var _SCC_BRANDS = {
 };
 var _SCC_CABLES = { multitip: "Multi-tip", gray: "Gray 1/4\"", red: "Red", bnc: "Black BNC" };
 var _SCC_DEVICES = { ScoreLink: "ScoreLink", ScoreLinkII: "ScoreLink II" };
-var _SCC_COLORS = { yellow: "Black and yellow", blue: "Black and blue" };
 
 // Image file stem per part. Files live in static/img/sc/; a missing file
 // draws a labelled frame instead, so images can be dropped in one at a time.
@@ -8828,10 +8827,9 @@ function _sccImgKey(part, v) {
   if (part === "vpu") return "vpu";
   if (part === "device") {
     if (v.value === "ScoreLink") return "device-scorelink";
-    if (v.value === "ScoreLinkII") return v.color ? "device-scorelink2-" + v.color : "device-scorelink2";
+    if (v.value === "ScoreLinkII") return "device-scorelink2";
     return null;
   }
-  if (part === "extension") return "extension";
   if (!v.value) return null;
   return part + "-" + v.value;
 }
@@ -8865,10 +8863,10 @@ function _sccParts(data) {
   var measuredModel = /II/.test(data.scoreLinkModel || "") ? "ScoreLinkII" : (data.scoreLinkModel ? "ScoreLink" : null);
   var c = function(k) { return chain[k] && chain[k].value ? chain[k] : null; };
 
-  var device = { value: null, color: c("deviceColor") ? chain.deviceColor.value : null, src: "unknown" };
-  if (measuredModel) device = { value: measuredModel, color: device.color, src: "detected" };
-  else if (c("device")) device = { value: chain.device.value, color: device.color, src: "confirmed", at: chain.device.at, stale: chain.device.stale };
-  else if (sc3dev) device = { value: sc3dev, color: device.color, src: "setup" };
+  var device = { value: null, src: "unknown" };
+  if (measuredModel) device = { value: measuredModel, src: "detected" };
+  else if (c("device")) device = { value: chain.device.value, src: "confirmed", at: chain.device.at, stale: chain.device.stale };
+  else if (sc3dev) device = { value: sc3dev, src: "setup" };
 
   var brandSetup = _sccBrandOf(cfg.vendor);
   var controller = c("controller")
@@ -8900,9 +8898,8 @@ function _sccSrcText(p) {
 }
 
 function _sccLabel(part, p) {
-  if (part === "device") return p.value ? _SCC_DEVICES[p.value] + (p.value === "ScoreLinkII" && p.color ? " · " + (p.color === "blue" ? "Blue" : "Yellow") : "") : "Which ScoreLink?";
+  if (part === "device") return p.value ? _SCC_DEVICES[p.value] : "Which ScoreLink?";
   if (part === "cable") return p.value ? _SCC_CABLES[p.value] : "Which cable?";
-  if (part === "extension") return p.value === "yes" ? "Extension cable" : "";
   if (part === "controller") return p.value ? _SCC_BRANDS[p.value] : "Which console?";
   return "";
 }
@@ -8955,7 +8952,7 @@ function _sccBreaks(data, sig, parts) {
 function _sccFills(data, parts) {
   var cfg = data.configuration || {};
   var ext = parts.extension.value;
-  var fillsCopy = (data.chainCopy || {}).fills || {};
+  var fillsCopy = (ext === "yes" ? (data.chainCopy || {}).fillsExtension : (data.chainCopy || {}).fills) || {};
   var sc3dev = (data.sc3Device || {}).deviceType;
   return {
     device: parts.device.value ? _SCC_DEVICES[parts.device.value] : "ScoreLink",
@@ -8994,17 +8991,13 @@ function _sccLinks(sig) {
 function _sccImgHtml(data, part, p, label) {
   var key = _sccImgKey(part, p || {});
   var have = data.chainImages || [];
-  var find = function(k) { return k && have.filter(function(n) { return n.replace(/\.(png|jpe?g|webp)$/i, "") === k; })[0]; };
-  var file = find(key);
-  // A ScoreLink II whose colour nobody has confirmed still gets a picture:
-  // both colours are the same hardware. The label never claims a colour.
-  if (!file && key === "device-scorelink2") file = find("device-scorelink2-yellow") || find("device-scorelink2-blue");
+  var file = key && have.filter(function(n) { return n.replace(/\.(png|jpe?g|webp)$/i, "") === key; })[0];
   if (file) return '<img src="/static/img/sc/' + esc(file) + '" alt="" decoding="async">';
   return '<span class="scc-ph" aria-hidden="true">' + esc(label || "") + '</span>';
 }
 
 function _sccNodeHtml(data, part, p, lit, brk) {
-  var role = { vpu: "VPU", device: "ScoreConnect device", cable: "Cable", extension: "Extension", controller: "Scoreboard console" }[part];
+  var role = { vpu: "VPU", device: "ScoreConnect device", cable: "Cable", controller: "Scoreboard console" }[part];
   var label = part === "vpu" ? "This VPU" : _sccLabel(part, p);
   var cls = "scc-node" + (brk ? " is-break" : "") + (lit ? " is-lit" : "") + (_scc.panel === part ? " is-open" : "");
   var src, sub = "";
@@ -9046,20 +9039,22 @@ function _sccTrackHtml(data, sig, parts, breaks) {
   var lit = sym ? sym.where : [];
   var isBreak = function(k) { return where.indexOf(k) !== -1; };
   var isLit = function(k) { return lit.indexOf(k) !== -1; };
-  var hasExt = parts.extension.value === "yes";
-  var addExt = hasExt ? "" : '<button type="button" id="scc-n-ext-add" class="scc-ext-add" onclick="sccTogglePanel(\'extension\')" aria-controls="scc-panel"' +
-    ' aria-expanded="' + (_scc.panel === "extension") + '">' + svgIcon("link", 12) + ' Extension?' +
-    (parts.extension.value === "none" ? '<span class="sr-only"> None confirmed</span>' : "") + '</button>';
-  var wireBrk = isBreak("cable") || isBreak("extension");
+  // The extension has no picture: it is a label on the cable run, saying
+  // what the school confirmed ("Extension cable", "No extension") or asking.
+  var ext = parts.extension;
+  var extWord = ext.value === "yes" ? "Extension cable" : ext.value === "none" ? "No extension" : "Extension?";
+  var extCls = "scc-ext" + (ext.value === "yes" ? " is-yes" : ext.value === "none" ? " is-none" : "") +
+    (isBreak("extension") && ext.value !== "none" ? " is-break" : "") + (isLit("extension") && ext.value !== "none" ? " is-lit" : "") +
+    (ext.stale ? " is-stale" : "");
+  var addExt = '<button type="button" id="scc-n-ext" class="' + extCls + '" onclick="sccTogglePanel(\'extension\')" aria-controls="scc-panel"' +
+    ' aria-expanded="' + (_scc.panel === "extension") + '" title="' + esc(ext.value ? _sccSrcText(ext) : "Ask whether there is an extension cable") + '">' +
+    svgIcon("link", 12) + " " + esc(extWord) + (ext.stale ? '<span class="sr-only"> (check again: setup changed)</span>' : "") + '</button>';
+  var wireBrk = isBreak("cable") || (isBreak("extension") && ext.value === "yes");
   var h = _sccNodeHtml(data, "vpu", null, isLit("vpu"), isBreak("vpu")) +
     _sccLinkHtml(links.usb, "USB", isBreak("usb")) +
     _sccNodeHtml(data, "device", parts.device, isLit("device"), isBreak("device")) +
     _sccLinkHtml(links.wire, "", wireBrk) +
     _sccNodeHtml(data, "cable", parts.cable, isLit("cable"), isBreak("cable"));
-  if (hasExt) {
-    h += _sccLinkHtml(links.wire, "", wireBrk, "", true) +
-      _sccNodeHtml(data, "extension", parts.extension, isLit("extension"), isBreak("extension"));
-  }
   h += _sccLinkHtml(links.wire, "", wireBrk || isBreak("controller"), addExt, true) +
     _sccNodeHtml(data, "controller", parts.controller, isLit("controller"), isBreak("controller"));
   return h;
@@ -9111,35 +9106,40 @@ function _sccSymptomHtml(data, parts) {
 
 function _sccPickerHtml(data, part, parts) {
   var p = parts[part];
+  // Only a confirmed (or detected) answer is pre-selected; a guess from the
+  // setup or the cable chart is not the school's answer.
+  var known = p.src === "confirmed" || p.src === "detected";
   var opts;
   if (part === "device") opts = [
-    { v: { device: "ScoreLink", deviceColor: null }, label: "ScoreLink", on: p.value === "ScoreLink", img: { value: "ScoreLink" } },
-    { v: { device: "ScoreLinkII", deviceColor: "yellow" }, label: "ScoreLink II", sub: _SCC_COLORS.yellow, on: p.value === "ScoreLinkII" && p.color === "yellow", img: { value: "ScoreLinkII", color: "yellow" } },
-    { v: { device: "ScoreLinkII", deviceColor: "blue" }, label: "ScoreLink II", sub: _SCC_COLORS.blue, on: p.value === "ScoreLinkII" && p.color === "blue", img: { value: "ScoreLinkII", color: "blue" } },
+    { v: { device: "ScoreLink" }, label: "ScoreLink", sub: "Red label", on: known && p.value === "ScoreLink", img: { value: "ScoreLink" } },
+    { v: { device: "ScoreLinkII" }, label: "ScoreLink II", sub: "Black with yellow or blue", on: known && p.value === "ScoreLinkII", img: { value: "ScoreLinkII" } },
   ];
   else if (part === "cable") opts = Object.keys(_SCC_CABLES).map(function(k) {
     return { v: { cable: k }, label: _SCC_CABLES[k], on: p.src === "confirmed" && p.value === k, img: { value: k } };
   });
   else if (part === "extension") opts = [
-    { v: { extension: "none" }, label: "No extension", on: p.value === "none", noImg: true },
-    { v: { extension: "yes" }, label: "Extension in line", on: p.value === "yes", img: { value: "yes" } },
+    { v: { extension: "none" }, label: "No extension", on: p.value === "none", textOnly: true },
+    { v: { extension: "yes" }, label: "Extension in line", on: p.value === "yes", textOnly: true },
   ];
   else opts = Object.keys(_SCC_BRANDS).map(function(k) {
     return { v: { controller: k }, label: _SCC_BRANDS[k], on: p.src === "confirmed" && p.value === k, img: { value: k } };
   });
   var q = { device: "Which ScoreLink is plugged into the VPU?", cable: "Which cable runs from the ScoreLink to the console?",
             extension: "Is there an extension cable between them?", controller: "What brand is the scoreboard console?" }[part];
-  var note = part === "device" && p.src === "detected" ? "Windows reports this model, so it is not a guess." : "";
-  var clear = { device: { device: null, deviceColor: null }, cable: { cable: null }, extension: { extension: null }, controller: { controller: null } }[part];
+  var note = part === "device"
+    ? (p.src === "detected" ? "Windows reports this model, so it is not a guess. " : "") +
+      "A ScoreLink II is black with either a yellow or a blue label. Both are the same device."
+    : "";
+  var clear = { device: { device: null }, cable: { cable: null }, extension: { extension: null }, controller: { controller: null } }[part];
   var footer = part === "controller" && data.reachable
     ? '<button type="button" class="btn-outline btn-ol-blue" onclick="sccTogglePanel(\'setup\')">' + svgIcon("settings", 14) + ' Change ScoreConnect setup</button>' : "";
   return '<div class="scc-picker"><h3 class="scc-sub">' + esc(q) + '</h3>' +
-    (note ? '<p class="scc-note">' + esc(note) + '</p>' : "") +
-    '<div class="scc-options" role="radiogroup" aria-label="' + esc(q) + '">' +
+    (note ? '<p class="scc-note scc-note-above">' + esc(note) + '</p>' : "") +
+    '<div class="scc-options' + (part === "extension" ? " scc-options-text" : "") + '" role="radiogroup" aria-label="' + esc(q) + '">' +
     opts.map(function(o) {
       return '<button type="button" role="radio" aria-checked="' + !!o.on + '" class="scc-opt' + (o.on ? " is-on" : "") + '"' +
         " onclick='sccConfirm(" + esc(JSON.stringify(o.v)) + ")'>" +
-        (o.noImg ? '<span class="scc-img scc-img-none">' + svgIcon("x", 20) + '</span>' : '<span class="scc-img">' + _sccImgHtml(data, part, o.img, o.label) + '</span>') +
+        (o.textOnly ? "" : '<span class="scc-img">' + _sccImgHtml(data, part, o.img, o.label) + '</span>') +
         '<span class="scc-opt-label">' + esc(o.label) + '</span>' +
         (o.sub ? '<span class="scc-opt-sub">' + esc(o.sub) + '</span>' : "") + '</button>';
     }).join("") + '</div>' +

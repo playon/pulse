@@ -20,9 +20,8 @@ What was measured on a real unit (vpu-home, SC III, 2026-09-29):
   - botNumber 0 makes SC III assign itself a bot number.
   - Connection-type ids are per vendor, so they are always re-fetched after a
     vendor change.
-Cloud mode is not reported by any read endpoint and toggling it changed
-nothing in settings.json, so saves send isCloudMode false (local decode, which
-is how Pixellot reads the score on port 1402). Open question, not a finding.
+Saves always send isCloudMode false: local decode, which is how Pixellot reads
+the score on port 1402. No venue uses cloud mode (Ian, 2026-09-29).
 """
 
 import json
@@ -424,13 +423,13 @@ def restore_request(previous):
 
 
 # ── Tech-confirmed chain ─────────────────────────────────────
-# What Pulse cannot measure (cable, extension, console brand, ScoreLink II
-# colour, and the model when Windows gives the USB device no name), as the
-# school confirmed it. Saved on the VPU so the next call starts from it.
+# What Pulse cannot measure (cable, extension, console brand, and the
+# ScoreLink model when Windows gives the USB device no name), as the school
+# confirmed it. The ScoreLink II comes black with a yellow or a blue label;
+# same hardware, so colour is not recorded. Saved on the VPU so the next call starts from it.
 
 CHAIN_FIELDS = {
     "device": ("ScoreLink", "ScoreLinkII"),
-    "deviceColor": ("yellow", "blue"),
     "cable": ("multitip", "gray", "red", "bnc"),
     "extension": ("none", "yes"),
     "controller": ("daktronics", "fairplay", "nevco", "electromech", "other"),
@@ -480,7 +479,7 @@ def chain_with_staleness(chain, basis):
         if k in ("controller", "cable", "extension"):
             stale = bool(basis.get("vendorName") and b.get("vendorName")
                          and basis["vendorName"] != b["vendorName"])
-        elif k in ("device", "deviceColor"):
+        elif k == "device":
             stale = bool(basis.get("scoreLinkModel") and b.get("scoreLinkModel")
                          and basis["scoreLinkModel"] != b["scoreLinkModel"])
         out[k] = dict(entry, stale=stale)
