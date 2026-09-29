@@ -1,0 +1,29 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20260827204355
+Username: VPU\Pixellot
+RunAs User: VPU\Pixellot
+Configuration Name: 
+Machine: VPU (Microsoft Windows NT 10.0.17763.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -Command if((Get-ExecutionPolicy ) -ne 'AllSigned') { Set-ExecutionPolicy -Scope Process Bypass }; & 'C:\Users\Pixellot\Desktop\Get-GpuTriage.ps1'
+Process ID: 14924
+PSVersion: 5.1.17763.134
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.17763.134
+BuildVersion: 10.0.17763.134
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+NVIDIA GPU triage v1.0
+host: VPU   date: 2026-08-27T20:43:55.8956298-06:00   admin: False
+WARNING: not elevated - event log and PnP property checks will be degraded.
+
+=== 1. HOST / FLEET CORRELATION FACTS ===
+model       : HP HP Z1 Entry Tower G5
+os          : Microsoft Windows 10 Enterprise LTSC 10.0.17763
+build lab   : 17763.1.amd64fre.rs5_release.180914-1434
+bios        : R01 Ver. 02.03.02 (11/04/2019 17:00:00)
+uptime      : 1d 17h 5m
+-- last 6 installed hotfixes (correlate with failure onset) --

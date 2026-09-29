@@ -1,0 +1,23 @@
+$kind: http-request
+name: 1. Game/Event lookup
+description: Core event lookup. Set `event_id` in the environment first. Test script captures broadcast_key, game_key, pixellot_id, pixellot_key for the rest of the chain.
+url: "{{unity_base}}/v2/game_or_event/{{event_id}}"
+method: GET
+headers:
+  Authorization: "{{nfhs_auth}}"
+  Accept: application/json
+scripts:
+  - type: afterResponse
+    code: |-
+      pm.test('200 OK', () => pm.response.to.have.status(200));
+      let j; try { j = pm.response.json(); } catch (e) { return; }
+      const d = j.data || j;
+      const grab = (obj, names) => names.map(n => obj[n]).find(v => v !== undefined && v !== null);
+      const set = (envKey, val) => { if (val) { pm.environment.set(envKey, String(val)); console.log(envKey + ' = ' + val); } };
+      set('broadcast_key', grab(d, ['broadcast_key', 'broadcastKey', 'key']));
+      set('game_key', grab(d, ['game_key', 'gameKey']));
+      set('pixellot_id', grab(d, ['pixellot_id', 'pixellotId']));
+      set('pixellot_key', grab(d, ['pixellot_key', 'pixellotKey']));
+      console.log('publisher/school/state/sport/start:', grab(d, ['publisher_name','publisherName']), grab(d, ['school_name','schoolName']), grab(d, ['state_code','stateCode']), d.sport, grab(d, ['start_time','startTime','start']));
+    language: text/javascript
+order: 1000

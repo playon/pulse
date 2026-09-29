@@ -6,6 +6,7 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["app/main.py", "--demo"],
       "port": 8765,
+      "autoPort": true,
       "cwd": "Pulse.Web"
     }
   ]

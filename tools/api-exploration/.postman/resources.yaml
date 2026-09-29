@@ -1,0 +1,13 @@
+# Use this workspace to collaborate
+workspace:
+  id: 2ba2a674-9e03-40d3-811a-091d22cabab7
+
+localResources:
+  collections:
+    - ../nfhs-pixellot.postman_collection.json
+  environments:
+    - ../nfhs-pixellot.postman_environment.json
+
+cloudResources:
+  collections:
+    ../postman/collections/NFHS Unity + Pixellot Club — Pulse API exploration: 26e204a9-9712-4bb0-8849-2a661b91119f
