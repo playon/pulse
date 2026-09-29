@@ -5231,17 +5231,25 @@ SC_CHAIN_COPY = {
             "say": "Use Change setup below to pick the console's brand and sport. The brand and model are "
                    "printed on the front of the console.",
             "where": ["controller"], "tone": "warning"},
-        "no-data": {
-            "title": "No scoreboard data is reaching ScoreConnect",
-            "say": "This is normal while the console is off. Before a game, ask the school: is the console on "
-                   "and running a game? Is the Power light on the {device} green? Is the {tip} pushed all "
-                   "the way into {port}? {extensionAsk}Pick what they are seeing below to narrow it down.",
+        # Two measured "no data" signatures (vpu-home, 2026-09-29). A console
+        # switched off, its tip pulled out, or the 9-pin end pulled out of the
+        # ScoreLink all look the same: packets stop, SC III keeps the last one
+        # and says "Connected". SC III set for the wrong brand instead says "No
+        # Scoreboard data" with nothing in the data field, as does a ScoreLink
+        # with nothing plugged into it.
+        "data-stopped": {
+            "title": "The console stopped sending data, so the score on the stream is stuck",
+            "say": "Something between the console and the ScoreLink came apart or went off. Ask the school: is "
+                   "the console on and running a game? Is the {tip} pushed all the way into {port}? Is the "
+                   "9-pin end screwed into the SCOREBOARD port on the {device}? {extensionAsk}",
             "where": ["cable", "extension", "controller"], "tone": "warning"},
-        "frozen": {
-            "title": "The console keeps sending the same data, so the score on the stream is stuck",
-            "say": "Ask the school to check the console is in a game, not a menu or setup screen. Turning the "
-                   "console off and on usually clears it.",
-            "where": ["controller"], "tone": "warning"},
+        "no-data": {
+            "title": "ScoreConnect isn't getting any data it can read from the console",
+            "say": "Normal while the console is off. Before a game, ask the school: is the console on and running "
+                   "a game? Is the Power light on the {device} green? Is the {tip} pushed all the way into {port}? "
+                   "{extensionAsk}If all of that is fine, ScoreConnect may be set for the wrong brand: it is set "
+                   "for {vendor}. Check the console's brand and use Change setup if it is different.",
+            "where": ["cable", "extension", "controller"], "tone": "warning"},
         "intermittent": {
             "title": "Scoreboard data keeps dropping out ({drops} times since this page opened)",
             "say": "That is usually a loose cable. Ask the school to push the cable in firmly at the console "

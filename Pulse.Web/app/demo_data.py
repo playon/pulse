@@ -120,10 +120,13 @@ def _demo_raw_data():
 # ScoreConnect chain scenarios. PULSE_DEMO_SC picks which chain state demo
 # mode shows, so every break the ScoreConnect tab can point at is reachable
 # without a broken VPU:
-#   healthy (default) | no-usb | serial-failing | no-data | frozen |
+#   healthy (default) | no-usb | serial-failing | no-data | stopped |
 #   intermittent | sc3-down | legacy | ocr
+# "stopped" is a console that went off (or a cable pulled at either end):
+# SC III keeps the last packet and says "Connected". "no-data" is nothing
+# readable at all ("No Scoreboard data"), as with the wrong brand set.
 # Signatures mirror what vpu-home recorded on 2026-09-29.
-_SC_SCENARIOS = ("healthy", "no-usb", "serial-failing", "no-data", "frozen",
+_SC_SCENARIOS = ("healthy", "no-usb", "serial-failing", "no-data", "stopped",
                  "intermittent", "sc3-down", "legacy", "ocr")
 _DEMO_FROZEN_RAW = None
 
@@ -177,13 +180,14 @@ def _demo_scoreconnect_live():
                 "dataStatus": "No Scoreboard data is being received",
                 "ts": datetime.now().isoformat(), "error": None}
     raw = _demo_raw_data()
-    if s == "frozen":
+    status = "Data is present and in the correct format"
+    if s == "stopped":
         _DEMO_FROZEN_RAW = _DEMO_FROZEN_RAW or raw
-        raw = _DEMO_FROZEN_RAW
+        raw, status = _DEMO_FROZEN_RAW, "Connected"
     return {
         "reachable": True,
         "rawData": raw,
-        "dataStatus": "Data is present and in the correct format",
+        "dataStatus": status,
         "ts": datetime.now().isoformat(),
         "error": None,
     }
@@ -290,7 +294,8 @@ def _demo_scoreconnect():
     """
     scenario = _demo_sc_scenario()
     has_data = _demo_sc_data_flowing()
-    data_status = ("Data is present and in the correct format" if has_data
+    data_status = ("Connected" if scenario == "stopped"
+                   else "Data is present and in the correct format" if has_data
                    else "No Scoreboard data is being received")
     raw_data = _demo_raw_data() if has_data else None
 

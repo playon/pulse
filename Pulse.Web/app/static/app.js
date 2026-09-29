@@ -8544,7 +8544,10 @@ function renderScoreConnect() {
   const isDetected = data.reachable;  // SC III
   const anySC = isDetected || (sc2 && sc2.reachable);
   const version = data.version;
-  const hasData = data.dataStatus && !data.dataStatus.toLowerCase().includes("no scoreboard");
+  // "Connected" is SC III holding the last packet after the console stopped
+  // sending, not live data (vpu-home 2026-09-29).
+  const hasData = data.dataStatus && !data.dataStatus.toLowerCase().includes("no scoreboard")
+    && data.dataStatus.trim().toLowerCase() !== "connected";
   const dataReceiving = hasData && data.rawData;
 
   // RTD parsed scores from SC III raw data
@@ -8802,6 +8805,7 @@ function renderScoreConnect() {
 
 var _scc = {
   flow: null,        // live stage: live | stale | disconnected | offline
+  status: null,      // SC III's own words: "connected" (packets stopped) | "none" | "present"
   usb: null,         // true | false | null (not checked)
   serial: null,      // SC III serial state from its log
   drops: 0,          // live -> no data transitions since the page opened
@@ -8929,12 +8933,15 @@ function _sccLabel(part, p) {
 // and USB polls keep them current.
 function _sccSignals(data) {
   var legacy = !data.reachable && data.sc2 && data.sc2.reachable;
-  var dataNow = data.dataStatus && data.rawData && data.dataStatus.toLowerCase().indexOf("no scoreboard") === -1;
+  var dataNow = data.rawData && _sccStatusWord(data.dataStatus) === "present";
   return {
     sc3: data.reachable ? "up" : legacy ? "legacy" : "down",
     usb: _scc.usb != null ? _scc.usb : (data.scoreLinkConnected == null ? null : !!data.scoreLinkConnected),
     serial: _scc.serial || data.sc3Serial || null,
     flow: _scc.flow || (data.reachable ? (dataNow ? "live" : "disconnected") : "offline"),
+    // Packets stopped (a repeated packet, or SC III saying "Connected") versus
+    // nothing readable at all ("No Scoreboard data").
+    stopped: (_scc.status || _sccStatusWord(data.dataStatus)) === "connected" || (_scc.flow || "") === "stale",
     drops: _scc.drops,
   };
 }
@@ -8964,8 +8971,7 @@ function _sccBreaks(data, sig, parts) {
     var setupBrand = _sccBrandOf((data.configuration || {}).vendor);
     if (parts.controller.src === "confirmed" && setupBrand && parts.controller.value !== setupBrand
         && !(parts.controller.value === "other" && setupBrand === "other")) add("vendor-mismatch");
-    if (sig.flow === "disconnected") add(sig.drops >= 2 ? "intermittent" : "no-data");
-    else if (sig.flow === "stale") add("frozen");
+    if (sig.flow === "disconnected" || sig.flow === "stale") add(sig.drops >= 2 ? "intermittent" : sig.stopped ? "data-stopped" : "no-data");
     else if (sig.drops >= 2) add("intermittent");
   }
   var px = data.pixellotScore || {};
@@ -9022,8 +9028,8 @@ function _sccLinks(sig) {
   var wire;
   if (sig.sc3 !== "up" || sig.usb === false) wire = { s: "unknown", w: "Not checked" };
   else if (sig.flow === "live") wire = sig.drops >= 2 ? { s: "warn", w: "Dropping out" } : { s: "ok", w: "Data arriving" };
-  else if (sig.flow === "stale") wire = { s: "warn", w: "Data frozen" };
-  else if (sig.flow === "disconnected") wire = { s: "bad", w: "No data" };
+  else if (sig.flow === "stale") wire = { s: "bad", w: "Data stopped" };
+  else if (sig.flow === "disconnected") wire = { s: "bad", w: sig.stopped ? "Data stopped" : "No data" };
   else wire = { s: "unknown", w: "Not checked" };
   return { usb: usb, wire: wire };
 }
@@ -9460,7 +9466,7 @@ function _sccSetupResult(r) {
   if (r && !r.error && r.ok) {
     _scc.watchUntil = Date.now() + 45000;
     setTimeout(function() { _sccRender(true); }, 45500);
-    _scc.drops = 0; _scc.wasLive = false; _scc.flow = null;
+    _scc.drops = 0; _scc.wasLive = false; _scc.flow = null; _scc.status = null;
     dataCache.scoreconnect = null;   // re-read the new setup on the next render
     fetchSection("scoreconnect");
   }
@@ -9527,7 +9533,7 @@ function _sccBodyHtml(data) {
   var parts = _sccParts(data);
   var sig = _sccSignals(data);
   var breaks = _sccBreaks(data, sig, parts);
-  _scc.sig = JSON.stringify([sig.sc3, sig.usb, sig.flow, sig.drops >= 2, (sig.serial || {}).state, _scc.symptom, _scc.panel]);
+  _scc.sig = JSON.stringify([sig.sc3, sig.usb, sig.flow, sig.stopped, sig.drops >= 2, (sig.serial || {}).state, _scc.symptom, _scc.panel]);
   return _sccStatusHtml(data, sig, breaks) +
     '<div class="scc-track" role="list" aria-label="Scoreboard connection, from the VPU to the console">' + _sccTrackHtml(data, sig, parts, breaks) + '</div>' +
     _sccDiagnosisHtml(breaks) +
@@ -9544,7 +9550,7 @@ function _sccRender(force) {
   if (!d || !body) return;
   if (!force) {
     var sig = _sccSignals(d);
-    var next = JSON.stringify([sig.sc3, sig.usb, sig.flow, sig.drops >= 2, (sig.serial || {}).state, _scc.symptom, _scc.panel]);
+    var next = JSON.stringify([sig.sc3, sig.usb, sig.flow, sig.stopped, sig.drops >= 2, (sig.serial || {}).state, _scc.symptom, _scc.panel]);
     if (next === _scc.sig) return;
   }
   var focusId = document.activeElement && document.activeElement.id;
@@ -9552,11 +9558,17 @@ function _sccRender(force) {
   if (focusId) { var el = document.getElementById(focusId); if (el) el.focus(); }
 }
 
+function _sccStatusWord(t) {
+  t = String(t || "").trim().toLowerCase();
+  return t === "connected" ? "connected" : t.indexOf("no scoreboard") !== -1 ? "none" : t.indexOf("data is present") !== -1 ? "present" : null;
+}
+
 // From the live data poll (every 300ms while the tab is open).
-function _sccOnLive(stage) {
+function _sccOnLive(stage, live) {
   if (stage === "live") _scc.wasLive = true;
-  if (_scc.flow === "live" && stage === "disconnected" && _scc.wasLive) _scc.drops++;
+  if (_scc.flow === "live" && (stage === "disconnected" || stage === "stale") && _scc.wasLive) _scc.drops++;
   _scc.flow = stage;
+  _scc.status = _sccStatusWord(live && live.dataStatus) || _scc.status;
   _sccRender(false);
 }
 
@@ -9570,7 +9582,7 @@ function _sccOnUsb(sl) {
 // A fresh page render starts a fresh session of live signals, but keeps what
 // the tech has open.
 function _sccReset() {
-  _scc.flow = null; _scc.usb = null; _scc.serial = null; _scc.drops = 0; _scc.wasLive = false; _scc.sig = "";
+  _scc.flow = null; _scc.status = null; _scc.usb = null; _scc.serial = null; _scc.drops = 0; _scc.wasLive = false; _scc.sig = "";
 }
 
 // ── SC III Live Score Polling ────────────────────────────────
@@ -9719,6 +9731,10 @@ function _sc3ComputeStage(live) {
   if (!live.rawData || scStatus.indexOf("no scoreboard") !== -1) {
     return { stage: "disconnected", secs: 0 };
   }
+  // "Connected" is SC III with a ScoreLink but no packets: it keeps serving
+  // the last packet, so the score on screen looks fine while nothing arrives
+  // (console off, or a cable pulled at either end: vpu-home 2026-09-29).
+  if (scStatus.trim() === "connected") return { stage: "disconnected", secs: 0, stopped: true };
   // Track raw-data changes to measure staleness.
   if (live.rawData !== _sc3LastRaw) {
     _sc3LastRaw = live.rawData;
@@ -9795,7 +9811,7 @@ function _sc3StartLivePoll(vendor, sport, showScoreboard) {
     }
 
     var st = _sc3ComputeStage(live);
-    _sccOnLive(st.stage);
+    _sccOnLive(st.stage, live);
 
     // Always refresh the raw-data readout (shown for any SC III vendor).
     if (live && live.rawData) {
@@ -9806,7 +9822,10 @@ function _sc3StartLivePoll(vendor, sport, showScoreboard) {
     // If the feed has started parsing but we're on the status hero (scores
     // weren't shown), promote to the scoreboard hero with a re-render. Fires
     // only on that one-way transition, so no flapping/loop.
-    if (!showScoreboard && live && live.rawData && parseRtdScores(live.rawData, vendor, sport)) {
+    // Only a LIVE feed promotes: SC III keeps serving its last packet after
+    // the console stops ("Connected"), and promoting on that re-rendered the
+    // page on every tick.
+    if (!showScoreboard && st.stage === "live" && live && live.rawData && parseRtdScores(live.rawData, vendor, sport)) {
       var cd = cached("scoreconnect");
       if (cd) { cd.rawData = live.rawData; cd.dataStatus = live.dataStatus; }
       renderScoreConnect();
