@@ -1181,10 +1181,6 @@ DEMO = {
         "daysBack": 7,
         "error": None,
     },
-    "Set-Sc3ServiceRecovery.ps1": lambda **kw: {
-        "success": True, "configured": True,
-        "message": "Crash auto-restart is on: Windows restarts ScoreConnect III 5 seconds after a crash.",
-    },
     "Get-ScoreLinkStatus.ps1": lambda **kw: (
         {"connected": False, "port": "", "model": "", "statusLabel": "ScoreLink not connected"}
         if _demo_sc_scenario() == "no-usb" else

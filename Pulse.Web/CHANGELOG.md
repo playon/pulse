@@ -35,7 +35,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - Pulse now checks the last week of games for missing graphics. It flags a VPU where the Pixellot software never passed the scorebug to the video (the "missing graphics" bug: the scoreboard and network are fine, but games stream with no graphics), and a VPU with no scoreboard type selected, which turns graphics off for every game.
 
 ### Fixed
-- ScoreConnect III now gets crash auto-restart every time Pulse starts, not only when Pulse installed it, so its known crash no longer leaves the scoreboard down. The ScoreConnect tab also has Start ScoreConnect III and Turn on crash auto-restart buttons.
+- The ScoreConnect tab has a Start ScoreConnect III button for when the service isn't answering.
 - ScoreConnect not running is no longer a warning on a VPU whose OCR camera is connected and reading the score. Pulse now checks whichever score source the VPU uses: the OCR camera if it has one, otherwise ScoreConnect.
 - A web filter blocking LogMeIn's website is no longer reported as SSL inspection or as a Stream Readiness failure. Pulse now says it's a category block. When LogMeIn is connected it's shown as a note, not a warning, because remote support still works.
 - Pulse now warns when the VPU is on Wi-Fi even if a cable is plugged into the main network port, and no longer tells you to fix the switch's duplex setting for a Wi-Fi connection.
