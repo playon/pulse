@@ -9071,8 +9071,6 @@ function _sccBreaks(data, sig, parts) {
     else if (sig.flow === "disconnected" || sig.flow === "stale") add(sig.drops >= 2 ? "intermittent" : sig.stopped ? "data-stopped" : "no-data");
     else if (sig.drops >= 2) add("intermittent");
   }
-  var rec = _scRecoveryCache;
-  if (sig.sc3 !== "legacy" && rec && !rec.error && rec.installed && !rec.recoveryConfigured) add("no-recovery");
   var px = data.pixellotScore || {};
   if (!px.error && px.source && px.source !== "SPORTZCAST") add(px.source === "OCR" ? "pixellot-ocr" : "pixellot-other");
   return out;
@@ -9229,8 +9227,6 @@ function _sccDiagnosisHtml(breaks) {
   var top = _sortByTone(breaks, _findingTone)[0];
   if (top && top.t !== "info" && _findingOpen["scchain:" + top.f.title] == null) _findingOpen["scchain:" + top.f.title] = true;
   var list = findingListHtml(breaks, { scope: "scchain", detailExtra: function(f) {
-    if (f.code === "no-recovery") return '<div class="scc-picker-foot"><button type="button" class="btn-outline btn-ol-blue" id="sc3-recovery-enable" onclick="sc3EnableRecovery()">' +
-      svgIcon("shield", 14) + ' Turn on crash auto-restart</button><span class="scc-save-state" id="sc3-recovery-result" role="status"></span></div>';
     if (f.code === "wrong-format" || f.code === "scanning") return '<div class="scc-picker-foot"><button type="button" class="btn-outline btn-ol-blue" onclick="sccScanOpen()">' +
       svgIcon(f.code === "scanning" ? "activity" : "search", 14) + (f.code === "scanning" ? " Show progress" : " Find the code") + '</button></div>';
     if (f.code !== "sc3-down") return "";

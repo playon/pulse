@@ -333,13 +333,6 @@ async def _on_startup():
     except Exception:
         pass
 
-    # Fire-and-forget: make sure ScoreConnect III restarts itself after its
-    # known crash (see _ensure_sc3_recovery). Free when already configured.
-    try:
-        asyncio.create_task(_ensure_sc3_recovery())
-    except Exception:
-        pass
-
     # Fire-and-forget removal of the retired Canopy Leaf agent (see
     # _remove_canopy_leaf). Scheduled so it can't delay startup; a cheap
     # folder pre-check makes it free on any already-clean unit.
@@ -5324,12 +5317,6 @@ SC_CHAIN_COPY = {
             "say": "That is usually a loose cable. Ask the school to push the cable in firmly at the console "
                    "and at the ScoreLink. {extensionDrop}",
             "where": ["cable", "extension"], "tone": "warning"},
-        "no-recovery": {
-            "title": "ScoreConnect III won't restart itself after its known crash",
-            "say": "It has a crash that stops the service. With auto-restart on, Windows restarts it within "
-                   "seconds instead of leaving the scoreboard down until someone notices. Pulse turns this on "
-                   "each time it starts; it did not take on this VPU, so use the button below.",
-            "where": ["vpu"], "tone": "soon"},
         # Pixellot's scoreboard source (graphics.cfg [GENERAL] TYPE) is Pixellot's
         # own configuration, read-only here. It is what the unit is set to use,
         # not a fault, and Pulse never changes it: that is done in VPU Manager
@@ -6065,71 +6052,6 @@ async def _refresh_installed_launcher(started_at: float = None) -> None:
 
 
 # ── Run-tracking check-in ───────────────────────────────────────────────────
-# ── ScoreConnect III crash auto-restart, on every launch ──────────────────
-# SC III dies on an unhandled WebSocket exception in every version seen, and
-# Sportzcast's installer sets no service recovery, so the service sits
-# Stopped until someone notices. Pulse used to apply recovery only when Pulse
-# installed SC III (PR #154), so any SC III installed another way stayed
-# unprotected: vpu-home crashed 2026-09-29 (System 7034, no corrective
-# action) and stayed down. Now every launch checks and applies it. The
-# check reads the service's FailureActions from the registry in Python, so a
-# unit that already has it never spawns PowerShell. Fail-open throughout.
-
-def _sc3_recovery_configured():
-    """True/False from the registry; None when SC III is not installed or the
-    registry cannot be read (then do nothing)."""
-    try:
-        import winreg
-    except ImportError:
-        return None
-    try:
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
-                            r"SYSTEM\CurrentControlSet\Services\ScoreConnectIII") as k:
-            try:
-                blob, _ = winreg.QueryValueEx(k, "FailureActions")
-            except FileNotFoundError:
-                return False
-    except OSError:
-        return None
-    try:
-        import struct
-        count, at0 = struct.unpack_from("<II", blob, 12)
-        at0 = max(at0, 20)
-        return any(struct.unpack_from("<I", blob, at0 + i * 8)[0] == 1
-                   for i in range(count) if at0 + i * 8 + 8 <= len(blob))
-    except Exception:
-        return False
-
-
-async def _ensure_sc3_recovery() -> None:
-    if DEMO_MODE:
-        return
-    try:
-        if _sc3_recovery_configured() is not False:
-            return  # already protected, or no SC III on this unit
-        await asyncio.sleep(20)  # let the dashboard preload go first
-        result = await run_ps("Set-Sc3ServiceRecovery.ps1", timeout=30, use_cache=False)
-        ok = bool((result or {}).get("configured"))
-        msg = "SC III crash auto-restart applied on launch" if ok else \
-              "SC III crash auto-restart NOT applied: " + str((result or {}).get("message"))
-        ps_log("sc3-recovery", 0, "ok" if ok else "error", msg)
-        (_server_log.info if ok else _server_log.warning)(msg)
-    except Exception as e:
-        try:
-            _server_log.info("SC III recovery check skipped (%s)", e)
-        except Exception:
-            pass
-
-
-@app.post("/api/scoreconnect/service-recovery/enable")
-async def api_sc3_service_recovery_enable():
-    """Turn on SC III crash auto-restart now (the launch-time check does this
-    too; the button covers a launch where it could not)."""
-    res = await run_ps("Set-Sc3ServiceRecovery.ps1", timeout=30, use_cache=False)
-    clear_ps_cache()
-    return res
-
-
 # ── One-shot Canopy Leaf removal ────────────────────────────────────────────
 # PlayOn retired the Banyan Hills Canopy platform (fully shut down mid-2026),
 # but fleet VPUs still carry the orphaned Leaf agent: four auto-start services,
