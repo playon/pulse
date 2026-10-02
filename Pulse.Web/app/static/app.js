@@ -657,6 +657,7 @@ const SPLASH_SCRIPT_LABELS = {
   "Get-NtpPeers.ps1": "Reading time sync sources",
   "Get-LmiGatewayLog.ps1": "Reading the LogMeIn connection log",
   "Get-GraphicsDelivery.ps1": "Checking recent games for missing graphics",
+  "Get-VpuStreamLog.ps1": "Reading the VPU's live-stream log",
   "Get-CameraExpectations.ps1": "Reading the expected camera layout",
   "Get-PoePower.ps1": "Measuring PoE power per port",
   "Get-S1Cameras.ps1": "Detecting cameras",
@@ -4375,6 +4376,18 @@ function _lmiLogNote(lmi) {
   return '<p class="text-pulse-muted text-xs mt-2">LogMeIn service log: no killed handshakes in the last ' + days + " days.</p>";
 }
 
+// One line under the port tiles: what VPU.exe's own log says the real stream
+// did. The tiles test Pixellot's echo server; the live stream dials a
+// different streaming server every event, so a green tile can sit next to a
+// stream that never connected (Red Lodge MT, 2026-09-26). main.py writes the
+// line (_stream_log_summary), including the could-not-read and no-stream
+// states, so the card and the findings can't disagree.
+function _streamLogNote(sl) {
+  if (!sl || !sl.summary) return "";
+  var cls = { pass: "status-pass", warn: "status-warn", fail: "status-fail" }[sl.summary.level] || "text-pulse-muted";
+  return '<p class="text-xs mt-2 ' + cls + '">Live stream (VPU log): ' + esc(sl.summary.text) + "</p>";
+}
+
 function _tlsBadge(status) {
   switch ((status || "").toLowerCase()) {
     case "pass":           return badge("Pass", "pass");
@@ -5163,6 +5176,7 @@ function renderNetwork() {
           ${sectionTitle("link", "Port Connectivity")}
           <p class="net-conn-hint">Hover or tap a tile to see what stops working if the school's network blocks that port.</p>
           ${_renderPortConnectivity(ports)}
+          ${_streamLogNote(data.streamLog)}
         </div>
         <div class="net-conn-col">
           ${sectionTitle("wifi", "Service Reachability")}
