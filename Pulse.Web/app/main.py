@@ -365,12 +365,36 @@ async def _on_startup():
         pass
 
 
+# ScoreConnect III listens on :5000 on both IPv4 and IPv6. Measured on VPU2
+# 2026-09-29: a fresh process's first request to "localhost" took 12-40s
+# while 127.0.0.1 took ~80ms, so the ScoreConnect collector (2s timeout, a new
+# PowerShell process every run) reported a healthy SC III as not answering.
+SC3_DEFAULT_URL = "http://127.0.0.1:5000"
+
+
 def load_settings() -> dict:
     try:
         with open(SETTINGS_PATH, "r") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        return {"scoreConnectUrl": "http://localhost:5000", "pollIntervalMs": 3000}
+        return {"scoreConnectUrl": SC3_DEFAULT_URL, "pollIntervalMs": 3000}
+
+
+def sc3_base_url(settings: dict = None) -> str:
+    """SC III's base URL from settings, with "localhost" read as 127.0.0.1
+    (see SC3_DEFAULT_URL). A settings file saved before this change still
+    holds "http://localhost:5000", so the rewrite is applied on every read."""
+    from urllib.parse import urlsplit, urlunsplit
+    s = settings if settings is not None else load_settings()
+    url = str(s.get("scoreConnectUrl") or SC3_DEFAULT_URL).strip().rstrip("/")
+    try:
+        p = urlsplit(url)
+        if (p.hostname or "").lower() == "localhost":
+            netloc = "127.0.0.1" + (":%d" % p.port if p.port else "")
+            url = urlunsplit((p.scheme, netloc, p.path, p.query, p.fragment)).rstrip("/")
+    except ValueError:
+        pass
+    return url
 
 
 def save_settings(data: dict) -> None:
@@ -5049,8 +5073,7 @@ def _scoreboard_source(sc, ocr) -> dict:
 
 @app.get("/api/scoreconnect")
 async def api_scoreconnect():
-    settings = load_settings()
-    url = settings.get("scoreConnectUrl", "http://localhost:5000")
+    url = sc3_base_url()
     # 15s timeout — SC III REST probes ~2-4s, SC II file-based probe < 2s.
     # The camera reads ride along (both cached, and the CGI probe is usually
     # warm from preload) so the page and the splash know whether an OCR
@@ -5122,7 +5145,7 @@ def _sc3_call():
                 # Daktronics Football, so Find the code has something to find.
                 _demo_sc3.console_sport = "Daktronics Football"
         return _demo_sc3
-    return sc3_client.http_transport(load_settings().get("scoreConnectUrl", "http://localhost:5000"))
+    return sc3_client.http_transport(sc3_base_url())
 
 
 def _sc3_settings():
@@ -5474,7 +5497,7 @@ async def api_scoreconnect_chain_save(request: Request):
     update = body.get("update") if isinstance(body, dict) else None
     if not isinstance(update, dict) or not update:
         return {"error": True, "message": "Nothing to save."}
-    sc = await _run_sc_status(load_settings().get("scoreConnectUrl", "http://localhost:5000"), timeout=15)
+    sc = await _run_sc_status(sc3_base_url(), timeout=15)
     try:
         chain = sc3_client.save_chain(SC_CHAIN_PATH, sc3_client.load_chain(SC_CHAIN_PATH),
                                       update, _sc_chain_basis(sc),
@@ -5741,7 +5764,7 @@ def _fetch_sc3_status(url: str) -> dict:
 @app.get("/api/scoreconnect/live")
 async def api_scoreconnect_live():
     """High-frequency live poll of SC III scoreboard data only. Uses a direct
-    stdlib HTTP GET to localhost:5000 (NOT a PowerShell spawn) so it's cheap
+    stdlib HTTP GET to 127.0.0.1:5000 (NOT a PowerShell spawn) so it's cheap
     enough to poll multiple times per second — the clock ticks every second,
     so sub-second sampling avoids skipped seconds.
 
@@ -5752,8 +5775,7 @@ async def api_scoreconnect_live():
         from demo_data import _demo_scoreconnect_live
         return _demo_scoreconnect_live()
 
-    settings = load_settings()
-    url = settings.get("scoreConnectUrl", "http://localhost:5000").rstrip("/")
+    url = sc3_base_url()
     try:
         data = await asyncio.to_thread(_fetch_sc3_status, url)
         raw = str(data.get("data", "") or "").strip() or None
@@ -6484,7 +6506,7 @@ async def build_report() -> dict:
 
     Shared by the Reports download (/api/reports/export) and the LAN peer push
     (/api/peer/send) so both ship the identical snapshot."""
-    sc_url = load_settings().get("scoreConnectUrl", "http://localhost:5000")
+    sc_url = sc3_base_url()
 
     # (section key, coroutine). Interactive/slow-by-design probes (traceroute,
     # local ping, packet capture, RTSP video test) and action scripts are

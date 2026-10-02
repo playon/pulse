@@ -225,7 +225,7 @@ try {
     `$verifyStart = Get-Date
     while (((Get-Date) - `$verifyStart).TotalSeconds -lt 60) {
         try {
-            `$r = Invoke-WebRequest -Uri 'http://localhost:5000/api/configuration/get-status' -UseBasicParsing -TimeoutSec 3
+            `$r = Invoke-WebRequest -Uri 'http://127.0.0.1:5000/api/configuration/get-status' -UseBasicParsing -TimeoutSec 3
             if (`$r.StatusCode -eq 200) { `$ok = `$true; break }
         } catch {}
         Start-Sleep -Seconds 2
