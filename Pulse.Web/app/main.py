@@ -5372,6 +5372,8 @@ SC_CHAIN_COPY = {
     "legacy": "This VPU runs {legacy}. Pulse can see the ScoreLink but not live scoreboard data, so the "
               "cable and console links can't be checked from here.",
     "ocr": "The OCR camera reads the score on this VPU, so ScoreConnect isn't needed.",
+    # Leads every chain finding while the OCR camera reads the score.
+    "ocrNote": "The OCR camera reads the score on this VPU, so this doesn't affect the stream. ",
     "symptoms": {
         "no-score": {
             "label": "No score on the stream",
