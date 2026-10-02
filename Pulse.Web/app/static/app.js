@@ -9244,10 +9244,23 @@ function _sccDiagnosisHtml(breaks) {
 }
 
 // The findings card for the top of the tab; empty when there is nothing.
+// Only the score source in use is a risk (PR #190): while the OCR camera
+// reads the score, a ScoreConnect problem can't touch the stream, so each
+// chain finding is a note. The chain still lights the broken link for a tech
+// who opens it (a venue with both). Found on VPU2 2026-10-02: the chain card
+// said "ScoreConnect isn't needed" under a "Risk tonight" for no console data.
 function _sccFindingsTopHtml(data) {
   if (!data.chainCopy) return "";
   var parts = _sccParts(data), sig = _sccSignals(data);
-  return _sccDiagnosisHtml(_sccBreaks(data, sig, parts));
+  var breaks = _sccBreaks(data, sig, parts);
+  var src = data.scoreboardSource || {};
+  if (src.source === "ocr" && src.ok) {
+    var note = data.chainCopy.ocrNote || "";
+    breaks = breaks.map(function(b) {
+      return b.severity === "info" ? b : Object.assign({}, b, { severity: "info", recommendation: note + b.recommendation });
+    });
+  }
+  return _sccDiagnosisHtml(breaks);
 }
 
 function _sccAskHtml(data) {

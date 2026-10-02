@@ -121,13 +121,15 @@ def _demo_raw_data():
 # mode shows, so every break the ScoreConnect tab can point at is reachable
 # without a broken VPU:
 #   healthy (default) | no-usb | serial-failing | no-data | stopped |
-#   wrong-format | intermittent | sc3-down | legacy | ocr
+#   wrong-format | intermittent | sc3-down | legacy | ocr | ocr-no-data
+# "ocr-no-data" is VPU2 as measured 2026-10-02: the OCR camera reads the
+# score and ScoreConnect gets nothing from a console.
 # "stopped" is a console that went off (or a cable pulled at either end):
 # SC III keeps the last packet and says "Connected". "no-data" is nothing
 # readable at all ("No Scoreboard data"), as with the wrong brand set.
 # Signatures mirror what vpu-home recorded on 2026-09-29.
 _SC_SCENARIOS = ("healthy", "no-usb", "serial-failing", "no-data", "stopped", "wrong-format",
-                 "intermittent", "sc3-down", "legacy", "ocr")
+                 "intermittent", "sc3-down", "legacy", "ocr", "ocr-no-data")
 _DEMO_FROZEN_RAW = None
 # Set by main.py after a demo save or Find the code lands on the code the
 # demo console sends: "wrong-format" then reads as healthy.
@@ -146,7 +148,7 @@ def _demo_sc_data_flowing():
     """Whether the demo console is sending data right now. Intermittent
     drops out for 4s in every 15s."""
     s = _demo_sc_scenario()
-    if s in ("no-usb", "serial-failing", "no-data", "sc3-down", "legacy", "wrong-format"):
+    if s in ("no-usb", "serial-failing", "no-data", "sc3-down", "legacy", "wrong-format", "ocr-no-data"):
         return False
     if s == "intermittent":
         return (int(time.time()) % 15) >= 4
@@ -165,7 +167,7 @@ def _demo_sc_scenario_source(src):
     """The demo unit has an OCR camera, which makes ScoreConnect optional and
     folds the chain away. Only the "ocr" scenario keeps that; the others make
     ScoreConnect the score source so the chain they describe is on screen."""
-    if _demo_sc_scenario() == "ocr":
+    if _demo_sc_scenario() in ("ocr", "ocr-no-data"):
         return {"source": "ocr", "ok": True, "issue": None, "ocrConnected": True,
                 "ocrPort": "Port 3", "scoreConnectRunning": True, "ocrKnown": True}
     running = _demo_sc_scenario() not in ("sc3-down",)
