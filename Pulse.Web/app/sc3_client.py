@@ -54,7 +54,7 @@ class Sc3Error(Exception):
 
 def http_transport(base_url):
     """A (method, path, body) -> (status, parsed) callable against SC III."""
-    base = (base_url or "http://localhost:5000").rstrip("/")
+    base = (base_url or "http://127.0.0.1:5000").rstrip("/")
 
     def call(method, path, body=None, timeout=6):
         headers = {"Accept": "application/json"}
