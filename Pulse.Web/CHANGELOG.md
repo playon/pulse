@@ -20,6 +20,11 @@ flow shows testers when a new build is available.
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 `Pulse.Web/VERSION`.
 
+## [1.3.3] - 2026-10-02
+
+### Fixed
+- Pulse no longer fails to start with "Dependencies could not be installed" / "No module named pip" on a VPU where an earlier first-time setup was cut short. The launcher now notices the unfinished setup and repairs it by itself on the next launch. No need to delete C:\Pulse\app\python by hand any more.
+
 ## [1.3.2] - 2026-09-25
 
 ### Changed
