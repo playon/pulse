@@ -10287,7 +10287,10 @@ function _scServiceRecoveryHtml(r) {
   if (r.recoveryConfigured) {
     var note = recovered > 0 ? "caught " + recovered + (recovered === 1 ? " crash" : " crashes") + " in " + days + " days"
       : crashes === 0 ? "no crashes in " + days + " days" : "";
-    return kvRowHtml("Crash auto-restart", '<span class="status-pass">On</span>' + (note ? ' <span class="text-pulse-muted">\u00b7 ' + esc(note) + '</span>' : ""));
+    // A ScoreConnect install turns the setting off; the guard task puts it back.
+    var kept = r.guardEnabled ? "kept after ScoreConnect updates" : "a ScoreConnect update turns it off";
+    return kvRowHtml("Crash auto-restart", '<span class="status-pass">On</span>' +
+      ' <span class="text-pulse-muted">\u00b7 ' + esc([note, kept].filter(Boolean).join(" \u00b7 ")) + '</span>');
   }
   return kvRowHtml("Crash auto-restart", '<span class="status-warn">Off</span>' +
     (crashes ? ' <span class="text-pulse-muted">\u00b7 ' + crashes + (crashes === 1 ? " crash" : " crashes") + " in " + days + " days, not restarted</span>" : ""));

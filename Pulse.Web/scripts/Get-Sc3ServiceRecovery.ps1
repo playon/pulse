@@ -62,6 +62,10 @@ $out = [ordered]@{
     lastCrash            = $null
     lastAutoRestart      = $null
     daysBack             = $DaysBack
+    guardPresent         = $false
+    guardEnabled         = $false
+    guardLastRun         = $null
+    guardLastResult      = $null
     error                = $null
 }
 
@@ -130,6 +134,23 @@ try {
     } else {
         $out.actionSummary = 'No recovery actions configured'
     }
+
+    # -- The keep-on task (Set-Sc3ServiceRecovery.ps1) ----------------------
+    # Sportzcast's installer re-creates the service without restart actions;
+    # "Pulse ScoreConnect Guard" puts them back on its own.
+    try {
+        $gt = Get-ScheduledTask -TaskName 'Pulse ScoreConnect Guard' -ErrorAction SilentlyContinue
+        if ($gt) {
+            $out.guardPresent = $true
+            $out.guardEnabled = ($gt.State -ne 'Disabled' -and @($gt.Triggers | Where-Object { $_.Enabled }).Count -eq 3)
+            $gi = Get-ScheduledTaskInfo -TaskName 'Pulse ScoreConnect Guard' -ErrorAction SilentlyContinue
+            # 1999-11-30 is Task Scheduler's "never run".
+            if ($gi -and $gi.LastRunTime -and $gi.LastRunTime.Year -gt 2000) {
+                $out.guardLastRun = $gi.LastRunTime.ToString('o')
+                $out.guardLastResult = [int64]$gi.LastTaskResult
+            }
+        }
+    } catch {}
 
     # -- Crash / recovery evidence from the System log --------------------
     # 7034 = terminated, nothing done. 7031 = terminated, SCM restarted it.
