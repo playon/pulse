@@ -6125,17 +6125,37 @@ def _sc3_recovery_configured():
         return False
 
 
+def _sc3_guard_present():
+    """Whether the "Pulse ScoreConnect Guard" task exists (Task Scheduler's
+    registry index, so no PowerShell). None off Windows."""
+    try:
+        import winreg
+    except ImportError:
+        return None
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\Pulse ScoreConnect Guard"):
+            return True
+    except OSError:
+        return False
+
+
 async def _ensure_sc3_recovery() -> None:
+    # Sportzcast's installer re-creates the SC III service without restart
+    # actions (vpu-6493 2026-10-05, installing 1.4.2.2), so Pulse also keeps a
+    # scheduled task that puts them back on its own; Set-Sc3ServiceRecovery
+    # applies both. Runs when either is missing.
     if DEMO_MODE:
         return
     try:
-        if _sc3_recovery_configured() is not False:
-            return  # already protected, or no SC III on this unit
+        rec = _sc3_recovery_configured()
+        if rec is None or (rec and _sc3_guard_present() is not False):
+            return  # no SC III on this unit, or already protected and kept on
         await asyncio.sleep(20)  # let the dashboard preload go first
         result = await run_ps("Set-Sc3ServiceRecovery.ps1", timeout=30, use_cache=False)
-        ok = bool((result or {}).get("configured"))
-        msg = "SC III crash auto-restart applied on launch" if ok else \
-              "SC III crash auto-restart NOT applied: " + str((result or {}).get("message"))
+        ok = bool((result or {}).get("configured")) and bool((result or {}).get("guardInstalled"))
+        msg = "SC III crash auto-restart and its keep-on task applied on launch" if ok else \
+              "SC III crash auto-restart NOT fully applied: " + str((result or {}).get("message"))
         ps_log("sc3-recovery", 0, "ok" if ok else "error", msg)
         (_server_log.info if ok else _server_log.warning)(msg)
     except Exception as e:

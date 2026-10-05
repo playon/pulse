@@ -1181,11 +1181,16 @@ DEMO = {
         "lastCrash": (datetime.now() - timedelta(hours=3)).isoformat(),
         "lastAutoRestart": (datetime.now() - timedelta(hours=3)).isoformat(),
         "daysBack": 7,
+        "guardPresent": True,
+        "guardEnabled": True,
+        "guardLastRun": (datetime.now() - timedelta(days=2)).isoformat(),
+        "guardLastResult": 0,
         "error": None,
     },
     "Set-Sc3ServiceRecovery.ps1": lambda **kw: {
-        "success": True, "configured": True,
-        "message": "Crash auto-restart is on: Windows restarts ScoreConnect III 5 seconds after a crash.",
+        "success": True, "configured": True, "guardInstalled": True, "guardError": None,
+        "message": "Crash auto-restart is on: Windows restarts ScoreConnect III 5 seconds after a crash, "
+                   "and it stays on after ScoreConnect updates.",
     },
     "Get-ScoreLinkStatus.ps1": lambda **kw: (
         {"connected": False, "port": "", "model": "", "statusLabel": "ScoreLink not connected"}
