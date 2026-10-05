@@ -28,6 +28,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - Power Events moved out of Pixellot Configuration into the main diagnostics group, alongside Camera Connectivity, ScoreConnect, Audio and Service Status.
 
 ### Added
+- Event Streaming: the top banner now shows **ESR**, the share of this school's last 10 public events that went on air (hover for details). Unlisted and test events are left out. Pulse counts it from the NFHS events list, so it can differ slightly from the Sigma ESR dashboard. The Unity key is now labelled and easier to read.
 - ScoreConnect: when the console's data doesn't match ScoreConnect's setup, **Find the code** tries each of the brand's codes for the sport the school names (about 11 seconds a code), stops at the one that reads, and puts the old setup back if none does.
 - ScoreConnect tab: a picture of the scoreboard connection (VPU, ScoreLink, cable, extension, console) that shows which link is broken, what to tell the school, and a "What is the school seeing?" checklist. What the school confirms (cable, extension, console) is remembered on the VPU for the next call.
 - ScoreConnect tab: change ScoreConnect III's vendor, sport, connection type and ScoreLink from Pulse, with a review before saving and one-click undo. The bot number is shown but never changed.

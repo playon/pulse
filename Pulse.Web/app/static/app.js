@@ -1816,6 +1816,23 @@ const _CE_VERDICTS = {
   unknown:  ["muted", "Unknown"],
 };
 
+// Event Success Rate, counted by cloud_api.esr_summary. It is Pulse's own
+// count from the public events API, so the tooltip says what it covers.
+function _ceEsrChip(cloud) {
+  const esr = cloud.esr;
+  if (!esr) {
+    const why = cloud.errors && cloud.errors.events ? "couldn't load events" : "unavailable";
+    return `<span title="Pulse could not load this school's event history, so it could not count ESR.">${severityChip("muted", `ESR ${why}`)}</span>`;
+  }
+  if (!esr.counted) {
+    return `<span title="No past public events with a known result yet.">${severityChip("muted", "ESR: no past events")}</span>`;
+  }
+  const pct = Math.round(esr.rate * 100);
+  const tip = `Event Success Rate: ${esr.succeeded} of the last ${esr.counted} public events went on air. ` +
+    "Unlisted and test events are not counted. Pulse counts this from the NFHS events API, so it can differ slightly from the Sigma ESR dashboard.";
+  return `<span title="${esc(tip)}">${severityChip(esr.rate >= 0.9 ? "ok" : "warning", `ESR ${pct}% (${esr.succeeded}/${esr.counted})`)}</span>`;
+}
+
 function renderCloudEvents() {
   const data = cached("cloud-events");
   if (!data) { $page().innerHTML = sectionLoading("Event Streaming"); fetchSection("cloud-events"); return; }
@@ -1860,7 +1877,7 @@ function renderCloudEvents() {
     ${_cePanelTitle("PIXELLOT CLOUD IDENTITY", "globe")}
     <div class="card">
       <div class="text-sm font-medium">${esc(prod.name || school.name || ident.vpuName || "Unknown unit")}</div>
-      <div class="text-xs text-pulse-muted font-mono mt-1">${school.key ? `school ${esc(school.key)} · ` : ""}${esc(prod.pixellotKey || "no pixellot key")}</div>
+      <div class="text-xs text-pulse-muted mt-1">Unity key <span class="font-mono text-pulse-text">${esc(prod.pixellotKey || "none")}</span>${school.key ? ` · school <span class="font-mono">${esc(school.key)}</span>` : ""}</div>
       <div class="flex items-center gap-2 flex-wrap mt-3">
         ${met.connection ? (prod.internalStatus === "broadcasting"
           // On a dormant (not-broadcasting) unit "connection Ok" just means
@@ -1872,6 +1889,7 @@ function renderCloudEvents() {
         ${drift ? severityChip("warning", `SW ${prod.currentSwVersion} → target ${prod.targetSwVersion}`)
                 : prod.currentSwVersion ? severityChip("ok", `SW ${prod.currentSwVersion}`) : ""}
         ${cloud.eqsAvgScore !== null && cloud.eqsAvgScore !== undefined ? severityChip(cloud.eqsAvgScore >= 0.85 ? "ok" : "warning", `EQS ${(cloud.eqsAvgScore * 100).toFixed(0)}%`) : ""}
+        ${_ceEsrChip(cloud)}
       </div>
     </div>`;
 
