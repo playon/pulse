@@ -1,0 +1,16 @@
+# Windows batch files are stored with CRLF line endings, byte for byte.
+#
+# cmd.exe cannot reliably find a label in an LF-only batch file: `call :x`
+# or `goto :x` fails with "The system cannot find the batch label specified"
+# when the label line straddles a 512-byte block boundary counted from where
+# cmd started scanning. Measured on a fleet-image VPU (Win10 LTSC 1809): with
+# LF endings a jump missed its label at 12-22 of every 1,101 label positions;
+# with CRLF it never missed.
+#
+# -text (rather than eol=crlf) so git never converts these files in either
+# direction: the bytes in the repository are the bytes that ship.
+# raw.githubusercontent.com (launcher self-repair) and the release zip both
+# serve the stored blob, so normalizing to LF in the repository would undo
+# the fix. CI enforces it: .github/workflows/batch-files.yml.
+*.bat -text
+*.cmd -text
