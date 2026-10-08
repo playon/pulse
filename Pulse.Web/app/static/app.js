@@ -7319,6 +7319,32 @@ function renderReboots() {
     diTask ? formatTime(diTask) : "Not on this box",
     "Windows' built-in task that reboots after a driver install. It is the usual cause of an \"unprovoked\" restart at logon.");
 
+  // BIOS "After Power Loss". Only HP exposes it to Windows; any other answer
+  // (unsupported model, failed read, older collector) must not read as a pass.
+  const apl = data.afterPowerLoss;
+  const aplVal = apl && apl.value ? String(apl.value) : "";
+  const aplModel = apl ? [apl.manufacturer, apl.model].filter(Boolean).join(" ").trim() : "";
+  const aplCard = !apl
+    ? sumCard("help", "After power loss", "muted", "Not checked", "Not reported",
+        "This version of the check didn't report the BIOS power-loss setting. Refresh, or check it in BIOS setup.")
+    : apl.status === "error"
+    ? sumCard("alert", "After power loss", "warning", "Couldn't check", "Could not read the BIOS setting",
+        apl.message || "The BIOS query failed. Check the setting in BIOS setup.")
+    : apl.status !== "read"
+    ? sumCard("help", "After power loss", "muted", "Can't check", "Not readable on this model",
+        `Pulse reads this setting from HP's BIOS. ${aplModel || "This VPU"} doesn't share it with Windows, so check it in BIOS setup.`)
+    : /^power on$/i.test(aplVal)
+    ? sumCard("check", "After power loss", "ok", "Turns back on", aplVal,
+        "After a power cut, this VPU starts up again by itself.")
+    : /^previous state$/i.test(aplVal)
+    ? sumCard("check", "After power loss", "ok", "Turns back on", aplVal,
+        "After a power cut, this VPU starts up again if it was running when the power went out, which it normally is.")
+    : /^power off$/i.test(aplVal)
+    ? sumCard("alert", "After power loss", "warning", "Stays off", aplVal,
+        "After a power cut, this VPU stays off until someone at the school presses its power button. To fix: BIOS setup (F10) > Advanced > Power-On Options > After Power Loss > Power On.")
+    : sumCard("help", "After power loss", "muted", "Unrecognised", aplVal || "Empty",
+        "The BIOS returned a value Pulse doesn't recognise. Check the setting in BIOS setup.");
+
   function row(h) {
     const typeChip = h.category === "unexpected"
       ? severityChip("critical", "Unexpected")
@@ -7354,7 +7380,7 @@ function renderReboots() {
     ${pageHeader("Power Events", "Why this VPU last restarted, and whether a reboot is pending. Reboots Pulse triggered are labeled; everything else came from outside Pulse.",
       `<button class="btn-outline btn-ol-blue" onclick="dataCache['reboots']=null;renderReboots()">${svgIcon("refresh", 14)} Refresh</button>`
     )}
-    <div class="dh-summary-row">${pendCard}${uptimeCard}${diCard}</div>
+    <div class="dh-summary-row">${pendCard}${uptimeCard}${aplCard}${diCard}</div>
     ${table}
   `;
 }

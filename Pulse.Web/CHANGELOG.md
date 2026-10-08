@@ -29,6 +29,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - Network Test: the port number on each port tile (for example "UDP 2088") is now larger and easier to read, so you can read it back to the school's IT.
 
 ### Added
+- Power Events: a new **After power loss** card shows whether the VPU turns back on by itself after a power cut. If the BIOS is set to stay off, it tells you where to change it. Pulse can read this on HP VPUs; on other models it says it can't check rather than showing a pass.
 - ScoreConnect: when the console's data doesn't match ScoreConnect's setup, **Find the code** tries each of the brand's codes for the sport the school names (about 11 seconds a code), stops at the one that reads, and puts the old setup back if none does.
 - ScoreConnect tab: a picture of the scoreboard connection (VPU, ScoreLink, cable, extension, console) that shows which link is broken, what to tell the school, and a "What is the school seeing?" checklist. What the school confirms (cable, extension, console) is remembered on the VPU for the next call.
 - ScoreConnect tab: change ScoreConnect III's vendor, sport, connection type and ScoreLink from Pulse, with a review before saving and one-click undo. The bot number is shown but never changed.
