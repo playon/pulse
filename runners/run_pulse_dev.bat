@@ -106,8 +106,16 @@ del "%TEMP%\chrome_installer.exe" 2>nul
 :: If Pulse is already installed and we can't reach GitHub, skip the update
 :: entirely and launch the installed copy. A tech on a downed venue network
 :: should get Pulse immediately, not after a download timeout.
+:: The name lookup gets its own wait, and the connect goes to the resolved
+:: IP. BeginConnect('github.com',...) resolves inside the 3 s connect wait
+:: on .NET Framework, so a PC whose lookups take 10 s (seen on a bench VPU:
+:: every getaddrinfo call stalls 10 s, while the DNS server answers in ms)
+:: read as offline and never updated. If the normal lookup has not answered
+:: in 3 s, ask the DNS server directly (Resolve-DnsName -DnsOnly skips the
+:: local resolver stack): an answer means slow-but-online, no answer means
+:: DNS is down and we still fall back to the installed build quickly.
 if exist "%INSTALL_DIR%\run.bat" (
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $c = New-Object Net.Sockets.TcpClient; $iar = $c.BeginConnect('github.com',443,$null,$null); if ($iar.AsyncWaitHandle.WaitOne(3000) -and $c.Connected) { $c.Close(); exit 0 } else { exit 1 } } catch { exit 1 }"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $ip = $null; $a = [Net.Dns]::BeginGetHostAddresses('github.com',$null,$null); if ($a.AsyncWaitHandle.WaitOne(3000)) { $ip = [Net.Dns]::EndGetHostAddresses($a) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1 } else { $ip = Resolve-DnsName -Name 'github.com' -Type A -DnsOnly -QuickTimeout -ErrorAction Stop | Where-Object { $_.IPAddress } | Select-Object -First 1 -ExpandProperty IPAddress }; if (-not $ip) { exit 1 }; $c = New-Object Net.Sockets.TcpClient; $iar = $c.BeginConnect([Net.IPAddress]$ip,443,$null,$null); if ($iar.AsyncWaitHandle.WaitOne(3000) -and $c.Connected) { $c.Close(); exit 0 } else { exit 1 } } catch { exit 1 }"
     if errorlevel 1 (
         echo !L_UPDATE!skipped - could not reach github.com, using !INSTALLED_DESC!
         goto :shortcut
@@ -340,6 +348,14 @@ if not errorlevel 1 (
     echo   ^(SSL inspection^). Downloads will keep failing until IT exempts
     echo   the hosts listed above from inspection.
 )
+findstr /l /c:"DNS SLOW" "%DIAG_LOG%" >nul 2>&1
+if not errorlevel 1 (
+    echo.
+    echo   DNS SLOW above means this PC takes seconds to look up each
+    echo   address - normal is well under one second. Pulse waits for it,
+    echo   so it does not block updates, but every download starts slowly.
+    echo   Mention it to the Pulse team and send the report file below.
+)
 echo.
 echo   Report saved to: %DIAG_LOG%
 goto :eof
@@ -350,8 +366,14 @@ goto :eof
 :: certificate issuer so an SSL-inspection appliance is visible at a glance.
 :: PS 5.1: the validation callback MUST be cast to its delegate type
 :: explicitly -- implicit conversion inside New-Object fails silently.
+:: DNS is resolved once, with its own 15 s wait, and the connect goes to
+:: that IP. Connecting by name re-resolves inside the 5 s connect wait, so
+:: a PC with 10 s lookups printed "DNS ok but no connection" for hosts that
+:: were fine. A lookup over 2 s is flagged DNS SLOW on the host's line. On a
+:: stalled PC some lookups take 40 s, so past 15 s we ask the DNS server
+:: directly (as the fast-path does) and test 443 against its answer.
 :probe
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$h='%~1';$line='';try{$null=[Net.Dns]::GetHostAddresses($h)}catch{$line=('  [FAIL] {0,-38} DNS lookup failed - {1}' -f $h,$_.Exception.Message.Trim())};if(-not $line){$c=New-Object Net.Sockets.TcpClient;$c.ReceiveTimeout=10000;$c.SendTimeout=10000;$iar=$c.BeginConnect($h,443,$null,$null);if(-not ($iar.AsyncWaitHandle.WaitOne(5000) -and $c.Connected)){$line=('  [FAIL] {0,-38} DNS ok but no connection on port 443' -f $h)}else{try{$script:pe='None';$cb=[Net.Security.RemoteCertificateValidationCallback]{param($s,$cert,$chain,$e) $script:pe=$e; $true};$ss=New-Object Net.Security.SslStream($c.GetStream(),$false,$cb);$ss.AuthenticateAsClient($h,$null,[Security.Authentication.SslProtocols]'Tls,Tls11,Tls12',$false);$cert2=New-Object Security.Cryptography.X509Certificates.X509Certificate2 $ss.RemoteCertificate;$iss=(($cert2.Issuer -split ',')[0]) -replace 'CN=','';$warn='';if($script:pe.ToString() -ne 'None'){$warn=' ** CERT WARNING: '+$script:pe};$line=('  [ OK ] {0,-38} cert issuer: {1}{2}' -f $h,$iss,$warn)}catch{$line=('  [FAIL] {0,-38} TLS handshake failed - {1}' -f $h,$_.Exception.Message.Trim())};$c.Close()}};Write-Output $line;Add-Content -LiteralPath '%DIAG_LOG%' -Value $line"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$h='%~1';$line='';$ip=$null;$slow='';$sw=[Diagnostics.Stopwatch]::StartNew();try{$a=[Net.Dns]::BeginGetHostAddresses($h,$null,$null);if($a.AsyncWaitHandle.WaitOne(15000)){$ip=[Net.Dns]::EndGetHostAddresses($a)|Where-Object{$_.AddressFamily -eq 'InterNetwork'}|Select-Object -First 1;if(-not $ip){$line=('  [FAIL] {0,-38} DNS lookup returned no IPv4 address' -f $h)}}else{$ip=Resolve-DnsName -Name $h -Type A -DnsOnly -QuickTimeout -ErrorAction SilentlyContinue|Where-Object{$_.IPAddress}|Select-Object -First 1 -ExpandProperty IPAddress;if($ip){$slow=' ** DNS SLOW: over 15 s'}else{$line=('  [FAIL] {0,-38} DNS lookup timed out after 15 s' -f $h)}}}catch{$line=('  [FAIL] {0,-38} DNS lookup failed - {1}' -f $h,$_.Exception.Message.Trim())};$dt=$sw.Elapsed.TotalSeconds;if($dt -ge 2 -and -not $slow){$slow=(' ** DNS SLOW: {0:N1} s' -f $dt)};if(-not $line){$c=New-Object Net.Sockets.TcpClient;$c.ReceiveTimeout=10000;$c.SendTimeout=10000;$iar=$c.BeginConnect($ip,443,$null,$null);if(-not ($iar.AsyncWaitHandle.WaitOne(5000) -and $c.Connected)){$line=('  [FAIL] {0,-38} DNS ok but no connection on port 443{1}' -f $h,$slow)}else{try{$script:pe='None';$cb=[Net.Security.RemoteCertificateValidationCallback]{param($s,$cert,$chain,$e) $script:pe=$e; $true};$ss=New-Object Net.Security.SslStream($c.GetStream(),$false,$cb);$ss.AuthenticateAsClient($h,$null,[Security.Authentication.SslProtocols]'Tls,Tls11,Tls12',$false);$cert2=New-Object Security.Cryptography.X509Certificates.X509Certificate2 $ss.RemoteCertificate;$iss=(($cert2.Issuer -split ',')[0]) -replace 'CN=','';$warn='';if($script:pe.ToString() -ne 'None'){$warn=' ** CERT WARNING: '+$script:pe};$line=('  [ OK ] {0,-38} cert issuer: {1}{2}{3}' -f $h,$iss,$warn,$slow)}catch{$line=('  [FAIL] {0,-38} TLS handshake failed - {1}{2}' -f $h,$_.Exception.Message.Trim(),$slow)};$c.Close()}};Write-Output $line;Add-Content -LiteralPath '%DIAG_LOG%' -Value $line"
 goto :eof
 
 :: -- Live progress for long steps -----------------------------------------
