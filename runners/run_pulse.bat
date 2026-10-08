@@ -23,7 +23,8 @@ echo   Administrator access declined - continuing with limited diagnostics.
 ::
 ::  - Installs to C:\Pulse
 ::  - Pulls the latest web-v* release from playon/pulse
-::    (falls back to the source repo, then a main-branch commit zip)
+::    (falls back to the source repo, then a main-branch commit zip;
+::    if the release file itself is blocked, uses the tag's source zip)
 ::  - If offline or the download fails, launches the installed copy
 ::  - Creates a desktop shortcut; hands off to run.bat, which starts
 ::    the server hidden and closes this window
@@ -148,6 +149,26 @@ if exist "%ZIPFILE%" for %%A in ("%ZIPFILE%") do if %%~zA GEQ 1000 set "DL_OK=1"
 if not defined DL_OK (
     if exist "%ZIPFILE%" del "%ZIPFILE%" 2>nul
     call :dl_spin "  Update ......................... retrying via PowerShell" "!ASSET_URL!" "%ZIPFILE%" "  Update ......................... downloaded"
+)
+
+set "DL_OK="
+if exist "%ZIPFILE%" for %%A in ("%ZIPFILE%") do if %%~zA GEQ 1000 set "DL_OK=1"
+if defined DL_OK goto :dl_ok
+
+:: Release files are served from release-assets.githubusercontent.com, which
+:: school web filters often block while github.com itself works. The same
+:: tag's source zip comes from codeload.github.com instead and carries the
+:: same Pulse.Web tree (the SRC search below finds it one folder down).
+if /I not "!REL_TAG:~0,5!"=="web-v" goto :dl_failed
+if exist "%ZIPFILE%" del "%ZIPFILE%" 2>nul
+set "ARCHIVE_URL=https://github.com/%REPO%/archive/refs/tags/!REL_TAG!.zip"
+echo   Update ......................... release file unreachable - trying source zip
+where curl.exe >nul 2>&1 && curl.exe -L --progress-bar -o "%ZIPFILE%" "!ARCHIVE_URL!"
+set "DL_OK="
+if exist "%ZIPFILE%" for %%A in ("%ZIPFILE%") do if %%~zA GEQ 1000 set "DL_OK=1"
+if not defined DL_OK (
+    if exist "%ZIPFILE%" del "%ZIPFILE%" 2>nul
+    call :dl_spin "  Update ......................... source zip via PowerShell" "!ARCHIVE_URL!" "%ZIPFILE%" "  Update ......................... downloaded"
 )
 
 if not exist "%ZIPFILE%" goto :dl_failed
