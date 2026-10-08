@@ -1872,7 +1872,7 @@ html.dark .channel-moved-banner {
 /* Protocol + port, the tier-2 detail. Monospace here is measurement, not
    costume: these are numbers a tech reads back to venue IT digit by digit. */
 .net-port-addr {
-    font-size: 0.68rem; font-weight: 500; color: var(--c-muted);
+    font-size: 0.8rem; font-weight: 600; color: var(--c-text);
     font-family: "SF Mono","Cascadia Mono","Fira Code",monospace;
     letter-spacing: 0.01em; white-space: nowrap;
 }
