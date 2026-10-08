@@ -9,13 +9,14 @@ flow shows testers when a new build is available.
   **Added**, **Changed**, or **Fixed**. Write it for a field tech, not a
   developer — "Fixed false low-speed warning on OCR camera ports", not the
   commit subject.
-- At a beta/main promotion, rename `[Unreleased]` to the released version
-  (e.g. `## [0.2.0] — 2026-06-15`) and start a fresh empty `[Unreleased]`.
-  That version's section becomes the GitHub release notes the update flow
-  displays.
-- Dev auto-tags don't use this file — they get notes generated from commit
-  messages automatically. Curate here for the builds testers and the fleet
-  actually read (beta / main).
+- At a promotion to main, rename `[Unreleased]` to the released version
+  (e.g. `## [1.4.0] - 2026-10-08`) on the release branch. **Main carries no
+  `[Unreleased]` heading**: the release workflow publishes the TOP section as
+  the release notes, so an empty `[Unreleased]` above the version ships blank
+  notes (web-v1.2.2). Dev starts a fresh `[Unreleased]` when it is bumped to
+  the next `-dev` version.
+- Dev builds publish the current `[Unreleased]` list as their notes, so
+  there is no per-push curation.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 `Pulse.Web/VERSION`.
@@ -39,6 +40,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - Pulse now checks the last week of games for missing graphics. It flags a VPU where the Pixellot software never passed the scorebug to the video (the "missing graphics" bug: the scoreboard and network are fine, but games stream with no graphics), and a VPU with no scoreboard type selected, which turns graphics off for every game.
 
 ### Fixed
+- Pulse now updates on school networks that block GitHub's file-download site. When the release file can't be downloaded, the launcher gets the same version from GitHub's source download instead, rather than quietly staying on the old build.
 - The launcher no longer skips updates on a VPU where looking up a website's address is slow. It used to give up after 3 seconds and report "could not reach github.com" even though the internet was fine, so the VPU stayed on an old version. If the launcher's network check runs, a slow lookup now shows as **DNS SLOW** on that site's line instead of a false "no connection on port 443".
 - ScoreConnect tab: a VPU that VPU Manager has set to take the score from ScoreConnect no longer shows "Pixellot's scoreboard source is set to WEB". WEB is how Pixellot stores the ScoreConnect setting, so the tab now shows it as ScoreConnect.
 - Hardware tab: SATA drives no longer show as "IDE" under Storage. Windows' older drive list calls most SATA drives IDE; Pulse now reads the drive's real connection type.
@@ -50,6 +52,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - A web filter blocking LogMeIn's website is no longer reported as SSL inspection or as a Stream Readiness failure. Pulse now says it's a category block. When LogMeIn is connected it's shown as a note, not a warning, because remote support still works.
 - Pulse now warns when the VPU is on Wi-Fi even if a cable is plugged into the main network port, and no longer tells you to fix the switch's duplex setting for a Wi-Fi connection.
 - Pulse no longer says the venue is blocking LogMeIn when LogMeIn is connected. It was reading an old block in LogMeIn's log as a current one, even while a tech was on the unit through LogMeIn.
+
+## [1.3.3] - 2026-10-02
+
+### Fixed
+- Pulse no longer fails to start with "Dependencies could not be installed" / "No module named pip" on a VPU where an earlier first-time setup was cut short. The launcher now notices the unfinished setup and repairs it by itself on the next launch. No need to delete C:\Pulse\app\python by hand any more.
 
 ## [1.3.2] - 2026-09-25
 
