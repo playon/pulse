@@ -23,9 +23,18 @@ set "URL=http://localhost:%PORT%"
 where curl.exe >nul 2>&1 && (set "HAS_CURL=1") || (set "HAS_CURL=")
 
 :: -- Step 1/5  Embedded Python --------------------------------
+:: python.exe alone doesn't prove a usable runtime: a first run interrupted
+:: after extraction leaves the exe without pip, updates never replace
+:: app\python, and every later launch died at step 2 "No module named pip".
+:: Repair it in place instead of skipping.
 if exist "%PYEXE%" (
-    echo  [1/5] Python runtime ............ ready
-    goto :deps
+    "%PYEXE%" -m pip --version >nul 2>&1
+    if not errorlevel 1 (
+        echo  [1/5] Python runtime ............ ready
+        goto :deps
+    )
+    echo  [1/5] Python runtime ............ incomplete ^(no pip^) - repairing
+    goto :pyrepair
 )
 
 echo  [1/5] Python runtime ............ installing (first run, ~1-2 min)
@@ -59,6 +68,7 @@ if not exist "%PYEXE%" (
 )
 del "%PYDIR%\%PYZIP%"
 
+:pyrepair
 echo        - verifying
 "%PYEXE%" --version >nul 2>&1
 if errorlevel 1 (
