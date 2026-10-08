@@ -38,6 +38,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - Pulse now checks the last week of games for missing graphics. It flags a VPU where the Pixellot software never passed the scorebug to the video (the "missing graphics" bug: the scoreboard and network are fine, but games stream with no graphics), and a VPU with no scoreboard type selected, which turns graphics off for every game.
 
 ### Fixed
+- ScoreConnect tab: a VPU that VPU Manager has set to take the score from ScoreConnect no longer shows "Pixellot's scoreboard source is set to WEB". WEB is how Pixellot stores the ScoreConnect setting, so the tab now shows it as ScoreConnect.
 - Hardware tab: SATA drives no longer show as "IDE" under Storage. Windows' older drive list calls most SATA drives IDE; Pulse now reads the drive's real connection type.
 - ScoreConnect crash auto-restart now stays on after a ScoreConnect update. Sportzcast's installer replaces the ScoreConnect III service and drops the setting; Pulse now also sets up a small Windows task that puts it back within about 15 seconds of an install, at startup, and after a crash Windows didn't restart. The ScoreConnect tab says "kept after ScoreConnect updates" when it is in place.
 - ScoreConnect tab: on a VPU where the OCR camera reads the score, a ScoreConnect problem (such as no data from a console) is now a "worth knowing" note that says the stream isn't affected, instead of a "risk tonight" under a card that says ScoreConnect isn't needed.

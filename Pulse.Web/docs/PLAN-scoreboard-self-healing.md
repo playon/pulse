@@ -147,18 +147,16 @@ existing SC III status and OCR calibration, and renders one verdict:
 | `TYPE = SPORTZCAST` + SC III data flowing | ✅ healthy |
 | `TYPE = SPORTZCAST` + no data | ⚠️ Sportzcast configured but silent → offer the sweep (Phase 2) |
 | `TYPE = OCR` + OCR not calibrated **or** `LAST_PAIRED_STATUS = false` | 🔴 OCR selected but never paired/calibrated — CHUPIP is imminent |
-| `TYPE = WEB` | ℹ️ scoreboard comes from the cloud, not this box — local SC/OCR findings are expected, not faults |
+| `TYPE = WEB` | same as `SPORTZCAST`: WEB is what VPU Manager writes for ScoreConnect III (corrected 2026-10-08 on VPU2; the earlier "cloud" reading was wrong) |
 | `GRAPHICS_MODE_ON_INIT = LOGOS_ONLY` | ⚠️ **no scorebug will render at all**, whatever the source |
 | `VENUE_ID = YOUR_VENUE_ID` | 🔴 venue never provisioned |
 | `graphics.cfg BOT_NUMBER ≠ SC III botNumber` | ⚠️ stale bot registration |
 
-The `TYPE = WEB` row matters more than it looks: it stops techs chasing a dead
-Sportzcast on a box that was never meant to use it.
 
 ## Phase 2 — Sportzcast profile sweep (guarded write)
 
 Unchanged in design, and still worth building — but note Phase 1 now correctly
-*scopes* it: only offer the sweep when `TYPE = SPORTZCAST`.
+*scopes* it: only offer the sweep when `TYPE` is `WEB` or `SPORTZCAST`.
 
 SC III exposes the whole tree (mapped in `Pulse.WPF/.../ScoreConnectService.cs`):
 `get-vendor-list` → `get-vendor-sports/{vendorId}` →
