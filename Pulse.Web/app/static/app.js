@@ -9118,9 +9118,14 @@ function _sccBreaks(data, sig, parts) {
   var rec = _scRecoveryCache;
   if (sig.sc3 !== "legacy" && rec && !rec.error && rec.installed && !rec.recoveryConfigured) add("no-recovery");
   var px = data.pixellotScore || {};
-  if (!px.error && px.source && px.source !== "SPORTZCAST") add(px.source === "OCR" ? "pixellot-ocr" : "pixellot-other");
+  if (!px.error && px.source && !_pxIsScoreConnect(px.source)) add(px.source === "OCR" ? "pixellot-ocr" : "pixellot-other");
   return out;
 }
+
+// graphics.cfg [GENERAL] TYPE values that mean "take the score from
+// ScoreConnect". WEB is what VPU Manager writes for ScoreConnect III (VPU2,
+// 2026-10-08); SPORTZCAST is the older network ScoreLink at a LAN IP.
+function _pxIsScoreConnect(src) { return src === "WEB" || src === "SPORTZCAST"; }
 
 function _sccFills(data, parts) {
   var cfg = data.configuration || {};
@@ -9197,7 +9202,7 @@ function _sccNodeHtml(data, part, p, lit, brk) {
   if (part === "vpu") {
     var px = data.pixellotScore || {};
     src = px.error ? "Couldn't read Pixellot's setting"
-      : px.source ? "Pixellot reads: " + (px.source === "SPORTZCAST" ? "ScoreConnect" : px.source === "OCR" ? "OCR camera" : px.source)
+      : px.source ? "Pixellot reads: " + (_pxIsScoreConnect(px.source) ? "ScoreConnect" : px.source === "OCR" ? "OCR camera" : px.source)
       : "Pixellot source unknown";
   } else {
     src = _sccSrcText(p);

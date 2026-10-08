@@ -5166,7 +5166,7 @@ def _sc3_serial_state():
 
 def _pixellot_score_source():
     if DEMO_MODE:
-        return {"source": "SPORTZCAST", "botNumber": "02130", "error": None}
+        return {"source": "WEB", "botNumber": "02130", "error": None}
     return sc3_client.read_graphics_cfg()
 
 
