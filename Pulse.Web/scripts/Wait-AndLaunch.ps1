@@ -19,30 +19,42 @@ param(
 )
 
 # ---- Console progress ------------------------------------------------------
-# run.bat prints "[5/5] Starting Pulse ........... launching" and then hands
-# off to this script, which can spend up to $TimeoutSec waiting for uvicorn to
+# This script prints the last two steps of run.bat's "Starting Pulse" list
+# (Server, then Browser), in the same layout: label, dot leader to one shared
+# column, status. It can spend up to $TimeoutSec waiting for uvicorn to
 # bind and another ~12s per attempt waiting for a Chrome window to appear. That
 # was dead air on a static line -- indistinguishable from a hang, which is what
 # makes a tester close the window part-way through a first-run bootstrap. So
 # animate the wait in place: a frame plus an mm:ss clock, rewritten over itself.
-# Silent when stdout is redirected (nothing to animate into) or -NoProgress.
+# The animation is skipped when stdout is redirected (nothing to animate into),
+# but the outcome line still prints. -NoProgress silences both.
 $script:ShowProgress = -not $NoProgress
 try { if ([Console]::IsOutputRedirected) { $script:ShowProgress = $false } } catch { $script:ShowProgress = $false }
 $script:SpinFrames = '|/-\'
 $script:SpinIndex  = 0
 $script:SpinStart  = Get-Date
 
-function Write-WaitLine([string]$text) {
+# Same padding as run.bat's L_* labels: 4 spaces, label, dots to column 26.
+function Format-Step([string]$label) {
+    '    ' + $label + ' ' + ('.' * (20 - $label.Length)) + ' '
+}
+
+function Write-WaitLine([string]$label, [string]$text) {
     if (-not $script:ShowProgress) { return }
     $frame = $script:SpinFrames[$script:SpinIndex]
     $script:SpinIndex = ($script:SpinIndex + 1) % 4
     $clock = ((Get-Date) - $script:SpinStart).ToString('mm\:ss')
-    Write-Host -NoNewline ([string][char]13 + '       - ' + $text + ' ' + $frame + ' ' + $clock + '   ')
+    Write-Host -NoNewline ([string][char]13 + (Format-Step $label) + $text + ' ' + $frame + ' ' + $clock + '   ')
 }
 
-function Write-WaitDone([string]$text) {
-    if (-not $script:ShowProgress) { return }
-    Write-Host ([string][char]13 + '       - ' + $text + '                          ')
+function Write-WaitDone([string]$label, [string]$text) {
+    if ($NoProgress) { return }
+    if ($script:ShowProgress) {
+        Write-Host ([string][char]13 + (Format-Step $label) + $text + '                          ')
+    } else {
+        Write-Host ((Format-Step $label) + $text)
+    }
+    $script:SpinStart = Get-Date
 }
 
 # Append-only breadcrumb log, separate from pulse-server.log (which the hidden
@@ -69,6 +81,7 @@ function Get-ChromePath {
     # a harmless non-existent path, not a binding error.
     $candidates = @(
         (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe' -ErrorAction SilentlyContinue).'(default)'
+        (Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe' -ErrorAction SilentlyContinue).'(default)'
         "$env:ProgramFiles\Google\Chrome\Application\chrome.exe"
         "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe"
         "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
@@ -120,6 +133,7 @@ function Open-Browser {
         # missing" path; the launcher normally guarantees it's installed.
         Write-LaunchLog "Chrome not found - opening $Url via default handler"
         try { Start-Process $Url } catch { Write-LaunchLog "default-handler launch threw: $_" }
+        Write-WaitDone 'Browser' 'opened in the default browser - Chrome is not installed'
         return
     }
 
@@ -132,19 +146,19 @@ function Open-Browser {
         # poll and we're done: --new-window into a warm instance is reliable.
         $waited = 0
         while ($waited -lt 12) {
-            Write-WaitLine 'waiting for the Chrome window'
+            Write-WaitLine 'Browser' 'opening Chrome'
             Start-Sleep -Seconds 1
             $waited += 1
             if (Test-ChromeWindow) {
                 Write-LaunchLog "Chrome window visible after ~${waited}s (attempt $attempt)"
-                Write-WaitDone 'Chrome window open'
+                Write-WaitDone 'Browser' 'open'
                 return
             }
         }
         Write-LaunchLog "No visible Chrome window after ${waited}s (attempt $attempt)"
     }
     Write-LaunchLog "Giving up: no Chrome window after 3 attempts - open $Url manually"
-    Write-WaitDone "no Chrome window appeared - open $Url manually"
+    Write-WaitDone 'Browser' "no window appeared - open Chrome and go to $Url"
 }
 
 $elapsed = 0
@@ -156,7 +170,7 @@ while ($elapsed -lt $TimeoutSec) {
         if ($ok -and $client.Connected) {
             $client.Close()
             Write-LaunchLog "Port $Port up after ~$elapsed s - opening browser"
-            Write-WaitDone 'server up - opening Chrome'
+            Write-WaitDone 'Server' 'ready'
             Open-Browser
             exit 0   # server is up
         }
@@ -164,7 +178,7 @@ while ($elapsed -lt $TimeoutSec) {
     } catch {
         # Port not open yet -- sleep and retry
     }
-    Write-WaitLine 'waiting for the server to start'
+    Write-WaitLine 'Server' 'starting'
     Start-Sleep -Milliseconds 500
     $elapsed += 1
 }
@@ -173,5 +187,5 @@ while ($elapsed -lt $TimeoutSec) {
 # just show a connection error); exit non-zero so run.bat surfaces the
 # failure and points the user at pulse-server.log.
 Write-LaunchLog "Timed out after ${TimeoutSec}s waiting for port $Port"
-Write-WaitDone 'the server did not come up'
+Write-WaitDone 'Server' "did not start within $TimeoutSec seconds"
 exit 1
