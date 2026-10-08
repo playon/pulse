@@ -1701,6 +1701,11 @@ def _demo_pixellot_events():
     }
 
 
+def _demo_esr(events):
+    from cloud_api import esr_summary  # lazy: cloud_api imports demo_data
+    return esr_summary(events)
+
+
 def demo_cloud_events(venue_id, local_events):
     """Demo counterpart of cloud_api.fetch_cloud — same payload shape."""
     now = datetime.now()
@@ -1854,6 +1859,7 @@ def demo_cloud_events(venue_id, local_events):
             "darkCourt": "Error", "hdBandwidth": "Ok", "panoBandwidth": "Ok",
         },
         "eqsAvgScore": 0.8125,
+        "esr": _demo_esr(events),
         "events": events,
         "causeHints": [
             {"severity": "warning",
