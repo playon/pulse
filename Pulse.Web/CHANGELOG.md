@@ -21,7 +21,7 @@ flow shows testers when a new build is available.
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 `Pulse.Web/VERSION`.
 
-## [Unreleased]
+## [1.4.0] - 2026-10-08
 
 ### Changed
 - The launch window is easier to follow: one short list under **Updating Pulse** and **Starting Pulse**, one line per step, with retries tidied away. If something fails, the box at the bottom says what went wrong and what to do next. The launcher no longer reinstalls Chrome when it is already installed for just one Windows user.
