@@ -668,6 +668,46 @@ def _demo_network_capture(**kw):
     }
 
 
+def _demo_stream_log():
+    """Get-VpuStreamLog.ps1 for the demo's degraded tier: the stream was
+    handed its chain 40 min ago, every Zixi rung failed (the Olympic WA
+    timing), and RTMP connected about four minutes in. Timestamps carry the
+    local UTC offset, as the collector's do."""
+    now = datetime.now().astimezone()
+    iso = lambda dt: dt.isoformat(timespec="milliseconds")  # noqa: E731
+    started = now - timedelta(minutes=40)
+    host, ip = "pxltd-34-222-54-117.pixellot.stream", "34.222.54.117"
+    chain = [
+        f"zixi://{host}:2088/0_hd_2000", f"zixi://{host}:443/0_hd_2000",
+        f"zixi://{ip}:2088/0_hd_2000", f"zixi://{ip}:443/0_hd_2000",
+        f"rtmp://{host}:1935/live/0_hd_2000", f"rtmp://{ip}:1935/live/0_hd_2000",
+    ]
+    log_name = f"VPU_vpu_{now:%Y%m%d}_033034.log"
+    events = [
+        {"t": iso(now - timedelta(minutes=45)), "kind": "session", "version": "5.37.2", "file": log_name},
+        {"t": iso(started), "kind": "chain", "urls": chain},
+    ]
+    t = started + timedelta(seconds=10)
+    for i in range(4):
+        for _ in range(4):
+            events.append({"t": iso(t), "kind": "fail", "url": chain[i], "returnValue": -2})
+            t += timedelta(seconds=15)
+        events.append({"t": iso(t - timedelta(seconds=15)), "kind": "move", "from": chain[i], "to": chain[i + 1]})
+    events.append({"t": iso(t - timedelta(seconds=9)), "kind": "rtmpOk", "url": chain[4]})
+    return {
+        "logDir": "C:\\Pixellot\\Data\\Log",
+        "hoursBack": 24,
+        "now": iso(now),
+        "logsFound": True,
+        "filesScanned": 1,
+        "files": [log_name],
+        "eventCount": len(events),
+        "truncated": False,
+        "lastChain": None,
+        "events": events,
+    }
+
+
 DEMO = {
     "Get-SystemIdentity.ps1": lambda **kw: {
         "computerSystem": {"name": _VENUE["hostname"], "manufacturer": "HP", "model": "HP Z2 Tower G9 Workstation Desktop PC"},
@@ -998,6 +1038,15 @@ DEMO = {
                            "lastSetScoreboardType": None, "lastSetAt": None},
         "scoreboardData": {"noDataLines": 0, "invalidDataLines": 0, "last": None},
     },
+    # VPU.exe's own log of the live stream. Matches the degraded tier the port
+    # test above demos: the Olympic WA sequence (2026-08-18), four failures
+    # 15 s apart on each Zixi URL and a "move" after every fourth, then RTMP
+    # connects. main.py folds this into the stream-degraded-rtmp finding as
+    # proof. For the Red Lodge case (ports green, stream dead) set both Zixi
+    # port rows to "pass", drop the rtmpOk and keep the fails coming up to
+    # "now" -> the can't-connect blocker. For a clean stream, replace
+    # everything after the chain with one zixiOk.
+    "Get-VpuStreamLog.ps1": lambda **kw: _demo_stream_log(),
     "Test-NtpDrift.ps1": lambda **kw: {"offsetSeconds": round(random.uniform(-0.3, 0.5), 3), "status": "ok", "source": "0.us.pool.ntp.org", "configuredSource": "0.us.pool.ntp.org", "networkSynced": True},
     "Get-NtpPeers.ps1": lambda **kw: {
         "status": {

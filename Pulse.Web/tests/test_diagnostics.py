@@ -1487,6 +1487,256 @@ class TestScoreboardSource(unittest.TestCase):
         r = main._scoreboard_source(self.SC_DOWN, "unknown")
         self.assertEqual(r["source"], "scoreconnect")
         self.assertFalse(r["ocrKnown"])
+# ── VPU.exe's own stream log (Get-VpuStreamLog) ──────────────────────
+# The port tests reach Pixellot's echo server; the live stream dials a
+# per-event streaming server. Field origin: Red Lodge (MT), 2026-09-26 read
+# PASS with every port green while VPU.exe logged "Failed connecting to
+# zixi://34.222.54.117:2088 ... return value: -11". Event sequences below
+# mirror real VPU.exe logs: Olympic WA 2026-08-18 (four dead Zixi rungs,
+# 16 failures 15 s apart, then RTMP), and a 2026-09-16 unit that missed once
+# on 2088 and connected five seconds later.
+_SL_HOST = "pxltd-34-222-54-117.pixellot.stream"
+_SL_IP = "34.222.54.117"
+_SL_CHAIN = [
+    f"zixi://{_SL_HOST}:2088/0_hd_2000", f"zixi://{_SL_HOST}:443/0_hd_2000",
+    f"zixi://{_SL_IP}:2088/0_hd_2000", f"zixi://{_SL_IP}:443/0_hd_2000",
+    f"rtmp://{_SL_HOST}:1935/live/0_hd_2000", f"rtmp://{_SL_IP}:1935/live/0_hd_2000",
+]
+
+
+def _sl_t(minute, second=0):
+    return f"2026-09-26T15:{minute:02d}:{second:02d}.000-06:00"
+
+
+def _sl_fails(url, start_min, start_sec, n=4, rv=-2):
+    out, m, s = [], start_min, start_sec
+    for _ in range(n):
+        out.append({"t": _sl_t(m, s), "kind": "fail", "url": url, "returnValue": rv})
+        s += 15
+        m, s = m + s // 60, s % 60
+    return out
+
+
+def _sl_log(events, now=_sl_t(40), **kw):
+    return {"logDir": "C:\\Pixellot\\Data\\Log", "hoursBack": 24, "now": now,
+            "logsFound": True, "filesScanned": 1, "files": ["VPU_vpu_20260926_151216.log"],
+            "eventCount": len(events), "truncated": False, "lastChain": None,
+            "events": events, **kw}
+
+
+def _sl_ports(status="pass"):
+    # The Red Lodge export's streaming rows: all green against prod-echo.
+    return {"results": [
+        {"protocol": "UDP", "port": 443, "host": "prod-echo.pixellot.tv", "purpose": "Zixi Backup", "optional": False, "status": status},
+        {"protocol": "UDP", "port": 2088, "host": "prod-echo.pixellot.tv", "purpose": "Zixi Streaming", "optional": False, "status": status},
+        {"protocol": "TCP", "port": 1935, "host": "a.rtmp.youtube.com", "purpose": "RTMP Fallback", "optional": False, "status": "pass"},
+    ]}
+
+
+def _sl_olympic():
+    """Olympic WA: every Zixi rung dead, RTMP connects."""
+    ev = [{"t": _sl_t(10), "kind": "session", "version": "5.37.2"},
+          {"t": _sl_t(10, 19), "kind": "chain", "urls": _SL_CHAIN}]
+    start = [(10, 29), (11, 30), (12, 31), (13, 32)]
+    for i, (m, sec) in enumerate(start):
+        ev += _sl_fails(_SL_CHAIN[i], m, sec)
+        last = ev[-1]["t"]
+        ev.append({"t": last, "kind": "move", "from": _SL_CHAIN[i], "to": _SL_CHAIN[i + 1]})
+    ev.append({"t": _sl_t(14, 23), "kind": "rtmpOk", "url": _SL_CHAIN[4]})
+    # RTMP reconnects later with no failure between; on air since 3:14.
+    ev.append({"t": _sl_t(24, 12), "kind": "rtmpOk", "url": _SL_CHAIN[4]})
+    return _sl_log(ev, now=_sl_t(30))
+
+
+def _sl_red_lodge(until_min=20):
+    """Still dialing 2088 and failing, right up to 'now'."""
+    ev = [{"t": _sl_t(12, 16), "kind": "session", "version": "5.37.2"},
+          {"t": _sl_t(13), "kind": "chain", "urls": _SL_CHAIN}]
+    m = 13
+    while m < until_min:
+        ev += _sl_fails(_SL_CHAIN[0], m, 10, n=4, rv=-11)
+        m += 1
+    return _sl_log(ev, now=_sl_t(until_min, 5))
+
+
+class TestVpuStreamLog(unittest.TestCase):
+    def _codes(self, log, ports=None):
+        return [f["code"] for f in main._stream_log_findings(log, ports)]
+
+    def test_url_parts_and_rungs(self):
+        self.assertEqual(main._stream_url_parts(_SL_CHAIN[0]), ("zixi", _SL_HOST, 2088))
+        self.assertEqual(main._stream_rung(_SL_CHAIN[0]), "main")
+        self.assertEqual(main._stream_rung(_SL_CHAIN[3]), "backup")
+        self.assertEqual(main._stream_rung(_SL_CHAIN[5]), "rtmp")
+        # gen-3 multi-host form seen in field bundles: no parsable port.
+        self.assertEqual(main._stream_url_parts(
+            "zixi://live-5e69.pixellot.stream,98.84.167.222:443,2088/0_hd_2000")[2], None)
+
+    def test_red_lodge_still_failing_is_a_blocker_despite_green_ports(self):
+        log = _sl_red_lodge()
+        f = main._stream_log_findings(log, _sl_ports("pass"))
+        self.assertEqual([x["code"] for x in f], ["stream-log-failing"])
+        self.assertEqual(f[0]["severity"], "critical")
+        text = _finding_text(f[0])
+        # The port test passing is the whole point: say so, and name the
+        # destination-filter / Pixellot-side split instead of "open a port".
+        self.assertIn("prod-echo.pixellot.tv", f[0]["evidence"])
+        self.assertIn("allows by destination", f[0]["evidence"])
+        self.assertIn("filter allows Pixellot's streaming servers", f[0]["recommendation"])
+        self.assertIn("*.pixellot.stream", f[0]["it"])
+        self.assertIn(_SL_HOST, text)
+        self.assertIn(_SL_IP, text)
+        self.assertIn("-11", text)
+        verdict = main._compute_readiness(f)
+        self.assertEqual(verdict["status"], "FAIL")
+
+    def test_red_lodge_through_the_dashboard_is_no_longer_pass(self):
+        dash = main._build_dashboard({}, {}, {}, {}, port_tests=_sl_ports("pass"),
+                                     stream_log=_sl_red_lodge())
+        self.assertIn("stream-log-failing", [f["code"] for f in dash["findings"]])
+        self.assertEqual(dash["readiness"]["status"], "FAIL")
+
+    def test_blocked_ports_are_named_and_the_ask_is_the_plain_one(self):
+        f = main._stream_log_findings(_sl_red_lodge(), _sl_ports("fail"))[0]
+        self.assertIn("Pulse's own port test is blocked on UDP 2088 too", f["evidence"])
+        self.assertIn("Ask venue IT to allow the streaming connections", f["recommendation"])
+
+    def test_olympic_rtmp_fallback_is_a_risk(self):
+        f = main._stream_log_findings(_sl_olympic(), _sl_ports("pass"))
+        self.assertEqual([x["code"] for x in f], ["stream-log-rtmp"])
+        self.assertIn("16 failed connection attempts", f[0]["evidence"])
+        self.assertIn("last-resort path", f[0]["title"])
+        # One detail row per path, in chain order; the by-name and by-address
+        # attempts on the same port are one path to a reader.
+        self.assertEqual(len(f[0]["details"]), 2)
+        self.assertTrue(f[0]["details"][0].startswith(
+            f"Main path (UDP 2088) to {_SL_HOST}, {_SL_IP}: 8 failed attempts"))
+        self.assertTrue(f[0]["details"][1].startswith("Backup path (UDP 443)"))
+        self.assertIn("It connected on the last-resort path at 3:14 PM", f[0]["evidence"])
+        self.assertEqual(main._compute_readiness(f)["status"], "WARN")
+
+    def test_backup_path(self):
+        ev = [{"t": _sl_t(13), "kind": "chain", "urls": _SL_CHAIN}]
+        ev += _sl_fails(_SL_CHAIN[0], 13, 10)
+        ev.append({"t": ev[-1]["t"], "kind": "move", "from": _SL_CHAIN[0], "to": _SL_CHAIN[1]})
+        ev.append({"t": _sl_t(14, 30), "kind": "zixiOk", "name": "HD_Writer0_Stream0"})
+        f = main._stream_log_findings(_sl_log(ev))
+        self.assertEqual([x["code"] for x in f], ["stream-log-backup"])
+        self.assertEqual(f[0]["severity"], "warning")
+        self.assertEqual(main._compute_readiness(f)["status"], "WARN")
+
+    def test_one_miss_then_connected_is_info_only(self):
+        ev = [{"t": _sl_t(13), "kind": "chain", "urls": _SL_CHAIN},
+              {"t": _sl_t(13, 10), "kind": "fail", "url": _SL_CHAIN[0], "returnValue": -2},
+              {"t": _sl_t(13, 15), "kind": "zixiOk", "name": "HD_Writer0_Stream0"}]
+        f = main._stream_log_findings(_sl_log(ev))
+        self.assertEqual([x["code"] for x in f], ["stream-log-recovered"])
+        self.assertEqual(main._compute_readiness(f)["status"], "PASS")
+
+    def test_clean_connection_is_quiet_and_says_so(self):
+        ev = [{"t": _sl_t(13), "kind": "chain", "urls": _SL_CHAIN},
+              {"t": _sl_t(13, 10), "kind": "zixiOk", "name": "HD_Writer0_Stream0"}]
+        log = _sl_log(ev)
+        self.assertEqual(self._codes(log), [])
+        s = main._stream_log_payload(log)["summary"]
+        self.assertEqual(s["level"], "pass")
+        self.assertIn("main path at 3:13 PM", s["text"])
+
+    def test_walking_the_chain_is_not_yet_failing(self):
+        # Two minutes is the floor: a dead rung costs ~60 s before failover.
+        ev = [{"t": _sl_t(13), "kind": "chain", "urls": _SL_CHAIN}]
+        ev += _sl_fails(_SL_CHAIN[0], 13, 10, n=3)
+        log = _sl_log(ev, now=_sl_t(14))
+        self.assertEqual(self._codes(log), [])
+        self.assertIn("still connecting", main._stream_log_payload(log)["summary"]["text"])
+
+    def test_stream_that_ended_without_connecting(self):
+        ev = [{"t": _sl_t(13), "kind": "chain", "urls": _SL_CHAIN}]
+        ev += _sl_fails(_SL_CHAIN[0], 13, 10, n=12)
+        ev.append({"t": _sl_t(17), "kind": "close", "reason": "stopStreaming event command"})
+        f = main._stream_log_findings(_sl_log(ev))
+        self.assertEqual([x["code"] for x in f], ["stream-log-last-failed"])
+        self.assertEqual(main._compute_readiness(f)["status"], "WARN")
+
+    def test_restart_then_clean_stream_keeps_the_earlier_misses_in_the_note(self):
+        ev = [{"t": _sl_t(13), "kind": "chain", "urls": _SL_CHAIN}]
+        ev += _sl_fails(_SL_CHAIN[0], 13, 10, n=2)
+        ev += [{"t": _sl_t(14), "kind": "session", "version": "5.37.2"},
+               {"t": _sl_t(14, 20), "kind": "chain", "urls": _SL_CHAIN},
+               {"t": _sl_t(14, 30), "kind": "zixiOk", "name": "HD_Writer0_Stream0"}]
+        log = _sl_log(ev)
+        self.assertEqual(self._codes(log), [])
+        self.assertIn("2 other failed connection attempts", main._stream_log_payload(log)["summary"]["text"])
+
+    def test_silent_failing_stream_is_unknown_not_failing(self):
+        log = _sl_red_lodge(until_min=20)
+        log["now"] = _sl_t(45)
+        self.assertEqual(self._codes(log), [])
+        self.assertIn("can't tell", main._stream_log_payload(log)["summary"]["text"])
+
+    def test_truncated_tail_borrows_the_newest_chain(self):
+        full = _sl_red_lodge()
+        chain = full["events"][1]
+        log = _sl_log(full["events"][2:], now=full["now"], lastChain=chain, truncated=True)
+        f = main._stream_log_findings(log)
+        self.assertEqual([x["code"] for x in f], ["stream-log-failing"])
+        self.assertIn(_SL_IP, f[0]["evidence"])
+
+    def test_no_stream_and_no_logs_are_stated_results(self):
+        none = _sl_log([{"t": _sl_t(13), "kind": "session", "version": "5.37.2"}])
+        self.assertIn("no live stream in the last 24 hours",
+                      main._stream_log_payload(none)["summary"]["text"])
+        missing = {"logDir": "C:\\Pixellot\\Data\\Log", "hoursBack": 24, "now": _sl_t(13),
+                   "logsFound": False, "filesScanned": 0, "events": []}
+        self.assertIn("No VPU.exe log", main._stream_log_payload(missing)["summary"]["text"])
+
+    def test_collector_error_is_admitted_everywhere(self):
+        err = {"error": True, "message": "Injected fault: Get-VpuStreamLog.ps1 did not complete"}
+        self.assertEqual(self._codes(err), [])
+        payload = main._stream_log_payload(err)
+        self.assertTrue(payload["error"])
+        self.assertEqual(payload["summary"]["level"], "fail")
+        self.assertIn("Injected fault", payload["summary"]["text"])
+        dash = main._build_dashboard({}, {}, {}, {}, stream_log=err)
+        self.assertIn("VPU stream log", dash["sourceErrors"])
+
+    def test_network_card_renders_the_finding_and_drops_raw_events(self):
+        net = main._build_network({}, {}, _sl_ports("pass"), {}, stream_log=_sl_olympic())
+        self.assertIn("stream-log-rtmp", [f["code"] for f in net["findings"]])
+        self.assertNotIn("events", net["streamLog"])
+        self.assertEqual(net["streamLog"]["analysis"]["rung"], "rtmp")
+        self.assertEqual(net["streamLog"]["summary"]["level"], "fail")
+
+    def test_same_tier_folds_into_the_port_finding(self):
+        # Ports blocked AND the log shows the fallback: one problem, one
+        # finding, with the log as its proof.
+        ports = _sl_ports("fail")
+        f = [x for x in main._streaming_findings(ports, _sl_olympic())]
+        self.assertEqual([x["code"] for x in f], ["stream-degraded-rtmp"])
+        self.assertEqual(f[0]["confirmedBy"], "stream-log-rtmp")
+        self.assertIn("VPU.exe's own log confirms it", f[0]["evidence"])
+        self.assertIn("16 failed connection attempts", f[0]["evidence"])
+
+    def test_log_worse_than_ports_stands_alone(self):
+        # Ports say "degraded, RTMP open"; the log says nothing connects at
+        # all. Both stay: the log is the more severe and the newer truth.
+        ports = _sl_ports("fail")
+        codes = [x["code"] for x in main._streaming_findings(ports, _sl_red_lodge())]
+        self.assertEqual(codes, ["stream-degraded-rtmp", "stream-log-failing"])
+
+    def test_demo_log_matches_the_demo_ports(self):
+        import demo_data
+        log = demo_data.DEMO["Get-VpuStreamLog.ps1"]()
+        ports = demo_data.DEMO["Test-NetworkPorts.ps1"]()
+        self.assertEqual(self._codes(log, ports), ["stream-log-rtmp"])
+        merged = main._streaming_findings(ports, log)
+        self.assertEqual([x["code"] for x in merged], ["stream-degraded-rtmp"])
+        self.assertEqual(merged[0]["confirmedBy"], "stream-log-rtmp")
+
+    def test_every_stream_log_code_is_classified_and_on_the_card(self):
+        for code in main.NET_STREAM_LOG_CODES:
+            self.assertIn(code, main._READINESS_POLICY)
+            self.assertIn(code, main.NET_CARD_FINDING_CODES)
 
 
 # Finding codes emitted with severity "critical" by _compute_findings. Kept
@@ -1507,6 +1757,9 @@ _CRITICAL_FINDING_CODES = {
     "stream-blocked",
     "tls-filtered",
     "stream-degraded-rtmp",
+    "stream-log-failing",
+    "stream-log-last-failed",
+    "stream-log-rtmp",
     "sw-security",
     "temp-critical",
     "tz-non-us",

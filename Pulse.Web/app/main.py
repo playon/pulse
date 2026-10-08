@@ -1548,6 +1548,8 @@ NET_CARD_FINDING_CODES = (
     "wifi-uplink", "uplink-on-camera-port", "wifi-disabled",
     "ssl-inspection", "ssl-inspection-support", "tls-filtered", "tls-filtered-support",
     "lmi-ssl-blocked", "stream-blocked", "stream-degraded-rtmp", "stream-resiliency-reduced",
+    "stream-log-failing", "stream-log-last-failed", "stream-log-rtmp",
+    "stream-log-backup", "stream-log-recovered",
 )
 
 
@@ -2032,6 +2034,400 @@ def _lmi_findings(lmi_log) -> list:
     }]
 
 
+# ── VPU.exe's own stream log: what the live stream actually did ──
+# The port tests prove the venue passes UDP 2088 / UDP 443 / TCP 1935 to
+# Pixellot's echo server. The live stream dials a different server, assigned
+# per event (pxltd-<ip>.pixellot.stream on AWS). A filter that allows by
+# destination, or a dead streaming server, passes every port test while the
+# stream fails. Field origin: Red Lodge (MT), 2026-09-26 -- readiness read
+# PASS while VPU.exe logged "Failed connecting to zixi://34.222.54.117:2088
+# ... return value: -11". Get-VpuStreamLog.ps1 emits VPU.exe's connection
+# lines as ordered events; everything below reads them.
+NET_STREAM_LOG_CODES = (
+    "stream-log-failing", "stream-log-last-failed", "stream-log-rtmp",
+    "stream-log-backup", "stream-log-recovered",
+)
+# A dead rung costs four attempts (~60 s) before the feeder moves on, so a
+# stream failing for less than this is still walking its chain, not stuck.
+_STREAM_LOG_FAILING_SECS = 120
+# A stream that can't connect logs a line every 15-40 s. Silence this long,
+# with no close or restart, means Pulse can't tell what it is doing now.
+_STREAM_LOG_QUIET_SECS = 600
+_STREAM_LOG_RUNG = {"main": "Main path", "backup": "Backup path", "rtmp": "Last-resort path"}
+# Which Test-NetworkPorts row probes each rung's port.
+_STREAM_LOG_PROBE = {"main": "Zixi Streaming", "backup": "Zixi Backup", "rtmp": _RTMP_FALLBACK_PURPOSE}
+
+
+def _stream_url_parts(url):
+    """'zixi://pxltd-1-2-3-4.pixellot.stream:2088/0_hd_2000' ->
+    ('zixi', 'pxltd-1-2-3-4.pixellot.stream', 2088). Port is None when the
+    URL carries none (gen-3 multi-host form 'zixi://a,b:443,2088/...')."""
+    scheme, _, rest = (url or "").partition("://")
+    hostport = rest.split("/", 1)[0].split(",", 1)[0]
+    host, _, port = hostport.rpartition(":")
+    if not host:
+        host, port = hostport, ""
+    return scheme.lower(), host, (int(port) if port.isdigit() else None)
+
+
+def _stream_rung(url):
+    scheme, _, port = _stream_url_parts(url)
+    if scheme == "rtmp":
+        return "rtmp"
+    if scheme == "zixi":
+        return "main" if port == 2088 else "backup"
+    return None
+
+
+def _stream_log_dt(t):
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(t)
+    except (TypeError, ValueError):
+        return None
+
+
+def _stream_log_clock(t, now=None):
+    """'3:36 PM', or 'Sep 26, 3:36 PM' when it isn't today. Built by hand:
+    '%-I' doesn't exist on Windows, where the fleet runs."""
+    dt = _stream_log_dt(t) if isinstance(t, str) else t
+    if not dt:
+        return "an unknown time"
+    s = f"{dt.hour % 12 or 12}:{dt.minute:02d} {'AM' if dt.hour < 12 else 'PM'}"
+    if now and dt.date() != now.date():
+        s = f"{dt:%b} {dt.day}, {s}"
+    return s
+
+
+def _analyze_stream_log(stream_log):
+    """Replay the events into streams and describe the newest one. None when
+    the collector errored (the caller reports that separately).
+
+    A stream opens at a 'chain' line (its failover URLs, in order) and ends at
+    CloseUnit or a VPU.exe restart. Within it, 'fail' and 'move' mark trouble,
+    'zixiOk' / 'rtmpOk' mark a connection. Connected = the newest connect is
+    at or after the newest trouble."""
+    if not isinstance(stream_log, dict) or stream_log.get("error"):
+        return None
+    import ipaddress
+    now = _stream_log_dt(stream_log.get("now"))
+    last_chain = stream_log.get("lastChain") or {}
+    streams, cur = [], None
+
+    def _new(t, urls):
+        return {"startedAt": t, "chain": list(urls or []),
+                "current": (urls or [None])[0], "okAt": None, "okUrl": None,
+                "badAt": None, "troubleSince": None, "fails": [],
+                "endedAt": None, "endedBy": None}
+
+    for ev in stream_log.get("events") or []:
+        kind, t = ev.get("kind"), ev.get("t")
+        if kind in ("session", "close"):
+            if cur and not cur["endedAt"]:
+                cur["endedAt"], cur["endedBy"] = t, ("restart" if kind == "session" else "close")
+            cur = None
+            continue
+        if kind == "chain":
+            if cur and not cur["endedAt"]:
+                cur["endedAt"], cur["endedBy"] = t, "restart"
+            cur = _new(t, ev.get("urls"))
+            streams.append(cur)
+            continue
+        if kind not in ("fail", "move", "zixiOk", "rtmpOk"):
+            continue
+        if cur is None:
+            # Mid-stream with the chain line outside the window or past the
+            # event cap: borrow the newest chain if it came first.
+            lc_dt, t_dt = _stream_log_dt(last_chain.get("t")), _stream_log_dt(t)
+            urls = last_chain.get("urls") if (lc_dt and t_dt and lc_dt <= t_dt) else None
+            cur = _new(t, urls)
+            cur["current"] = None
+            streams.append(cur)
+        if kind in ("fail", "move"):
+            if kind == "fail":
+                cur["fails"].append({"t": t, "url": ev.get("url"), "returnValue": ev.get("returnValue")})
+                cur["current"] = ev.get("url") or cur["current"]
+            else:
+                cur["current"] = ev.get("to") or cur["current"]
+            ok_dt, bad_dt = _stream_log_dt(cur["okAt"]), _stream_log_dt(cur["badAt"])
+            if cur["troubleSince"] is None or (ok_dt and bad_dt and ok_dt >= bad_dt):
+                cur["troubleSince"] = t
+            cur["badAt"] = t
+        else:
+            # A repeat connect with no trouble between (RTMP reconnects every
+            # few minutes) keeps the first time: that is when it went on air.
+            ok_dt, bad_dt = _stream_log_dt(cur["okAt"]), _stream_log_dt(cur["badAt"])
+            if kind == "rtmpOk":
+                cur["current"] = ev.get("url")
+            if ok_dt is None or (bad_dt and bad_dt > ok_dt):
+                cur["okAt"] = t
+                cur["okUrl"] = (cur["current"] if kind == "rtmpOk"
+                                or (cur["current"] or "").startswith("zixi://") else None)
+
+    window_fails = sum(len(s["fails"]) for s in streams)
+    if not streams:
+        return {"state": "none", "live": False, "failCount": 0,
+                "windowFailCount": 0, "streamsInWindow": 0, "failures": []}
+    s = streams[-1]
+    ok_dt, bad_dt = _stream_log_dt(s["okAt"]), _stream_log_dt(s["badAt"])
+    connected = ok_dt is not None and (bad_dt is None or ok_dt >= bad_dt)
+    live = not s["endedAt"]
+    rung = _stream_rung(s["okUrl"]) if connected else None
+
+    if connected:
+        state = "connected"
+    elif not live:
+        state = "never-connected" if bad_dt else "none"
+    elif not bad_dt:
+        state = "connecting"
+    elif now and (now - bad_dt).total_seconds() > _STREAM_LOG_QUIET_SECS:
+        state = "quiet"
+    else:
+        since = _stream_log_dt(s["troubleSince"]) or bad_dt
+        state = "failing" if (bad_dt - since).total_seconds() >= _STREAM_LOG_FAILING_SECS else "connecting"
+
+    # The streaming server this event used: its name and its address.
+    hosts = [_stream_url_parts(u)[1] for u in (s["chain"] or [f["url"] for f in s["fails"]])]
+    server = server_ip = None
+    for h in hosts:
+        try:
+            ipaddress.ip_address(h)
+            server_ip = server_ip or h
+        except ValueError:
+            server = server or h
+
+    agg = {}
+    for f in s["fails"]:
+        r = _stream_rung(f["url"]) or "unknown"
+        scheme, host, port = _stream_url_parts(f["url"])
+        row = agg.setdefault((r, port), {
+            "rung": r, "protocol": "TCP" if scheme == "rtmp" else "UDP", "port": port,
+            "hosts": [], "count": 0, "first": f["t"], "last": f["t"], "returnValues": [],
+        })
+        row["count"] += 1
+        row["last"] = f["t"]
+        if host and host not in row["hosts"]:
+            row["hosts"].append(host)
+        if f["returnValue"] is not None and f["returnValue"] not in row["returnValues"]:
+            row["returnValues"].append(f["returnValue"])
+
+    return {
+        "state": state, "live": live, "rung": rung,
+        "startedAt": s["startedAt"], "connectedAt": s["okAt"] if connected else None,
+        "endedAt": s["endedAt"], "lastFailAt": s["badAt"],
+        "server": server, "serverIp": server_ip,
+        "failCount": len(s["fails"]), "failures": list(agg.values()),
+        "windowFailCount": window_fails, "streamsInWindow": len(streams),
+    }
+
+
+def _stream_log_findings(stream_log, port_tests=None) -> list:
+    """Findings from what the newest stream in VPU.exe's log did. A clean
+    connection on the main path, a stream still connecting, and an errored
+    collector produce none; the Network card's note covers those."""
+    a = _analyze_stream_log(stream_log)
+    if not a or a["state"] not in ("connected", "failing", "never-connected"):
+        return []
+    state, live, rung = a["state"], a["live"], a["rung"]
+    if state == "connected" and rung == "main" and not a["failCount"]:
+        return []
+    now = _stream_log_dt(stream_log.get("now"))
+    clock = lambda t: _stream_log_clock(t, now)  # noqa: E731
+    fails = a["failures"]
+    n = a["failCount"]
+
+    # Cross-check each failed rung against Pulse's own probe on that port.
+    probe = {}
+    if port_tests and not port_tests.get("error"):
+        for r in port_tests.get("results") or []:
+            probe[r.get("purpose")] = r.get("status")
+    failed_rungs = []
+    for f in fails:
+        if f["rung"] in _STREAM_LOG_PROBE and f["rung"] not in failed_rungs:
+            failed_rungs.append(f["rung"])
+    def _ports(rungs):
+        return " and ".join(
+            f"{f['protocol']} {f['port']}" for f in fails
+            if f["rung"] in rungs and f["port"] is not None)
+    probe_passed = [r for r in failed_rungs if probe.get(_STREAM_LOG_PROBE[r]) == "pass"]
+    probe_blocked = [r for r in failed_rungs if probe.get(_STREAM_LOG_PROBE[r]) == "fail"]
+    dest_specific = bool(probe_passed) and not probe_blocked
+
+    ask = (
+        "Our own test gets through on the same ports, so ask venue IT whether their "
+        "filter allows Pixellot's streaming servers, and escalate to Pixellot if it does."
+        if dest_specific else
+        "Ask venue IT to allow the streaming connections below, and escalate to Pixellot "
+        "if they confirm nothing is blocked."
+    )
+
+    server_bits = ", ".join(x for x in (a.get("server"), a.get("serverIp")) if x)
+    first = fails[0]["first"] if fails else a.get("startedAt")
+    last = max((f["last"] for f in fails), default=a.get("lastFailAt"))
+    rvs = sorted({rv for f in fails for rv in f["returnValues"]})
+    log_dir = stream_log.get("logDir") or "C:\\Pixellot\\Data\\Log"
+    evidence = (
+        f"VPU.exe's log ({log_dir}) shows {n} failed connection attempt{'s' if n != 1 else ''} "
+        f"to this event's streaming server{f' ({server_bits})' if server_bits else ''} "
+        f"between {clock(first)} and {clock(last)}"
+        + (f", return value {', '.join(str(v) for v in rvs)}" if rvs else "") + "."
+    )
+    if probe_passed:
+        evidence += (
+            f" Pulse's own test on {_ports(probe_passed)} reached Pixellot's test server "
+            "(prod-echo.pixellot.tv), so the venue passes those ports. The failures are "
+            "specific to the streaming server, which points to a filter that allows by "
+            "destination, or a problem on Pixellot's side."
+        )
+    if probe_blocked:
+        evidence += f" Pulse's own port test is blocked on {_ports(probe_blocked)} too."
+    if a.get("connectedAt"):
+        evidence += (f" It connected on the {_STREAM_LOG_RUNG.get(rung, 'stream').lower()} "
+                     f"at {clock(a['connectedAt'])}.")
+
+    it_ports = _ports(failed_rungs) or "UDP 2088, UDP 443 and TCP 1935"
+    it = (
+        f"Outbound {it_ports} to *.pixellot.stream. Allow it by name, not address: "
+        "the streaming server changes every event"
+        + (f" (this one was {server_bits})" if server_bits else "") + "."
+    )
+    details = [
+        f"{_STREAM_LOG_RUNG.get(f['rung'], 'Stream')} ({f['protocol']} {f['port'] if f['port'] is not None else '?'})"
+        f"{' to ' + ', '.join(f['hosts']) if f['hosts'] else ''}: {f['count']} failed attempt"
+        f"{'s' if f['count'] != 1 else ''}, {clock(f['first'])} to {clock(f['last'])}"
+        + (f" (return value {', '.join(str(v) for v in f['returnValues'])})" if f["returnValues"] else "")
+        for f in fails
+    ]
+
+    which = "The live stream" if live else "The last stream"
+    if state == "failing":
+        code, sev = "stream-log-failing", "critical"
+        title = "The live stream can't connect, so the game isn't reaching viewers"
+        rec = (f"The VPU has been trying to stream since {clock(a['startedAt'])}, and every "
+               f"connection to Pixellot's streaming server has failed. {ask}")
+    elif state == "never-connected":
+        code, sev = "stream-log-last-failed", "critical"
+        title = "The last stream never connected, so that game didn't reach viewers"
+        rec = (f"The stream that started at {clock(a['startedAt'])} never connected to "
+               f"Pixellot's streaming server, and the next game will likely fail the same way. {ask}")
+    elif rung == "rtmp":
+        code, sev = "stream-log-rtmp", "critical"
+        title = (f"{which} fell back to its last-resort path, so it "
+                 f"{'has' if live else 'had'} no protection against network hiccups")
+        rec = ("Both normal streaming connections failed, so "
+               + ("this game is airing" if live else "the last game aired")
+               + f" on the last-resort path, which starts late and drops more easily. {ask}")
+    elif rung == "backup":
+        code, sev = "stream-log-backup", "warning"
+        title = (f"{which} {'is on' if live else 'ran on'} its backup connection, "
+                 "because the main one failed")
+        rec = ("The main streaming connection failed, so the VPU switched to its backup. "
+               f"The game stream{'s' if live else 'ed'} normally, but one more failure would "
+               f"drop it to the slower last-resort path. {ask}")
+    else:
+        code, sev = "stream-log-recovered", "info"
+        title = f"{which} connected after {n} failed attempt{'s' if n != 1 else ''}"
+        rec = ("The stream couldn't connect at first, then did, and the game "
+               f"stream{'s' if live else 'ed'} normally. If this happens at the start of "
+               "every event, check the venue's network with venue IT.")
+    return [{
+        "code": code, "severity": sev, "category": "Network",
+        "title": title, "recommendation": rec,
+        "it": it, "evidence": evidence, "details": details,
+    }]
+
+
+# When the port test already found the same tier the log shows, they are one
+# problem seen twice: the log becomes that finding's proof, not a second
+# finding. When the log shows something worse or different (ports green,
+# stream dead), it stands on its own -- that is the case it exists for.
+_STREAM_LOG_SAME_TIER = {
+    "stream-log-failing": "stream-blocked",
+    "stream-log-rtmp": "stream-degraded-rtmp",
+    "stream-log-backup": "stream-resiliency-reduced",
+}
+
+
+def _streaming_findings(port_tests, stream_log) -> list:
+    """The streaming chain from both sources -- the port probes and VPU.exe's
+    log -- for the Dashboard, the ticket and the Network card alike."""
+    port_side = _stream_findings(port_tests)
+    log_side = _stream_log_findings(stream_log, port_tests)
+    by_code = {f["code"]: f for f in port_side}
+    out = list(port_side)
+    for f in log_side:
+        twin = by_code.get(_STREAM_LOG_SAME_TIER.get(f["code"]))
+        if twin is None:
+            out.append(f)
+            continue
+        merged = dict(twin)
+        merged["evidence"] = " ".join(x for x in (twin.get("evidence"), "VPU.exe's own log confirms it on the live stream: " + f["evidence"]) if x)
+        merged["details"] = list(twin.get("details") or []) + list(f.get("details") or [])
+        merged["confirmedBy"] = f["code"]
+        out[out.index(twin)] = merged
+    return out
+
+
+def _stream_log_summary(stream_log, analysis):
+    """One line for the Network card, under the port tiles: what the real
+    stream did, set against what the port tests say. Each of the four states
+    (failed / empty / found / problem) reads differently."""
+    if not isinstance(stream_log, dict):
+        return {"level": "muted", "text": "VPU.exe's stream log wasn't checked."}
+    if stream_log.get("error"):
+        return {"level": "fail",
+                "text": f"Couldn't read VPU.exe's stream log: {stream_log.get('message') or 'the check did not finish'}."}
+    hours = stream_log.get("hoursBack") or 24
+    if not stream_log.get("logsFound"):
+        log_dir = stream_log.get("logDir") or "C:\\Pixellot\\Data\\Log"
+        return {"level": "muted",
+                "text": f"No VPU.exe log from the last {hours} hours in {log_dir}, "
+                        "so Pulse can't see what the live stream did."}
+    a = analysis or {}
+    now = _stream_log_dt(stream_log.get("now"))
+    clock = lambda t: _stream_log_clock(t, now)  # noqa: E731
+    which = "The live stream" if a.get("live") else "The last stream"
+    earlier = (a.get("windowFailCount") or 0) - (a.get("failCount") or 0)
+    tail = (f" VPU.exe logged {earlier} other failed connection attempt{'s' if earlier != 1 else ''} "
+            f"in the last {hours} hours." if earlier > 0 else "")
+    state = a.get("state")
+    if state == "none":
+        return {"level": "muted",
+                "text": f"VPU.exe's log shows no live stream in the last {hours} hours, so there's "
+                        "no real connection to check the port tests against." + tail}
+    if state == "connecting":
+        return {"level": "muted",
+                "text": f"The stream started at {clock(a.get('startedAt'))} and is still connecting." + tail}
+    if state == "quiet":
+        return {"level": "muted",
+                "text": f"The stream stopped logging at {clock(a.get('lastFailAt'))} without connecting "
+                        "or ending, so Pulse can't tell what it is doing now." + tail}
+    found = _stream_log_findings(stream_log)
+    if not found:
+        server = a.get("server") or a.get("serverIp")
+        return {"level": "pass",
+                "text": f"{which} connected on the main path at {clock(a.get('connectedAt'))}"
+                        + (f" ({server})" if server else "") + "." + tail}
+    f = found[0]
+    level = {"critical": "fail", "warning": "warn"}.get(f["severity"], "muted")
+    return {"level": level, "text": f["title"] + "." + tail}
+
+
+def _stream_log_payload(stream_log):
+    """The Network card's view of the collector: the analysis and its one-line
+    summary, without the raw event list. An error payload passes through with
+    its flag intact so the card can say the check failed."""
+    if not isinstance(stream_log, dict):
+        return None
+    if stream_log.get("error"):
+        out = dict(stream_log)
+    else:
+        out = {k: v for k, v in stream_log.items() if k not in ("events", "lastChain")}
+        out["analysis"] = _analyze_stream_log(stream_log)
+    out["summary"] = _stream_log_summary(stream_log, out.get("analysis"))
+    return out
+
+
 # ── Graphics delivery (Get-GraphicsDelivery) ──────────────────────────────
 # Pulse's network checks can't see a scorebug that never reaches the video:
 # the hand-off from GraphicsManager to VPU.exe is localhost gRPC, so a unit
@@ -2155,7 +2551,7 @@ def _graphics_findings(gd) -> list:
     return out
 
 
-def _compute_findings(identity, performance, services, nics, hardware=None, installed_sw=None, network_config=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None) -> list:
+def _compute_findings(identity, performance, services, nics, hardware=None, installed_sw=None, network_config=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None, stream_log=None) -> list:
     findings = []
 
     # None vs {} matters for probe_results: None means the caller never
@@ -2799,7 +3195,7 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
     # ── Streaming chain, required ports, SSL inspection / web filter, LogMeIn ──
     # One source for the Dashboard, the ticket and the Network card; see
     # _uplink_findings and friends above.
-    findings.extend(_stream_findings(port_tests))
+    findings.extend(_streaming_findings(port_tests, stream_log))
     findings.extend(_port_findings(port_tests))
     findings.extend(_tls_findings(tls_inspection, lmi_log))
     findings.extend(_lmi_findings(lmi_log))
@@ -2852,6 +3248,10 @@ READINESS_POLICY_VERSION = "v1"
 
 _READINESS_POLICY = {
     # ── BLOCKERS → FAIL (don't expect a clean broadcast tonight) ──
+    "stream-log-failing":    "blocker",  # F40 VPU.exe's log: the live stream has
+                                         #     failed every connection for 2+ min
+                                         #     and is still failing -- the game is
+                                         #     not reaching viewers right now.
     "stream-blocked":        "blocker",  # F1  every streaming rung dead (UDP/2088,
                                          #     UDP/443, TCP/1935) — broadcast cannot
                                          #     go on air. Replaced stream-2088-blocked
@@ -2902,6 +3302,17 @@ _READINESS_POLICY = {
                                          #     still air, so readiness is WARN not FAIL.
     "stream-resiliency-reduced": "risk", # F8  stream healthy on Zixi but part of the
                                          #     failover chain blocked (was stream-443-blocked)
+    # F40 family: VPU.exe's own log of the live stream. The port rows above
+    # probe Pixellot's echo server; these read the event's real streaming
+    # server, so a destination filter or a dead server can't hide behind a
+    # green port test (Red Lodge MT, 2026-09-26, read PASS).
+    "stream-log-last-failed": "risk",    # F40b last stream never connected -- the
+                                         #      game is over, the next one will
+                                         #      likely fail the same way
+    "stream-log-rtmp":       "risk",     # F40c on the last-resort path, proven by
+                                         #      the log (matches stream-degraded-rtmp)
+    "stream-log-backup":     "risk",     # F40d on the backup path (matches
+                                         #      stream-resiliency-reduced)
     "watchdog-down":         "risk",     # F9  KeepAgentUp down — no self-heal
     "pixellot-over-cap":     "risk",     # F10 build newer than GPU/OS supports
     "gpu-anomaly":           "risk",     # F12 Volta / roster anomaly
@@ -2952,6 +3363,9 @@ _READINESS_POLICY = {
     "sw-game-platform":      "info",     # F34
     "sw-consumer-sync":      "info",     # F35
     "uptime-high":           "info",     # F36
+    "stream-log-recovered":  "info",     # F40e connected on the main path after
+                                         #      failed attempts (a link drop at
+                                         #      start, a slow server)
     "tls-filtered-support":  "info",     # F38b only support-plane hosts filtered
                                          #      (LogMeIn / python.org) - remote
                                          #      support and installer downloads
@@ -3896,7 +4310,7 @@ def _compute_camera_findings(ports: list, poe=None) -> list:
 # ─── Data-building helpers (shared by per-page and preload) ──
 
 
-def _build_dashboard(identity, performance, services, nics, network_config=None, hardware=None, installed_sw=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, perf_sample=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None):
+def _build_dashboard(identity, performance, services, nics, network_config=None, hardware=None, installed_sw=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, perf_sample=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None, stream_log=None):
     # Tag adapter roles (motherboard / camera / wifi) so both the findings and
     # the embedded "Network config" the dashboard ships carry them.
     _classify_network_adapters(network_config)
@@ -3953,13 +4367,14 @@ def _build_dashboard(identity, performance, services, nics, network_config=None,
         "Installed software": installed_sw,
         "Port connectivity": port_tests,
         "Graphics delivery": graphics_delivery,
+        "VPU stream log": stream_log,
     }
     source_errors = [
         name for name, data in _sources.items()
         if isinstance(data, dict) and data.get("error")
     ]
 
-    findings = _compute_findings(identity, performance, services, nics, hardware, installed_sw, network_config, install_state, port_tests, gpu_info, wifi, pixellot_config=pixellot_config, expectations=expectations, disk_health=disk_health, probe_results=probe_results, tls_inspection=tls_inspection, lmi_log=lmi_log, graphics_delivery=graphics_delivery)
+    findings = _compute_findings(identity, performance, services, nics, hardware, installed_sw, network_config, install_state, port_tests, gpu_info, wifi, pixellot_config=pixellot_config, expectations=expectations, disk_health=disk_health, probe_results=probe_results, tls_inspection=tls_inspection, lmi_log=lmi_log, graphics_delivery=graphics_delivery, stream_log=stream_log)
 
     return {
         "identity": flat_identity,
@@ -3979,7 +4394,7 @@ def _build_dashboard(identity, performance, services, nics, network_config=None,
     }
 
 
-def _build_network(config, domains, ports, ntp, local=None, ntp_peers=None, dns_resolution=None, wifi=None, tls=None, lmi_log=None):
+def _build_network(config, domains, ports, ntp, local=None, ntp_peers=None, dns_resolution=None, wifi=None, tls=None, lmi_log=None, stream_log=None):
     net = {}
     _classify_network_adapters(config)
     if config and not config.get("error"):
@@ -4007,7 +4422,8 @@ def _build_network(config, domains, ports, ntp, local=None, ntp_peers=None, dns_
     _attach_impact(ports, domains, tls)
     net_findings = [
         f for f in (_uplink_findings(config if config and not config.get("error") else None, wifi)
-                    + _tls_findings(tls, lmi_log) + _lmi_findings(lmi_log) + _stream_findings(ports))
+                    + _tls_findings(tls, lmi_log) + _lmi_findings(lmi_log)
+                    + _streaming_findings(ports, stream_log))
         if f.get("code") in NET_CARD_FINDING_CODES
     ]
 
@@ -4016,7 +4432,8 @@ def _build_network(config, domains, ports, ntp, local=None, ntp_peers=None, dns_
     return {"config": net, "domains": domains, "ports": ports, "ntp": ntp,
             "local": local, "ntpPeers": ntp_peers,
             "dnsResolution": dns_resolution, "wifi": wifi, "tls": tls,
-            "lmiLog": lmi_log, "findings": _tag_readiness(net_findings)}
+            "lmiLog": lmi_log, "streamLog": _stream_log_payload(stream_log),
+            "findings": _tag_readiness(net_findings)}
 
 
 # ─── Routes ───────────────────────────────────────────────────
@@ -4121,7 +4538,7 @@ async def _collect_dashboard() -> dict:
     launch check-in beacon so both score readiness with identical inputs."""
     (identity, performance, services, nics, net_config, hardware, installed_sw,
      install_state, port_tests, gpu_info, wifi, pixellot_config, expectations,
-     disk_health, perf_sample, tls_inspection, lmi_log, graphics_delivery) = await asyncio.gather(
+     disk_health, perf_sample, tls_inspection, lmi_log, graphics_delivery, stream_log) = await asyncio.gather(
         run_ps("Get-SystemIdentity.ps1"),
         run_ps("Get-Performance.ps1"),
         run_ps("Get-Services.ps1"),
@@ -4157,6 +4574,10 @@ async def _collect_dashboard() -> dict:
         # did the scorebug ever reach the video? ~1s on VPU2; the collector
         # stops itself at 25s and says so.
         run_ps("Get-GraphicsDelivery.ps1", timeout=40),
+        # VPU.exe's own log: what the live stream actually did. The port test
+        # reaches Pixellot's echo server, not this event's streaming server.
+        # findstr over a full-day log (180+ MB) takes about a second.
+        run_ps("Get-VpuStreamLog.ps1", timeout=20),
     )
     # CGI probe (cached 30s; usually already warm from preload) so the
     # slow-port finding identifies the OCR by its actual camera model, not a
@@ -4195,7 +4616,7 @@ async def _collect_dashboard() -> dict:
         pixellot_config=pixellot_config, expectations=expectations,
         disk_health=disk_health, perf_sample=perf_sample,
         probe_results=probe_results, tls_inspection=tls_inspection,
-        lmi_log=lmi_log, graphics_delivery=graphics_delivery,
+        lmi_log=lmi_log, graphics_delivery=graphics_delivery, stream_log=stream_log,
     )
 
 
@@ -4311,7 +4732,7 @@ async def api_network():
     """Network tab data: gathers adapter config, domain reachability, port
     checks, NTP drift + peers, the local-network probe, DNS resolution, and
     Wi-Fi adapters in parallel, then assembles them into the network panel."""
-    config, domains, ports, ntp, local, ntp_peers, dns_resolution, wifi, tls, lmi_log = await asyncio.gather(
+    config, domains, ports, ntp, local, ntp_peers, dns_resolution, wifi, tls, lmi_log, stream_log = await asyncio.gather(
         run_ps("Get-NetworkConfig.ps1", timeout=15),
         run_ps("Test-NetworkDomains.ps1", timeout=20),
         run_ps("Test-NetworkPorts.ps1", timeout=45),
@@ -4326,8 +4747,10 @@ async def api_network():
         # LogMeIn's service log — historical middlebox evidence (a healthy
         # week of dailies parses in well under a second).
         run_ps("Get-LmiGatewayLog.ps1", timeout=20),
+        # VPU.exe's log of the real stream -- the other half of the port tiles.
+        run_ps("Get-VpuStreamLog.ps1", timeout=20),
     )
-    return _build_network(config, domains, ports, ntp, local, ntp_peers, dns_resolution, wifi, tls, lmi_log)
+    return _build_network(config, domains, ports, ntp, local, ntp_peers, dns_resolution, wifi, tls, lmi_log, stream_log)
 
 
 @app.get("/api/network/local-ping")
@@ -6566,6 +6989,9 @@ async def build_report() -> dict:
         # is what gets sent to a district's IT team, so the raw cert detail
         # matters here even more than in the UI.
         ("tlsInspection",        run_ps("Test-TlsInspection.ps1", timeout=60)),
+        # VPU.exe's own log of the live stream, raw events included: the
+        # connection the port tests can't reach (see _stream_log_findings).
+        ("streamLog",            run_ps("Get-VpuStreamLog.ps1", timeout=20)),
     ]
 
     def _norm(r):
@@ -6604,6 +7030,7 @@ async def build_report() -> dict:
             disk_health=sections.get("diskHealth"),
             probe_results=cam_probes,
             tls_inspection=sections.get("tlsInspection"),
+            stream_log=sections.get("streamLog"),
         )
     except Exception as e:
         sections["findings"] = {"error": f"findings computation failed: {type(e).__name__}: {e}"}
