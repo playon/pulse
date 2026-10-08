@@ -1116,6 +1116,12 @@ DEMO = {
             "isPending": True,
             "reasons": ["Windows Update is waiting to finish"],
         },
+        # Shape read off vpu-6493 (HP EliteDesk 800 G4) via HP_BIOSEnumeration.
+        "afterPowerLoss": {
+            "status": "read", "value": "Power On",
+            "options": ["Power Off", "Power On", "Previous State"],
+            "manufacturer": "HP", "model": "HP EliteDesk 800 G4 WKS TWR", "message": None,
+        },
         "lastBoot": (datetime.now() - timedelta(minutes=25)).isoformat(),
         "uptime": "0d 0h 25m",
         # The PnP task that reboots after a driver install flags reboot-required
