@@ -325,6 +325,12 @@ async def _on_startup():
         asyncio.create_task(_refresh_installed_launcher(time.time()))
     except Exception:
         pass
+    # Same, for old copies of the launcher a tech left on the desktop (see
+    # _refresh_launcher_copies).
+    try:
+        asyncio.create_task(_refresh_launcher_copies(time.time()))
+    except Exception:
+        pass
 
     # Fire-and-forget run-tracking check-in (no-op until the check-in secret is
     # filled in, and never in demo/dev). Scheduled so it can't delay startup.
@@ -6084,6 +6090,158 @@ async def _refresh_installed_launcher(started_at: float = None) -> None:
         # Fail-open: a stale launcher still works, and we retry next launch.
         try:
             _server_log.info("Launcher refresh skipped (retries next launch): %s", e)
+        except Exception:
+            pass
+
+
+# ── Replace stale copies of the launcher left on the VPU ─────────────────
+import hashlib as _hashlib  # noqa: E402
+
+# The deploy post in #pulse-support (2026-07-28) has techs download
+# run_pulse.bat, drop it on the VPU desktop, run it once, then use the Start
+# Menu. Plenty keep double-clicking the desktop copy instead. That file is
+# frozen at whatever release was current when it was downloaded, and every run
+# copies it back over Pulse.bat, so the box runs an old OUTER launcher (no
+# source-zip fallback, no slow-DNS fix) however often the refresh above
+# installs the new one.
+#
+# So replace those copies in place with this release's bundled launcher: the
+# tech's icon keeps its name and place and now carries the current launcher,
+# which also ends the tug of war over Pulse.bat.
+#
+# A copy is identified by its exact SHA-256 against every production launcher
+# ever published from main (the Pulse.Web launchers installing to C:\Pulse,
+# 2026-06-05 onward; the sub-1 KB launchers before that are the WPF era and are
+# left alone). A file that is not byte-identical to one of these is never
+# touched: a NEWER launcher a tech brought to a box whose update failed, a dev
+# or beta launcher, an edited copy, anything else. That is what keeps an older
+# release from ever downgrading a newer launcher.
+#
+# When a promotion to main changes the launcher, add the OUTGOING production
+# launcher's hash here. Forgetting only means that generation is not refreshed;
+# it can never cause a wrong write.
+#   python3 -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" runners/run_pulse.bat
+_SUPERSEDED_PROD_LAUNCHERS = frozenset({
+    "336d4adc4c778e35004bfa0373303cec1b86dd81ba8d33e20f7ce0269fbd0baa",  # 2026-06-05 054cdb4
+    "f91b48b3b77949a0885c803e06b09fb0471700d8f92dfa6a2574ad5d2c4846ee",  # 2026-06-08 c991405
+    "8bf9edc31cd37411cd1e9f998d5b4573a24d5f81c80a5562c4f8e42535b068a1",  # 2026-06-18 49fa8db
+    "531dfff53f89e843be3da70e5d49596f9426cfb0c0c801d8a6e8f205a91097e8",  # 2026-06-23 7e11c99
+    "1cf94c99ce8db81a1d0de907e54ac5dbca5eaad562b3724ef0e8f4f01d67a02e",  # web-v1.0.1 - 1.0.5
+    "0cedd4fc6327716fb29cf8dc1d95f1ad7166b45b5f3a3633c1e93340fb269dde",  # web-v1.1.0 - 1.2.2
+    "61f4faf1ed51c406c3dc4862374c140d3de260f4e95bef2f89ed81b50fcd1df4",  # 2026-07-30 270fc19
+    "808df2bb0ed2d766326931a7bffa76103352c80f43d3e61c5bf40fd3fe7e3740",  # web-v1.2.3 - 1.3.3
+    "5b4527376c39500e20b8c213d221d3352dd037865d10e269f4532a7485b040aa",  # 2026-10-02 #197 on main
+})
+# Folders under each Windows profile where a downloaded launcher ends up.
+# Top level only: a launcher buried in a project folder is not the tech's icon.
+_LAUNCHER_COPY_SUBDIRS = ("Desktop", "Downloads", _os.path.join("OneDrive", "Desktop"))
+_LAUNCHER_COPY_MAX_BYTES = 256 * 1024
+# None = %SystemDrive%\Users. Tests point it at a temp tree.
+_LAUNCHER_COPY_USERS_ROOT = None
+
+
+def _is_superseded_launcher(data: bytes) -> bool:
+    """True when `data` is byte-identical to a published production launcher,
+    also after normalising CRLF to LF (a transfer that rewrote line endings)."""
+    if _hashlib.sha256(data).hexdigest() in _SUPERSEDED_PROD_LAUNCHERS:
+        return True
+    lf = data.replace(b"\r\n", b"\n")
+    return lf != data and _hashlib.sha256(lf).hexdigest() in _SUPERSEDED_PROD_LAUNCHERS
+
+
+def _launcher_copy_dirs():
+    root = _LAUNCHER_COPY_USERS_ROOT or _os.path.join(
+        _os.environ.get("SystemDrive", "C:") + _os.sep, "Users")
+    dirs = []
+    try:
+        profiles = sorted(_os.listdir(root))
+    except OSError:
+        return dirs
+    for profile in profiles:
+        if profile.lower() in ("default", "default user", "all users"):
+            continue  # template and legacy junction profiles, never a tech's
+        for sub in _LAUNCHER_COPY_SUBDIRS:
+            d = _os.path.join(root, profile, sub)
+            if _os.path.isdir(d):
+                dirs.append(d)
+    return dirs
+
+
+def _find_stale_launcher_copies(bundled: bytes):
+    """Paths of .bat files that are an older published production launcher."""
+    stale = []
+    for d in _launcher_copy_dirs():
+        try:
+            names = sorted(_os.listdir(d))
+        except OSError:
+            continue
+        for name in names:
+            if not name.lower().endswith(".bat"):
+                continue
+            path = _os.path.join(d, name)
+            try:
+                if not _os.path.isfile(path) or _os.path.getsize(path) > _LAUNCHER_COPY_MAX_BYTES:
+                    continue
+                with open(path, "rb") as f:
+                    data = f.read()
+            except OSError:
+                continue
+            if data != bundled and _is_superseded_launcher(data):
+                stale.append(path)
+    return stale
+
+
+async def _refresh_launcher_copies(started_at: float = None) -> None:
+    """Replace older copies of the production launcher (see above) with this
+    release's bundled one, once the launch in progress has finished."""
+    if DEMO_MODE:
+        return
+    if started_at is None:
+        started_at = time.time()
+    try:
+        # Same scope as _refresh_installed_launcher: the bundled copy is the
+        # production launcher, and only a production install has a released one.
+        if not _is_managed_install() or _update_channel() != "production":
+            return
+        if not _os.path.exists(_BUNDLED_PROD_LAUNCHER):
+            return
+        with open(_BUNDLED_PROD_LAUNCHER, "rb") as src:
+            bundled = src.read()
+        if len(bundled) < 1000:
+            return
+        if not _find_stale_launcher_copies(bundled):
+            return
+        # The copy on the desktop may be the very launcher that started this
+        # server, still executing; cmd reads a .bat by byte offset (see above).
+        if not await _wait_for_launch_complete(started_at):
+            _server_log.info(
+                "Launcher copy refresh deferred: this launch never recorded "
+                "pulse-launch-done, so a launcher may still be running")
+            return
+        replaced = []
+        # Re-scan after the wait: a file that changed meanwhile is re-judged.
+        for path in _find_stale_launcher_copies(bundled):
+            tmp = path + ".pulse-new"
+            try:
+                with open(tmp, "wb") as f:
+                    f.write(bundled)
+                _os.replace(tmp, path)
+                replaced.append(path)
+            except Exception as e:
+                try:
+                    _os.remove(tmp)
+                except Exception:
+                    pass
+                _server_log.info("Launcher copy refresh skipped %s (retries next launch): %s", path, e)
+        if replaced:
+            msg = ("Replaced %d old copy(ies) of the Pulse launcher with this release's "
+                   "launcher: %s" % (len(replaced), "; ".join(replaced)))
+            ps_log("server", 0, "ok", msg)
+            _server_log.info(msg)
+    except Exception as e:
+        # Fail-open: an old copy still launches Pulse, and we retry next launch.
+        try:
+            _server_log.info("Launcher copy refresh skipped (retries next launch): %s", e)
         except Exception:
             pass
 
