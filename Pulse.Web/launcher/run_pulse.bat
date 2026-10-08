@@ -15,10 +15,10 @@ if %errorlevel% EQU 0 goto :gotadmin
 echo   Requesting administrator access ...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -ArgumentList '/elevated %*' -Verb RunAs -ErrorAction Stop } catch { exit 1 }"
 if not errorlevel 1 exit /b
-echo   Administrator access declined - continuing with limited diagnostics.
+echo   Administrator access was declined. Pulse will start, but some checks will be missing.
 :gotadmin
 
-:: ════════════════════════════════════════════════════════════════
+:: ================================================================
 ::  Pulse updater / launcher  (PRODUCTION channel)
 ::
 ::  - Installs to C:\Pulse
@@ -28,7 +28,7 @@ echo   Administrator access declined - continuing with limited diagnostics.
 ::  - If offline or the download fails, launches the installed copy
 ::  - Creates a desktop shortcut; hands off to run.bat, which starts
 ::    the server hidden and closes this window
-:: ════════════════════════════════════════════════════════════════
+:: ================================================================
 
 :: -- Config ---------------------------------------------------------------
 set "CHANNEL=production"
@@ -42,6 +42,24 @@ set "RESOLVE_OUT=%TEMP%\pulse-resolve.txt"
 :: runtime self-copy below ever fails (see :shortcut).
 set "LAUNCHER_URL=https://raw.githubusercontent.com/playon/pulse/main/runners/run_pulse.bat"
 
+:: -- What the tech sees ---------------------------------------------------
+:: One line per step, status in one column, so the window reads top to bottom
+:: as a list of what happened. Transient retries erase themselves; only the
+:: outcome stays. Every failure ends in the :fatal banner, which repeats the
+:: one-line cause (FAIL_WHY) and the next step (FAIL_DO). run.bat continues
+:: the same list under "Starting Pulse" (labels padded to the same column).
+set "L_CHROME=    Chrome .............. "
+set "L_UPDATE=    Update .............. "
+set "L_SHORTCUT=    Shortcut ............ "
+set "UPD_WHY="
+set "UPD_DETAIL="
+set "FAIL_WHY=Pulse could not be installed."
+set "FAIL_DO="
+set "INSTALLED_VER="
+if exist "%INSTALL_DIR%\VERSION" set /p INSTALLED_VER=<"%INSTALL_DIR%\VERSION"
+set "INSTALLED_DESC=the installed copy"
+if defined INSTALLED_VER set "INSTALLED_DESC=installed !INSTALLED_VER!"
+
 echo.
 echo  .-----------------------------------------------------.
 echo  ^|                                                     ^|
@@ -54,40 +72,54 @@ echo  ^|                                                     ^|
 echo  '-----------------------------------------------------'
 echo                    VPU Diagnostics
 echo.
-echo   Install : %INSTALL_DIR%
-echo.
+echo   Updating Pulse
 
-:: -- Chrome (install if missing) ------------------------------------------
+:: -- Chrome (install only if missing) -------------------------------------
+:: Any installed Chrome will do, at any version: Chrome updates itself, and
+:: Pulse only needs a browser. Look everywhere Wait-AndLaunch.ps1 looks
+:: (machine and per-user installs) so a per-user Chrome is never reinstalled.
 :: The download and the silent install are the two longest unattended steps
 :: in the launcher (minutes on a slow venue link) and both used to sit on one
 :: static "installing" line, so a tech had no way to tell them from a hang.
 :: Both now animate -- see :spin at the end of this file.
-reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe" >nul 2>&1
-if %errorlevel% EQU 0 (
-    echo   Chrome ......................... ok
+set "HAS_CHROME="
+reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe" >nul 2>&1 && set "HAS_CHROME=1"
+reg query "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe" >nul 2>&1 && set "HAS_CHROME=1"
+if exist "%ProgramFiles%\Google\Chrome\Application\chrome.exe" set "HAS_CHROME=1"
+if exist "%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe" set "HAS_CHROME=1"
+if exist "%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe" set "HAS_CHROME=1"
+if defined HAS_CHROME (
+    echo !L_CHROME!ready
     goto :chrome_done
 )
-call :dl_spin "  Chrome ......................... downloading" "https://dl.google.com/chrome/install/latest/chrome_installer.exe" "%TEMP%\chrome_installer.exe" "-"
+call :dl_spin "%L_CHROME%downloading" "https://dl.google.com/chrome/install/latest/chrome_installer.exe" "%TEMP%\chrome_installer.exe" "-" "-"
 if errorlevel 1 (
-    echo   Chrome ......................... download failed - continuing
+    echo !L_CHROME!could not download - Pulse will open in the default browser
     goto :chrome_done
 )
-set "SPIN_LABEL=  Chrome ......................... installing"
-set "SPIN_DONE=  Chrome ......................... installed"
+set "SPIN_LABEL=%L_CHROME%installing"
+set "SPIN_DONE=%L_CHROME%installed"
 set "SPIN_PSCMD=$null=Start-Process -FilePath ($env:TEMP+'\chrome_installer.exe') -ArgumentList '/silent','/install' -Wait"
 call :spin
 del "%TEMP%\chrome_installer.exe" 2>nul
 :chrome_done
 
 :: -- Offline fast-path ----------------------------------------------------
+:: The name lookup gets its own wait, and the connect goes to the resolved
+:: IP. BeginConnect('github.com',...) resolves inside the 3 s connect wait
+:: on .NET Framework, so a PC whose lookups take 10 s (seen on a bench VPU:
+:: every getaddrinfo call stalls 10 s, while the DNS server answers in ms)
+:: read as offline and never updated. If the normal lookup has not answered
+:: in 3 s, ask the DNS server directly (Resolve-DnsName -DnsOnly skips the
+:: local resolver stack): an answer means slow-but-online, no answer means
+:: DNS is down and we still fall back to the installed build quickly.
 if exist "%INSTALL_DIR%\run.bat" (
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $c = New-Object Net.Sockets.TcpClient; $iar = $c.BeginConnect('github.com',443,$null,$null); if ($iar.AsyncWaitHandle.WaitOne(3000) -and $c.Connected) { $c.Close(); exit 0 } else { exit 1 } } catch { exit 1 }"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $ip = $null; $a = [Net.Dns]::BeginGetHostAddresses('github.com',$null,$null); if ($a.AsyncWaitHandle.WaitOne(3000)) { $ip = [Net.Dns]::EndGetHostAddresses($a) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1 } else { $ip = Resolve-DnsName -Name 'github.com' -Type A -DnsOnly -QuickTimeout -ErrorAction Stop | Where-Object { $_.IPAddress } | Select-Object -First 1 -ExpandProperty IPAddress }; if (-not $ip) { exit 1 }; $c = New-Object Net.Sockets.TcpClient; $iar = $c.BeginConnect([Net.IPAddress]$ip,443,$null,$null); if ($iar.AsyncWaitHandle.WaitOne(3000) -and $c.Connected) { $c.Close(); exit 0 } else { exit 1 } } catch { exit 1 }"
     if errorlevel 1 (
-        echo   Network ........................ offline - using installed build
+        echo !L_UPDATE!skipped - could not reach github.com, using !INSTALLED_DESC!
         goto :shortcut
     )
 )
-echo   Network ........................ online
 
 :: -- Resolve the latest production release (tag^|url) ---------------------
 ::   1) newest web-v* (non-prerelease) on playon/pulse
@@ -95,7 +127,7 @@ echo   Network ........................ online
 ::   3) fallback: main-branch commit zip, tagged main-<sha7>
 ::   On total failure the real error is reported as ERR|<why> instead of
 ::   being swallowed -- "no release found" alone is undebuggable in the field.
-set "SPIN_LABEL=  Update ......................... checking for a newer release"
+set "SPIN_LABEL=%L_UPDATE%checking for a newer version"
 set "SPIN_DONE=-"
 set "SPIN_OUT=%RESOLVE_OUT%"
 set "SPIN_PSCMD=$ErrorActionPreference='Stop';[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;$pat='web-v*';$out='';$err='';foreach($repo in @('%PUBLIC_REPO%','%REPO%')){try{$r=Invoke-RestMethod -Uri ('https://api.github.com/repos/'+$repo+'/releases') -TimeoutSec 10}catch{$err=$_.Exception.Message;continue};$rel=$r|Where-Object{$_.tag_name -like $pat -and -not $_.prerelease}|Select-Object -First 1;if($rel){$asset=$rel.assets|Where-Object{$_.name -like '*.zip'}|Select-Object -First 1;if($asset){$out=$rel.tag_name+'|'+$asset.browser_download_url;break}}};if(-not $out){try{$sha=(Invoke-RestMethod -Uri 'https://api.github.com/repos/%REPO%/commits/main' -TimeoutSec 10).sha;if($sha){$out='main-'+$sha.Substring(0,7)+'|https://github.com/%REPO%/archive/'+$sha+'.zip'}}catch{if(-not $err){$err=$_.Exception.Message}}};if(-not $out -and $err){$out='ERR|'+($err -replace '[|]',' ' -replace '\s+',' ')};Write-Output $out"
@@ -115,13 +147,13 @@ for /f "tokens=1,* delims=|" %%A in ("!RESOLVED!") do (
 :: A lookup that failed outright arrives as ERR|<why> -- show the tech the
 :: real error instead of a bare "no release found".
 if "!REL_TAG!"=="ERR" (
-    echo   Update ......................... release lookup FAILED:
-    echo       !ASSET_URL!
+    set "UPD_WHY=could not check for a newer version"
+    set "UPD_DETAIL=!ASSET_URL!"
     set "ASSET_URL="
     goto :dl_failed
 )
 if not defined ASSET_URL (
-    echo   Update ......................... no release found
+    set "UPD_WHY=no release was found"
     goto :dl_failed
 )
 
@@ -130,7 +162,7 @@ if exist "%INSTALL_DIR%\VERSION" (
     set "INSTALLED_VER="
     set /p INSTALLED_VER=<"%INSTALL_DIR%\VERSION"
     if "!INSTALLED_VER!"=="!REL_TAG!" (
-        echo   Update ......................... already up to date ^(!REL_TAG!^)
+        echo !L_UPDATE!up to date - !REL_TAG!
         goto :shortcut
     )
 )
@@ -140,7 +172,7 @@ if exist "%INSTALL_DIR%\VERSION" (
 :: can fail the GitHub release-asset CDN redirect with SEC_E_WRONG_PRINCIPAL.
 :: If curl yields no usable zip (failed or absent), fall back to PowerShell,
 :: whose .NET stack uses the Windows cert store and follows the redirect cleanly.
-echo   Update ......................... downloading !REL_TAG!
+echo !L_UPDATE!downloading !REL_TAG!
 if exist "%ZIPFILE%" del "%ZIPFILE%" 2>nul
 where curl.exe >nul 2>&1 && curl.exe -L --progress-bar -o "%ZIPFILE%" "!ASSET_URL!"
 
@@ -148,7 +180,7 @@ set "DL_OK="
 if exist "%ZIPFILE%" for %%A in ("%ZIPFILE%") do if %%~zA GEQ 1000 set "DL_OK=1"
 if not defined DL_OK (
     if exist "%ZIPFILE%" del "%ZIPFILE%" 2>nul
-    call :dl_spin "  Update ......................... retrying via PowerShell" "!ASSET_URL!" "%ZIPFILE%" "  Update ......................... downloaded"
+    call :dl_spin "%L_UPDATE%downloading !REL_TAG! another way" "!ASSET_URL!" "%ZIPFILE%" "-" "-"
 )
 
 set "DL_OK="
@@ -159,30 +191,36 @@ if defined DL_OK goto :dl_ok
 :: school web filters often block while github.com itself works. The same
 :: tag's source zip comes from codeload.github.com instead and carries the
 :: same Pulse.Web tree (the SRC search below finds it one folder down).
+set "UPD_WHY=download failed"
 if /I not "!REL_TAG:~0,5!"=="web-v" goto :dl_failed
 if exist "%ZIPFILE%" del "%ZIPFILE%" 2>nul
 set "ARCHIVE_URL=https://github.com/%REPO%/archive/refs/tags/!REL_TAG!.zip"
-echo   Update ......................... release file unreachable - trying source zip
+echo !L_UPDATE!could not get the release file - trying the source zip instead
 where curl.exe >nul 2>&1 && curl.exe -L --progress-bar -o "%ZIPFILE%" "!ARCHIVE_URL!"
 set "DL_OK="
 if exist "%ZIPFILE%" for %%A in ("%ZIPFILE%") do if %%~zA GEQ 1000 set "DL_OK=1"
 if not defined DL_OK (
     if exist "%ZIPFILE%" del "%ZIPFILE%" 2>nul
-    call :dl_spin "  Update ......................... source zip via PowerShell" "!ARCHIVE_URL!" "%ZIPFILE%" "  Update ......................... downloaded"
+    call :dl_spin "%L_UPDATE%downloading the source zip another way" "!ARCHIVE_URL!" "%ZIPFILE%" "-" "-"
 )
 
+set "UPD_WHY=download failed - this network may block GitHub"
 if not exist "%ZIPFILE%" goto :dl_failed
 for %%A in ("%ZIPFILE%") do if %%~zA LSS 1000 goto :dl_failed
 goto :dl_ok
 
 :dl_failed
 if exist "%ZIPFILE%" del "%ZIPFILE%"
+if not defined UPD_WHY set "UPD_WHY=download failed"
 if exist "%INSTALL_DIR%\run.bat" (
-    echo   Update ......................... unavailable - using installed build
+    echo !L_UPDATE!!UPD_WHY! - using !INSTALLED_DESC!
+    if defined UPD_DETAIL echo       !UPD_DETAIL!
     goto :shortcut
 )
-echo.
-echo   [ERROR] No release could be downloaded and none is installed.
+echo !L_UPDATE!!UPD_WHY!
+if defined UPD_DETAIL echo       !UPD_DETAIL!
+set "FAIL_WHY=Pulse is not installed on this VPU yet, and it could not be downloaded."
+set "FAIL_DO=Send the network check above to the site's IT team, then run Pulse again."
 call :netdiag
 goto :fatal
 
@@ -190,8 +228,8 @@ goto :fatal
 if exist "%EXTRACT%" rd /s /q "%EXTRACT%"
 :: Import-Module explicitly: Expand-Archive lives in a module, and the spinner
 :: runs it in a fresh runspace rather than relying on command auto-discovery.
-set "SPIN_LABEL=  Update ......................... extracting"
-set "SPIN_DONE=  Update ......................... extracted"
+set "SPIN_LABEL=%L_UPDATE%unpacking !REL_TAG!"
+set "SPIN_DONE=-"
 set "SPIN_PSCMD=Import-Module Microsoft.PowerShell.Archive -ErrorAction SilentlyContinue;Expand-Archive -Path '%ZIPFILE%' -DestinationPath '%EXTRACT%' -Force"
 call :spin
 del "%ZIPFILE%"
@@ -202,15 +240,18 @@ if not defined SRC for /d %%d in ("%EXTRACT%\*") do if exist "%%d\run.bat" set "
 if not defined SRC for /d %%d in ("%EXTRACT%\*") do if exist "%%d\Pulse.Web\run.bat" set "SRC=%%d\Pulse.Web"
 
 if not defined SRC (
-    echo   [ERROR] Downloaded archive did not contain Pulse.Web.
+    echo !L_UPDATE!the download was damaged or incomplete
+    set "FAIL_WHY=The download of !REL_TAG! was damaged or incomplete."
+    set "FAIL_DO=Run Pulse again to download it again."
     if exist "%EXTRACT%" rd /s /q "%EXTRACT%"
     goto :fatal
 )
 
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%" 2>nul
 if not exist "%INSTALL_DIR%" (
-    echo   [ERROR] Could not create %INSTALL_DIR%.
-    echo           Run this launcher as Administrator.
+    echo !L_UPDATE!could not create %INSTALL_DIR%
+    set "FAIL_WHY=Pulse could not create the folder %INSTALL_DIR%."
+    set "FAIL_DO=Start Pulse again and choose Yes when Windows asks for administrator access."
     if exist "%EXTRACT%" rd /s /q "%EXTRACT%"
     goto :fatal
 )
@@ -219,18 +260,17 @@ if not exist "%INSTALL_DIR%" (
 :: SRC goes through the environment: it can contain spaces, and quoting it
 :: through the spinner's single-quoted command string cannot.
 set "SPIN_SRC=%SRC%"
-set "SPIN_LABEL=  Update ......................... installing to %INSTALL_DIR%"
-set "SPIN_DONE=  Update ......................... installed to %INSTALL_DIR%"
+set "SPIN_LABEL=%L_UPDATE%installing !REL_TAG!"
+set "SPIN_DONE=%L_UPDATE%installed !REL_TAG!"
 set "SPIN_PSCMD=$log=$env:TEMP+'\pulse-copy.log';& ($env:SystemRoot+'\System32\xcopy.exe') ($env:SPIN_SRC+'\*') '%INSTALL_DIR%\' /s /e /y /q *> $log;if($LASTEXITCODE -ge 4){throw 'file copy failed with code '+$LASTEXITCODE+' - see '+$log}"
 call :spin
 if exist "%EXTRACT%" rd /s /q "%EXTRACT%"
 
 echo !REL_TAG!> "%INSTALL_DIR%\VERSION"
-echo   Version ........................ !REL_TAG!
 
 :shortcut
 :: -- Self-copy + Start Menu shortcut --------------------------------------
-:: Stealth footprint: no desktop icon. Findable via Start Menu — press Win,
+:: Stealth footprint: no desktop icon. Findable via Start Menu - press Win,
 :: type "pulse", hit Enter. Also auto-removes any existing Desktop\Pulse.lnk
 :: from older launcher builds so existing installs migrate on next launch.
 ::
@@ -241,7 +281,6 @@ echo   Version ........................ !REL_TAG!
 :: (re)create the shortcut AFTER confirming the target exists -- never orphan it.
 if /I not "%~f0"=="%INSTALL_DIR%\Pulse.bat" copy /y "%~f0" "%INSTALL_DIR%\Pulse.bat" >nul
 if not exist "%INSTALL_DIR%\Pulse.bat" (
-    echo   Launcher self-copy ............. failed - fetching from repo
     powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue';[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; try{ Invoke-WebRequest -UseBasicParsing -Uri '%LAUNCHER_URL%' -OutFile '%INSTALL_DIR%\Pulse.bat' }catch{}" 2>nul
 )
 :: Record the channel so the in-app "Check for update" knows which release line to track
@@ -255,18 +294,18 @@ if not exist "%ICON%" set "ICON=%INSTALL_DIR%\Pulse.bat"
 if not exist "%INSTALL_DIR%\Pulse.bat" goto :no_shortcut
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$old=[Environment]::GetFolderPath('DesktopDirectory')+'\Pulse.lnk'; if (Test-Path $old) { Remove-Item $old -Force -ErrorAction SilentlyContinue }; $d=[Environment]::GetFolderPath('Programs'); $s=(New-Object -ComObject WScript.Shell).CreateShortcut(\"$d\Pulse.lnk\"); $s.TargetPath='%INSTALL_DIR%\Pulse.bat'; $s.WorkingDirectory='%INSTALL_DIR%'; $s.IconLocation='%ICON%'; $s.Description='Pulse - VPU Diagnostics'; $s.Save()" 2>nul
-echo   Start Menu shortcut ............ ready
 goto :after_shortcut
 :no_shortcut
-echo   Start Menu shortcut ............ SKIPPED - launcher copy unavailable
+echo !L_SHORTCUT!not created - the Start Menu entry for Pulse may not work
 :after_shortcut
 
 :: -- Hand off to the runtime launcher -------------------------------------
-echo.
 if not exist "%INSTALL_DIR%\run.bat" (
-    echo   [ERROR] %INSTALL_DIR%\run.bat not found — install incomplete.
+    set "FAIL_WHY=Pulse's files in %INSTALL_DIR% are incomplete."
+    set "FAIL_DO=Run Pulse again to reinstall them."
     goto :fatal
 )
+echo.
 cd /d "%INSTALL_DIR%"
 call run.bat
 endlocal
@@ -275,10 +314,12 @@ exit /b 0
 :: -- Update-phase error handler -------------------------------------------
 :fatal
 echo.
-echo  ============================================
-echo    PULSE UPDATE FAILED — see messages above.
-echo    Press any key to close.
-echo  ============================================
+echo   ------------------------------------------------------------
+echo   PULSE COULD NOT BE INSTALLED
+echo   !FAIL_WHY!
+if defined FAIL_DO echo   !FAIL_DO!
+echo   Press any key to close this window.
+echo   ------------------------------------------------------------
 pause >nul
 endlocal
 exit /b 1
@@ -294,14 +335,13 @@ exit /b 1
 set "DIAG_LOG=%TEMP%\pulse-launcher-diag.txt"
 > "%DIAG_LOG%" echo Pulse launcher network diagnostics - %DATE% %TIME% - channel %CHANNEL%
 echo.
-echo   -- Network check: every host Pulse downloads from ----------------
+echo   Network check - every site Pulse downloads from:
 call :probe github.com
 call :probe api.github.com
 call :probe codeload.github.com
 call :probe objects.githubusercontent.com
 call :probe release-assets.githubusercontent.com
 call :probe raw.githubusercontent.com
-echo   -------------------------------------------------------------------
 findstr /l /c:"[FAIL]" "%DIAG_LOG%" >nul 2>&1
 if errorlevel 1 goto :diag_allok
 findstr /l /c:"[ OK ] github.com " "%DIAG_LOG%" >nul 2>&1
@@ -330,6 +370,14 @@ if not errorlevel 1 (
     echo   ^(SSL inspection^). Downloads will keep failing until IT exempts
     echo   the hosts listed above from inspection.
 )
+findstr /l /c:"DNS SLOW" "%DIAG_LOG%" >nul 2>&1
+if not errorlevel 1 (
+    echo.
+    echo   DNS SLOW above means this PC takes seconds to look up each
+    echo   address - normal is well under one second. Pulse waits for it,
+    echo   so it does not block updates, but every download starts slowly.
+    echo   Mention it to the Pulse team and send the report file below.
+)
 echo.
 echo   Report saved to: %DIAG_LOG%
 goto :eof
@@ -340,8 +388,14 @@ goto :eof
 :: certificate issuer so an SSL-inspection appliance is visible at a glance.
 :: PS 5.1: the validation callback MUST be cast to its delegate type
 :: explicitly -- implicit conversion inside New-Object fails silently.
+:: DNS is resolved once, with its own 15 s wait, and the connect goes to
+:: that IP. Connecting by name re-resolves inside the 5 s connect wait, so
+:: a PC with 10 s lookups printed "DNS ok but no connection" for hosts that
+:: were fine. A lookup over 2 s is flagged DNS SLOW on the host's line. On a
+:: stalled PC some lookups take 40 s, so past 15 s we ask the DNS server
+:: directly (as the fast-path does) and test 443 against its answer.
 :probe
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$h='%~1';$line='';try{$null=[Net.Dns]::GetHostAddresses($h)}catch{$line=('  [FAIL] {0,-38} DNS lookup failed - {1}' -f $h,$_.Exception.Message.Trim())};if(-not $line){$c=New-Object Net.Sockets.TcpClient;$c.ReceiveTimeout=10000;$c.SendTimeout=10000;$iar=$c.BeginConnect($h,443,$null,$null);if(-not ($iar.AsyncWaitHandle.WaitOne(5000) -and $c.Connected)){$line=('  [FAIL] {0,-38} DNS ok but no connection on port 443' -f $h)}else{try{$script:pe='None';$cb=[Net.Security.RemoteCertificateValidationCallback]{param($s,$cert,$chain,$e) $script:pe=$e; $true};$ss=New-Object Net.Security.SslStream($c.GetStream(),$false,$cb);$ss.AuthenticateAsClient($h,$null,[Security.Authentication.SslProtocols]'Tls,Tls11,Tls12',$false);$cert2=New-Object Security.Cryptography.X509Certificates.X509Certificate2 $ss.RemoteCertificate;$iss=(($cert2.Issuer -split ',')[0]) -replace 'CN=','';$warn='';if($script:pe.ToString() -ne 'None'){$warn=' ** CERT WARNING: '+$script:pe};$line=('  [ OK ] {0,-38} cert issuer: {1}{2}' -f $h,$iss,$warn)}catch{$line=('  [FAIL] {0,-38} TLS handshake failed - {1}' -f $h,$_.Exception.Message.Trim())};$c.Close()}};Write-Output $line;Add-Content -LiteralPath '%DIAG_LOG%' -Value $line"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$h='%~1';$line='';$ip=$null;$slow='';$sw=[Diagnostics.Stopwatch]::StartNew();try{$a=[Net.Dns]::BeginGetHostAddresses($h,$null,$null);if($a.AsyncWaitHandle.WaitOne(15000)){$ip=[Net.Dns]::EndGetHostAddresses($a)|Where-Object{$_.AddressFamily -eq 'InterNetwork'}|Select-Object -First 1;if(-not $ip){$line=('  [FAIL] {0,-38} DNS lookup returned no IPv4 address' -f $h)}}else{$ip=Resolve-DnsName -Name $h -Type A -DnsOnly -QuickTimeout -ErrorAction SilentlyContinue|Where-Object{$_.IPAddress}|Select-Object -First 1 -ExpandProperty IPAddress;if($ip){$slow=' ** DNS SLOW: over 15 s'}else{$line=('  [FAIL] {0,-38} DNS lookup timed out after 15 s' -f $h)}}}catch{$line=('  [FAIL] {0,-38} DNS lookup failed - {1}' -f $h,$_.Exception.Message.Trim())};$dt=$sw.Elapsed.TotalSeconds;if($dt -ge 2 -and -not $slow){$slow=(' ** DNS SLOW: {0:N1} s' -f $dt)};if(-not $line){$c=New-Object Net.Sockets.TcpClient;$c.ReceiveTimeout=10000;$c.SendTimeout=10000;$iar=$c.BeginConnect($ip,443,$null,$null);if(-not ($iar.AsyncWaitHandle.WaitOne(5000) -and $c.Connected)){$line=('  [FAIL] {0,-38} DNS ok but no connection on port 443{1}' -f $h,$slow)}else{try{$script:pe='None';$cb=[Net.Security.RemoteCertificateValidationCallback]{param($s,$cert,$chain,$e) $script:pe=$e; $true};$ss=New-Object Net.Security.SslStream($c.GetStream(),$false,$cb);$ss.AuthenticateAsClient($h,$null,[Security.Authentication.SslProtocols]'Tls,Tls11,Tls12',$false);$cert2=New-Object Security.Cryptography.X509Certificates.X509Certificate2 $ss.RemoteCertificate;$iss=(($cert2.Issuer -split ',')[0]) -replace 'CN=','';$warn='';if($script:pe.ToString() -ne 'None'){$warn=' ** CERT WARNING: '+$script:pe};$line=('  [ OK ] {0,-38} cert issuer: {1}{2}{3}' -f $h,$iss,$warn,$slow)}catch{$line=('  [FAIL] {0,-38} TLS handshake failed - {1}{2}' -f $h,$_.Exception.Message.Trim(),$slow)};$c.Close()}};Write-Output $line;Add-Content -LiteralPath '%DIAG_LOG%' -Value $line"
 goto :eof
 
 :: -- Live progress for long steps -----------------------------------------
@@ -352,8 +406,9 @@ goto :eof
 :: SAME line (frame + mm:ss clock) until it finishes, so the window always
 :: shows the step is still moving.
 ::
-::   set "SPIN_LABEL=  Thing ......................... doing"  (exact text)
-::   set "SPIN_DONE=  Thing ......................... done"    ('-' erases it)
+::   set "SPIN_LABEL=%L_THING%doing"   (exact text)
+::   set "SPIN_DONE=%L_THING%done"     ('-' erases it)
+::   set "SPIN_FAIL=-"                 (optional - a failure erases it too)
 ::   set "SPIN_PSCMD=<PowerShell; throw to fail>"
 ::   set "SPIN_OUT=<file>"  (optional - captures the script's output)
 ::   call :spin
@@ -365,20 +420,23 @@ goto :eof
 :: is skipped (one line in, one line out) when stdout is redirected.
 :spin
 set "SPIN_CWD=%CD%"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$CR=[string][char]13;$lbl=$env:SPIN_LABEL;$ps=[powershell]::Create();$null=$ps.AddScript('Set-Location -LiteralPath $env:SPIN_CWD; '+$env:SPIN_PSCMD);$h=$ps.BeginInvoke();$fr='|/-\';$i=0;$t0=Get-Date;$tty=$true;try{if([Console]::IsOutputRedirected){$tty=$false}}catch{$tty=$false};if(-not $tty){Write-Host $lbl};while(-not $h.IsCompleted){if($tty){Write-Host -NoNewline ($CR+$lbl+' '+$fr[$i]+' '+((Get-Date)-$t0).ToString('mm\:ss')+'  ');$i=($i+1) -band 3};Start-Sleep -Milliseconds 200};$rc=0;$msg='';$out=$null;try{$out=$ps.EndInvoke($h)}catch{$rc=1;$e=$_.Exception;if($e.InnerException){$e=$e.InnerException};$msg=$e.Message};if($ps.Streams.Error.Count -gt 0){$rc=1;if(-not $msg){$msg=[string]$ps.Streams.Error[0]}};$ps.Dispose();$ts=(Get-Date)-$t0;$fin=$env:SPIN_DONE;if(-not $fin){$fin=$lbl};if($rc -ne 0){$fin=$lbl+'  FAILED'};if($fin -eq '-'){if($tty){Write-Host -NoNewline ($CR+(' '*($lbl.Length+16))+$CR)}}else{if($ts.TotalSeconds -ge 5){$fin=$fin+'  ('+$ts.ToString('mm\:ss')+')'};if($tty){Write-Host ($CR+$fin+'                ')}else{Write-Host $fin}};if($env:SPIN_OUT){$out|Out-File -FilePath $env:SPIN_OUT -Encoding ascii};if($rc -ne 0 -and $msg){Write-Host ('       '+$msg)};exit $rc"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$CR=[string][char]13;$lbl=$env:SPIN_LABEL;$ps=[powershell]::Create();$null=$ps.AddScript('Set-Location -LiteralPath $env:SPIN_CWD; '+$env:SPIN_PSCMD);$h=$ps.BeginInvoke();$fr='|/-\';$i=0;$t0=Get-Date;$tty=$true;try{if([Console]::IsOutputRedirected){$tty=$false}}catch{$tty=$false};if(-not $tty){Write-Host $lbl};while(-not $h.IsCompleted){if($tty){Write-Host -NoNewline ($CR+$lbl+' '+$fr[$i]+' '+((Get-Date)-$t0).ToString('mm\:ss')+'  ');$i=($i+1) -band 3};Start-Sleep -Milliseconds 200};$rc=0;$msg='';$out=$null;try{$out=$ps.EndInvoke($h)}catch{$rc=1;$e=$_.Exception;if($e.InnerException){$e=$e.InnerException};$msg=$e.Message};if($ps.Streams.Error.Count -gt 0){$rc=1;if(-not $msg){$msg=[string]$ps.Streams.Error[0]}};$ps.Dispose();$ts=(Get-Date)-$t0;$fin=$env:SPIN_DONE;if(-not $fin){$fin=$lbl};$quiet=($rc -ne 0 -and $env:SPIN_FAIL -eq '-');if($rc -ne 0){if($quiet){$fin='-'}else{$fin=$lbl+'  FAILED'}};if($fin -eq '-'){if($tty){Write-Host -NoNewline ($CR+(' '*($lbl.Length+16))+$CR)}}else{if($ts.TotalSeconds -ge 5){$fin=$fin+'  ('+$ts.ToString('mm\:ss')+')'};if($tty){Write-Host ($CR+$fin+'                ')}else{Write-Host $fin}};if($env:SPIN_OUT){$out|Out-File -FilePath $env:SPIN_OUT -Encoding ascii};if($rc -ne 0 -and $msg -and -not $quiet){Write-Host ('      '+$msg)};exit $rc"
 set "SPIN_RC=%errorlevel%"
 set "SPIN_PSCMD="
 set "SPIN_DONE="
 set "SPIN_OUT="
+set "SPIN_FAIL="
 exit /b %SPIN_RC%
 
 :: -- Download one URL with the spinner ------------------------------------
 :: Used only on the PowerShell fallback path; curl prints its own progress
 :: bar and doesn't need this.
 ::   %1 = label   %2 = url   %3 = output file   %4 = done label
+::   %5 = '-' to erase the line on failure (the caller reports the outcome)
 :dl_spin
 set "SPIN_LABEL=%~1"
 set "SPIN_DONE=%~4"
+set "SPIN_FAIL=%~5"
 set "SPIN_PSCMD=$ProgressPreference='SilentlyContinue';[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;Invoke-WebRequest -UseBasicParsing -Uri '%~2' -OutFile '%~3'"
 call :spin
 exit /b %errorlevel%

@@ -170,11 +170,34 @@ try {
         }
     } catch { }
 
+    # -- BIOS "After Power Loss" (does the VPU turn back on after a power cut?)
+    # HP exposes BIOS settings read-only through its inbox InstrumentedBIOS
+    # WMI namespace. Other vendors report 'unsupported', never a pass.
+    $afterPowerLoss = [ordered]@{ status = 'unsupported'; value = $null; options = @(); manufacturer = $null; model = $null; message = $null }
+    try {
+        $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+        $afterPowerLoss.manufacturer = "$($cs.Manufacturer)".Trim()
+        $afterPowerLoss.model = "$($cs.Model)".Trim()
+        if ($afterPowerLoss.manufacturer -match '^(HP|Hewlett)') {
+            $setting = Get-CimInstance -Namespace 'root\HP\InstrumentedBIOS' -ClassName HP_BIOSEnumeration -Filter "Name='After Power Loss'" -ErrorAction Stop | Select-Object -First 1
+            if ($setting) {
+                $afterPowerLoss.status = 'read'
+                $afterPowerLoss.value = "$($setting.CurrentValue)"
+                $afterPowerLoss.options = @($setting.PossibleValues | ForEach-Object { "$_" })
+            }
+        }
+    }
+    catch {
+        $afterPowerLoss.status = 'error'
+        $afterPowerLoss.message = $_.Exception.Message
+    }
+
     [ordered]@{
         pending = [ordered]@{
             isPending = ($reasons.Count -gt 0)
             reasons   = @($reasons)
         }
+        afterPowerLoss                = $afterPowerLoss
         lastBoot                      = $lastBoot
         uptime                        = $uptime
         deviceInstallRebootTaskLastRun = $deviceInstallLastRun

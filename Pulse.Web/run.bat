@@ -22,7 +22,22 @@ set "URL=http://localhost:%PORT%"
 
 where curl.exe >nul 2>&1 && (set "HAS_CURL=1") || (set "HAS_CURL=")
 
-:: -- Step 1/5  Embedded Python --------------------------------
+:: -- What the tech sees ---------------------------------------------------
+:: Continues the launcher's list under "Starting Pulse": one line per step,
+:: status in the same column (labels padded to match run_pulse.bat), quiet
+:: housekeeping, and every failure ends in the :fatal banner with the cause
+:: (FAIL_WHY) and the next step (FAIL_DO). Wait-AndLaunch.ps1 prints the
+:: Server and Browser lines in the same layout.
+set "L_PY=    Python runtime ...... "
+set "L_DEPS=    Dependencies ........ "
+set "L_PREV=    Previous Pulse ...... "
+set "FAIL_WHY=Something went wrong while starting Pulse."
+set "FAIL_DO="
+set "PY_DONE=installed"
+
+echo   Starting Pulse
+
+:: -- Python runtime ---------------------------------------------
 :: python.exe alone doesn't prove a usable runtime: a first run interrupted
 :: after extraction leaves the exe without pip, updates never replace
 :: app\python, and every later launch died at step 2 "No module named pip".
@@ -30,87 +45,92 @@ where curl.exe >nul 2>&1 && (set "HAS_CURL=1") || (set "HAS_CURL=")
 if exist "%PYEXE%" (
     "%PYEXE%" -m pip --version >nul 2>&1
     if not errorlevel 1 (
-        echo  [1/5] Python runtime ............ ready
+        echo !L_PY!ready
         goto :deps
     )
-    echo  [1/5] Python runtime ............ incomplete ^(no pip^) - repairing
+    echo !L_PY!repairing - pip is missing
+    set "PY_DONE=repaired"
     goto :pyrepair
 )
 
-echo  [1/5] Python runtime ............ installing (first run, ~1-2 min)
+echo !L_PY!first run - setting up Python %PYVER%, about 2 minutes
 if not exist "%PYDIR%" mkdir "%PYDIR%"
 
 if defined HAS_CURL (
-    echo        - downloading Python %PYVER%
     curl.exe -L --progress-bar -o "%PYDIR%\%PYZIP%" "%PYURL%"
 ) else (
-    call :dl_spin "       - downloading Python %PYVER%" "%PYURL%" "%PYDIR%\%PYZIP%" "       - downloading Python %PYVER% ... done"
+    call :dl_spin "%L_PY%downloading Python %PYVER%" "%PYURL%" "%PYDIR%\%PYZIP%" "-" "-"
 )
+set "FAIL_WHY=Python could not be downloaded."
+set "FAIL_DO=Check this VPU's internet connection, then run Pulse again."
 if not exist "%PYDIR%\%PYZIP%" (
-    echo  [ERROR] Python download failed - check the internet connection.
+    echo !L_PY!download failed
     call :tlscheck "www.python.org"
     goto :fatal
 )
 for %%A in ("%PYDIR%\%PYZIP%") do if %%~zA LSS 5000 (
-    echo  [ERROR] Python download was incomplete ^(%%~zA bytes^).
+    echo !L_PY!download did not finish
     del "%PYDIR%\%PYZIP%"
     call :tlscheck "www.python.org"
     goto :fatal
 )
 
-set "SPIN_LABEL=       - extracting"
-set "SPIN_DONE=       - extracting ... done"
+set "SPIN_LABEL=%L_PY%unpacking Python"
+set "SPIN_DONE=-"
 set "SPIN_PSCMD=Add-Type -Assembly System.IO.Compression.FileSystem;[System.IO.Compression.ZipFile]::ExtractToDirectory('%PYDIR%\%PYZIP%','%PYDIR%')"
 call :spin
 if not exist "%PYEXE%" (
-    echo  [ERROR] Python extraction failed - python.exe not found.
+    echo !L_PY!could not unpack Python
+    set "FAIL_WHY=Python could not be unpacked."
+    set "FAIL_DO=Run Pulse again."
     goto :fatal
 )
 del "%PYDIR%\%PYZIP%"
 
 :pyrepair
-echo        - verifying
+set "FAIL_WHY=The Python runtime on this VPU is damaged."
+set "FAIL_DO=Delete the folder !PYDIR! and run Pulse again."
 "%PYEXE%" --version >nul 2>&1
 if errorlevel 1 (
-    echo  [ERROR] Extracted Python won't run - archive may be corrupt.
-    echo          Delete "%PYDIR%" and relaunch.
+    echo !L_PY!damaged - Python will not run
     goto :fatal
 )
 
-echo        - enabling site-packages
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$f = Get-ChildItem '%PYDIR%' -Filter '*._pth' | Select-Object -First 1; if (-not $f) { exit 1 }; (Get-Content $f.FullName) -replace '#import site','import site' | Set-Content $f.FullName"
 if errorlevel 1 (
-    echo  [ERROR] Could not enable site-packages - Python install is broken.
+    echo !L_PY!damaged - its settings file is missing
     goto :fatal
 )
 
 if defined HAS_CURL (
-    echo        - downloading pip
     curl.exe -L --silent -o "%PYDIR%\get-pip.py" "%PIPURL%"
 ) else (
-    call :dl_spin "       - downloading pip" "%PIPURL%" "%PYDIR%\get-pip.py" "       - downloading pip ... done"
+    call :dl_spin "%L_PY%downloading pip" "%PIPURL%" "%PYDIR%\get-pip.py" "-" "-"
 )
 if not exist "%PYDIR%\get-pip.py" (
-    echo  [ERROR] Failed to download get-pip.py
+    echo !L_PY!could not download pip
+    set "FAIL_WHY=pip, Python's installer, could not be downloaded."
+    set "FAIL_DO=Check this VPU's internet connection, then run Pulse again."
     call :tlscheck "bootstrap.pypa.io"
     goto :fatal
 )
-set "SPIN_LABEL=       - installing pip"
-set "SPIN_DONE=       - installing pip ... done"
+set "SPIN_LABEL=%L_PY%installing pip"
+set "SPIN_DONE=-"
 set "SPIN_PSCMD=$log=$env:TEMP+'\pulse-bootstrap.log';& '%PYEXE%' '%PYDIR%\get-pip.py' --no-warn-script-location --quiet *> $log;if($LASTEXITCODE -ne 0){throw 'get-pip exited '+$LASTEXITCODE+' - see '+$log}"
 call :spin
 if errorlevel 1 (
-    echo  [ERROR] pip installation failed.
+    set "FAIL_WHY=pip, Python's installer, could not be set up."
+    set "FAIL_DO=Run Pulse again. If it fails again, send %TEMP%\pulse-bootstrap.log to the Pulse team."
     goto :fatal
 )
 del "%PYDIR%\get-pip.py"
-echo  [1/5] Python runtime ............ installed
+echo !L_PY!!PY_DONE!
 
 :deps
-:: -- Step 2/5  Ensure app/ is importable ----------------------
+:: -- Make app/ importable --------------------------------------
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$f = Get-ChildItem '%PYDIR%' -Filter '*._pth' | Select-Object -First 1; if ($f) { $c = Get-Content $f.FullName; if ($c -notcontains '..') { Add-Content $f.FullName '..' } }"
 
-:: -- Step 2/5  Dependencies -----------------------------------
+:: -- Dependencies ---------------------------------------------
 :: Best-effort pip self-update first, so installed runtimes pick up pip
 :: security patches after bootstrap. Failures there are ignored and the
 :: timeout is short -- an offline VPU must still launch on its current pip.
@@ -119,44 +139,43 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$f = Get-ChildItem '%PYD
 :: static "checking" line for minutes with nothing to show it was alive.
 :: pip output goes to the log so it can't fight the spinner for the line; the
 :: verbose retry below is what a tech reads when it actually fails.
-set "SPIN_LABEL= [2/5] Dependencies ............. installing"
-set "SPIN_DONE= [2/5] Dependencies ............. ready"
+set "SPIN_LABEL=%L_DEPS%checking"
+set "SPIN_DONE=%L_DEPS%ready"
 set "SPIN_PSCMD=$log=$env:TEMP+'\pulse-pip.log';& '%PYEXE%' -m pip install --upgrade pip --quiet --no-warn-script-location --timeout 5 --retries 1 *> $log;& '%PYEXE%' -m pip install -r app\requirements.txt --quiet --no-warn-script-location *>> $log;if($LASTEXITCODE -ne 0){throw 'pip exited '+$LASTEXITCODE+' - see '+$log}"
 call :spin
 if not errorlevel 1 goto :deps_ok
-echo        first attempt failed - retrying with detail...
+echo !L_DEPS!retrying, with pip's own output shown below
 "%PYEXE%" -m pip install -r app\requirements.txt --no-warn-script-location
 if errorlevel 1 (
-    echo  [ERROR] Dependencies could not be installed.
+    echo !L_DEPS!FAILED
+    set "FAIL_WHY=Pulse's Python packages could not be installed."
+    set "FAIL_DO=Check this VPU's internet connection, then run Pulse again."
     call :tlscheck "pypi.org,files.pythonhosted.org"
     goto :fatal
 )
-echo  [2/5] Dependencies ............. ready
+echo !L_DEPS!ready
 :deps_ok
 
-:: -- Step 3/5  Sanity check -----------------------------------
+:: -- Sanity check (silent when fine) ---------------------------
 if not exist "app\main.py" (
-    echo  [ERROR] app\main.py not found in %CD% - install looks incomplete.
+    set "FAIL_WHY=Pulse's files are incomplete: app\main.py is missing from %CD%."
+    set "FAIL_DO=Run the Pulse launcher again to reinstall them."
     goto :fatal
 )
-echo  [3/5] Application files ........ ok
 
-:: -- Step 4/5  Free the port ----------------------------------
+:: -- Free the port (silent unless a previous Pulse was running) -
 set "KILLED="
 for /f "tokens=5" %%a in ('netstat -aon 2^>nul ^| findstr ":%PORT% " ^| findstr "LISTENING"') do (
     taskkill /PID %%a /F >nul 2>&1
     set "KILLED=1"
 )
-if defined KILLED (
-    echo  [4/5] Port %PORT% ............... freed previous instance
-) else (
-    echo  [4/5] Port %PORT% ............... clear
-)
+if defined KILLED echo !L_PREV!closed - it was still running
 
-:: -- Step 5/5  Start the hidden server + open the browser -----
-echo  [5/5] Starting Pulse ........... launching
+:: -- Start the hidden server + open the browser ----------------
+:: Wait-AndLaunch.ps1 prints the Server and Browser steps.
 if not exist "%~dp0pulse-launch.vbs" (
-    echo  [ERROR] pulse-launch.vbs missing - cannot start hidden server.
+    set "FAIL_WHY=Pulse's files are incomplete: pulse-launch.vbs is missing."
+    set "FAIL_DO=Run the Pulse launcher again to reinstall them."
     goto :fatal
 )
 wscript "%~dp0pulse-launch.vbs"
@@ -165,17 +184,14 @@ wscript "%~dp0pulse-launch.vbs"
 :: the browser. Returns 0 once the port is up, 1 on timeout.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Wait-AndLaunch.ps1" -Port %PORT% -Url "%URL%" -TimeoutSec 40
 if errorlevel 1 (
-    echo.
-    echo  [ERROR] Pulse did not come up within 40 seconds.
-    echo          Check %~dp0pulse-server.log for details.
+    set "FAIL_WHY=The Pulse server did not start within 40 seconds."
+    set "FAIL_DO=Run Pulse again. If it fails again, send %~dp0pulse-server.log to the Pulse team."
     goto :fatal
 )
 
 echo.
-echo  ========================================================
-echo    Pulse is running at %URL%
-echo    Opened in your browser. This window will now close.
-echo  ========================================================
+echo   Pulse is running at %URL%
+echo   This window will close in a few seconds.
 :: Brief pause so the success message is readable, then exit cleanly.
 :: The server keeps running hidden; the caller closes this window.
 ping -n 3 127.0.0.1 >nul
@@ -203,10 +219,12 @@ exit /b 0
 :: -- Error handler --------------------------------------------
 :fatal
 echo.
-echo  ============================================
-echo    PULSE FAILED TO START
-echo    See the messages above. Press any key to close.
-echo  ============================================
+echo   ------------------------------------------------------------
+echo   PULSE DID NOT START
+echo   !FAIL_WHY!
+if defined FAIL_DO echo   !FAIL_DO!
+echo   Press any key to close this window.
+echo   ------------------------------------------------------------
 pause >nul
 endlocal
 exit /b 1
@@ -219,8 +237,9 @@ exit /b 1
 :: SAME line (frame + mm:ss clock) until it finishes, so the window always
 :: shows the step is still moving.
 ::
-::   set "SPIN_LABEL=  Thing ......................... doing"  (exact text)
-::   set "SPIN_DONE=  Thing ......................... done"    ('-' erases it)
+::   set "SPIN_LABEL=%L_THING%doing"   (exact text)
+::   set "SPIN_DONE=%L_THING%done"     ('-' erases it)
+::   set "SPIN_FAIL=-"                 (optional - a failure erases it too)
 ::   set "SPIN_PSCMD=<PowerShell; throw to fail>"
 ::   set "SPIN_OUT=<file>"  (optional - captures the script's output)
 ::   call :spin
@@ -232,20 +251,23 @@ exit /b 1
 :: is skipped (one line in, one line out) when stdout is redirected.
 :spin
 set "SPIN_CWD=%CD%"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$CR=[string][char]13;$lbl=$env:SPIN_LABEL;$ps=[powershell]::Create();$null=$ps.AddScript('Set-Location -LiteralPath $env:SPIN_CWD; '+$env:SPIN_PSCMD);$h=$ps.BeginInvoke();$fr='|/-\';$i=0;$t0=Get-Date;$tty=$true;try{if([Console]::IsOutputRedirected){$tty=$false}}catch{$tty=$false};if(-not $tty){Write-Host $lbl};while(-not $h.IsCompleted){if($tty){Write-Host -NoNewline ($CR+$lbl+' '+$fr[$i]+' '+((Get-Date)-$t0).ToString('mm\:ss')+'  ');$i=($i+1) -band 3};Start-Sleep -Milliseconds 200};$rc=0;$msg='';$out=$null;try{$out=$ps.EndInvoke($h)}catch{$rc=1;$e=$_.Exception;if($e.InnerException){$e=$e.InnerException};$msg=$e.Message};if($ps.Streams.Error.Count -gt 0){$rc=1;if(-not $msg){$msg=[string]$ps.Streams.Error[0]}};$ps.Dispose();$ts=(Get-Date)-$t0;$fin=$env:SPIN_DONE;if(-not $fin){$fin=$lbl};if($rc -ne 0){$fin=$lbl+'  FAILED'};if($fin -eq '-'){if($tty){Write-Host -NoNewline ($CR+(' '*($lbl.Length+16))+$CR)}}else{if($ts.TotalSeconds -ge 5){$fin=$fin+'  ('+$ts.ToString('mm\:ss')+')'};if($tty){Write-Host ($CR+$fin+'                ')}else{Write-Host $fin}};if($env:SPIN_OUT){$out|Out-File -FilePath $env:SPIN_OUT -Encoding ascii};if($rc -ne 0 -and $msg){Write-Host ('       '+$msg)};exit $rc"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$CR=[string][char]13;$lbl=$env:SPIN_LABEL;$ps=[powershell]::Create();$null=$ps.AddScript('Set-Location -LiteralPath $env:SPIN_CWD; '+$env:SPIN_PSCMD);$h=$ps.BeginInvoke();$fr='|/-\';$i=0;$t0=Get-Date;$tty=$true;try{if([Console]::IsOutputRedirected){$tty=$false}}catch{$tty=$false};if(-not $tty){Write-Host $lbl};while(-not $h.IsCompleted){if($tty){Write-Host -NoNewline ($CR+$lbl+' '+$fr[$i]+' '+((Get-Date)-$t0).ToString('mm\:ss')+'  ');$i=($i+1) -band 3};Start-Sleep -Milliseconds 200};$rc=0;$msg='';$out=$null;try{$out=$ps.EndInvoke($h)}catch{$rc=1;$e=$_.Exception;if($e.InnerException){$e=$e.InnerException};$msg=$e.Message};if($ps.Streams.Error.Count -gt 0){$rc=1;if(-not $msg){$msg=[string]$ps.Streams.Error[0]}};$ps.Dispose();$ts=(Get-Date)-$t0;$fin=$env:SPIN_DONE;if(-not $fin){$fin=$lbl};$quiet=($rc -ne 0 -and $env:SPIN_FAIL -eq '-');if($rc -ne 0){if($quiet){$fin='-'}else{$fin=$lbl+'  FAILED'}};if($fin -eq '-'){if($tty){Write-Host -NoNewline ($CR+(' '*($lbl.Length+16))+$CR)}}else{if($ts.TotalSeconds -ge 5){$fin=$fin+'  ('+$ts.ToString('mm\:ss')+')'};if($tty){Write-Host ($CR+$fin+'                ')}else{Write-Host $fin}};if($env:SPIN_OUT){$out|Out-File -FilePath $env:SPIN_OUT -Encoding ascii};if($rc -ne 0 -and $msg -and -not $quiet){Write-Host ('      '+$msg)};exit $rc"
 set "SPIN_RC=%errorlevel%"
 set "SPIN_PSCMD="
 set "SPIN_DONE="
 set "SPIN_OUT="
+set "SPIN_FAIL="
 exit /b %SPIN_RC%
 
 :: -- Download one URL with the spinner ------------------------------------
 :: Used only on the PowerShell fallback path; curl prints its own progress
 :: bar and doesn't need this.
 ::   %1 = label   %2 = url   %3 = output file   %4 = done label
+::   %5 = '-' to erase the line on failure (the caller reports the outcome)
 :dl_spin
 set "SPIN_LABEL=%~1"
 set "SPIN_DONE=%~4"
+set "SPIN_FAIL=%~5"
 set "SPIN_PSCMD=$ProgressPreference='SilentlyContinue';[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;Invoke-WebRequest -UseBasicParsing -Uri '%~2' -OutFile '%~3'"
 call :spin
 exit /b %errorlevel%

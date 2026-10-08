@@ -28,12 +28,34 @@
     Scans the live log (LogMeIn.log) plus the daily rotations (LMIyyyyMMdd.log)
     inside the window. A healthy, long-connected unit logs NO gateway lines at
     all for days (verified on VPU2) - zero attempts is normal, not a failure.
+
+    "Blocked now" needs more than old failures with no login after them. Field
+    false positive (Armstrong IL, 2026-09-28): Pulse said LogMeIn was blocked
+    while the tech was connected to the unit THROUGH LogMeIn. A connected unit
+    goes quiet, so the newest gateway line in the log can be days old. Any of
+    these clears the block:
+      - LogMeInRC.exe is running (a remote session is live right now)
+      - LogMeIn.exe holds an established connection to a public address on
+        443/80 (its gateway link; verified on VPU2)
+      - a success line newer than the last killed handshake: "Logged in to web
+        gateway", "Server certificate accepted", or a SessionDataReport (the
+        line LogMeIn writes when a remote session opens through a gateway)
+      - the last killed handshake is more than $StaleMinutes old. A blocked
+        LogMeIn retries every few minutes (201 kills in 16h in the field log)
+        and never goes quiet, so silence since the last failure means it got
+        through.
+    LogMeIn stamps its log in local time (verified on VPU2), same clock as
+    Get-Date here.
     Outputs JSON to stdout.
 #>
 [CmdletBinding()]
 param(
     [string]$LogDir = 'C:\ProgramData\LogMeIn',
-    [int]$WindowDays = 7
+    [int]$WindowDays = 7,
+    [int]$StaleMinutes = 120,
+    # Bench testing only: ignore the live process/connection checks so a
+    # connected unit can exercise the log-only verdict against a sample log.
+    [switch]$NoLiveCheck
 )
 
 $ErrorActionPreference = 'Stop'
@@ -69,10 +91,11 @@ try {
     $attempts = 0; $sslFailures = 0; $handshakeFailures = 0
     $gatewayFailures = 0; $logins = 0
     $firstSslFailure = $null; $lastSslFailure = $null; $lastLogin = $null
+    $lastConnected = $null; $lastSession = $null
     $hostSet = New-Object 'System.Collections.Generic.HashSet[string]'
 
     # One pre-filter pass per file; only matching lines are classified.
-    $pattern = 'Connecting to web gateway |SSL error: SSLv3/TLS write client hello|SslHandshake\(\) failed|Failed to connect to web gateway|Logged in to web gateway'
+    $pattern = 'Connecting to web gateway |SSL error: SSLv3/TLS write client hello|SslHandshake\(\) failed|Failed to connect to web gateway|Logged in to web gateway|Server certificate accepted|SessionDataReport'
     foreach ($f in $files) {
         foreach ($m in @(Select-String -LiteralPath $f.FullName -Pattern $pattern)) {
             $line = $m.Line
@@ -97,16 +120,53 @@ try {
             elseif ($line -match 'Logged in to web gateway') {
                 $logins++
                 if ($ts -and (-not $lastLogin -or $ts -gt $lastLogin)) { $lastLogin = $ts }
+                if ($ts -and (-not $lastConnected -or $ts -gt $lastConnected)) { $lastConnected = $ts }
+            }
+            elseif ($line -match 'Server certificate accepted') {
+                if ($ts -and (-not $lastConnected -or $ts -gt $lastConnected)) { $lastConnected = $ts }
+            }
+            elseif ($line -match 'SessionDataReport') {
+                if ($ts -and (-not $lastSession -or $ts -gt $lastSession)) { $lastSession = $ts }
+                if ($ts -and (-not $lastConnected -or $ts -gt $lastConnected)) { $lastConnected = $ts }
             }
         }
     }
 
-    # Blocked right now = the newest SSL failure is newer than the newest
-    # successful gateway login. Recovered = it logged in AFTER the failures
-    # stopped (the "IT just turned inspection off" timestamp).
-    $blockedNow = [bool]($lastSslFailure -and ((-not $lastLogin) -or ($lastSslFailure -gt $lastLogin)))
+    # Live evidence. Either one proves LogMeIn reached its gateway right now,
+    # whatever the log history says.
+    $sessionActive = $false
+    try { $sessionActive = [bool](Get-Process -Name 'LogMeInRC' -ErrorAction SilentlyContinue) } catch { }
+    $gatewayConnected = $false
+    try {
+        foreach ($proc in @(Get-Process -Name 'LogMeIn' -ErrorAction SilentlyContinue)) {
+            foreach ($c in @(Get-NetTCPConnection -OwningProcess $proc.Id -State Established -ErrorAction SilentlyContinue)) {
+                $ra = [string]$c.RemoteAddress
+                $private = $ra -match '^(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|::1$|fe80:)'
+                if ((-not $private) -and ($c.RemotePort -eq 443 -or $c.RemotePort -eq 80)) { $gatewayConnected = $true }
+            }
+        }
+    } catch { }
+    if ($NoLiveCheck) { $sessionActive = $false; $gatewayConnected = $false }
+    $connectedNow = [bool]($sessionActive -or $gatewayConnected)
+
+    $minutesSinceSslFailure = $null
+    if ($lastSslFailure) {
+        $lastFailDt = [datetime]::MinValue
+        if ([datetime]::TryParseExact($lastSslFailure, 'yyyy-MM-dd HH:mm:ss', $null,
+                [System.Globalization.DateTimeStyles]::None, [ref]$lastFailDt)) {
+            $minutesSinceSslFailure = [int][Math]::Floor(((Get-Date) - $lastFailDt).TotalMinutes)
+        }
+    }
+    $stale = [bool]($null -ne $minutesSinceSslFailure -and $minutesSinceSslFailure -gt $StaleMinutes)
+
+    # Blocked right now = the newest SSL failure is newer than any sign of a
+    # connection, it is recent, and nothing live says LogMeIn is connected.
+    # Recovered = a connection line AFTER the failures stopped (the "IT just
+    # turned inspection off" timestamp).
+    $failureIsNewest = [bool]($lastSslFailure -and ((-not $lastConnected) -or ($lastSslFailure -gt $lastConnected)))
+    $blockedNow = [bool]($failureIsNewest -and (-not $connectedNow) -and (-not $stale))
     $recoveredAt = $null
-    if ($lastSslFailure -and $lastLogin -and ($lastLogin -gt $lastSslFailure)) { $recoveredAt = $lastLogin }
+    if ($lastSslFailure -and $lastConnected -and ($lastConnected -gt $lastSslFailure)) { $recoveredAt = $lastConnected }
 
     [ordered]@{
         installed         = $true
@@ -122,6 +182,13 @@ try {
         firstSslFailure   = $firstSslFailure
         lastSslFailure    = $lastSslFailure
         lastLogin         = $lastLogin
+        lastConnected     = $lastConnected
+        lastSession       = $lastSession
+        sessionActive     = $sessionActive
+        gatewayConnected  = $gatewayConnected
+        connectedNow      = $connectedNow
+        minutesSinceSslFailure = $minutesSinceSslFailure
+        staleMinutes      = $StaleMinutes
         blockedNow        = $blockedNow
         recoveredAt       = $recoveredAt
         gatewayHosts      = @($hostSet | Sort-Object)

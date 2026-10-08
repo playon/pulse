@@ -37,7 +37,7 @@ You'll get one of these `.bat` files from the team:
 
 1. Copy the `.bat` file to the VPU (Desktop is fine).
 2. Double-click it.
-3. A black console window opens showing the PULSE logo and a series of `[INFO]` lines as it sets itself up. **Leave that window open** — it's the server.
+3. A black console window opens showing the PULSE logo and a short list of steps under **Updating Pulse** and **Starting Pulse**. It closes itself once Pulse is open in Chrome; the server keeps running in the background. If a step fails, the window stays open and the box at the bottom says what went wrong and what to do next.
 4. Chrome opens automatically to `http://localhost:8765` after about 5–10 seconds.
 
 **The first launch takes longer** (1–2 minutes). Pulse downloads its own private copy of Python so it doesn't interfere with anything else on the VPU. Subsequent launches are nearly instant.

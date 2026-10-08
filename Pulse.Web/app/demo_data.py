@@ -117,12 +117,85 @@ def _demo_raw_data():
     )
 
 
+# ScoreConnect chain scenarios. PULSE_DEMO_SC picks which chain state demo
+# mode shows, so every break the ScoreConnect tab can point at is reachable
+# without a broken VPU:
+#   healthy (default) | no-usb | serial-failing | no-data | stopped |
+#   wrong-format | intermittent | sc3-down | legacy | ocr | ocr-no-data
+# "ocr-no-data" is VPU2 as measured 2026-10-02: the OCR camera reads the
+# score and ScoreConnect gets nothing from a console.
+# "stopped" is a console that went off (or a cable pulled at either end):
+# SC III keeps the last packet and says "Connected". "no-data" is nothing
+# readable at all ("No Scoreboard data"), as with the wrong brand set.
+# Signatures mirror what vpu-home recorded on 2026-09-29.
+_SC_SCENARIOS = ("healthy", "no-usb", "serial-failing", "no-data", "stopped", "wrong-format",
+                 "intermittent", "sc3-down", "legacy", "ocr", "ocr-no-data")
+_DEMO_FROZEN_RAW = None
+# Set by main.py after a demo save or Find the code lands on the code the
+# demo console sends: "wrong-format" then reads as healthy.
+_DEMO_SC_SETUP_FIXED = False
+
+
+def _demo_sc_scenario():
+    import os
+    s = os.environ.get("PULSE_DEMO_SC", "healthy").strip().lower()
+    if s == "wrong-format" and _DEMO_SC_SETUP_FIXED:
+        return "healthy"
+    return s if s in _SC_SCENARIOS else "healthy"
+
+
+def _demo_sc_data_flowing():
+    """Whether the demo console is sending data right now. Intermittent
+    drops out for 4s in every 15s."""
+    s = _demo_sc_scenario()
+    if s in ("no-usb", "serial-failing", "no-data", "sc3-down", "legacy", "wrong-format", "ocr-no-data"):
+        return False
+    if s == "intermittent":
+        return (int(time.time()) % 15) >= 4
+    return True
+
+
+def _demo_sc_serial_state():
+    if _demo_sc_scenario() == "serial-failing":
+        return {"state": "failing", "at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "failures": 6, "error": None}
+    return {"state": "open", "at": (datetime.utcnow() - timedelta(hours=2)).isoformat(timespec="seconds") + "Z",
+            "failures": 0, "error": None}
+
+
+def _demo_sc_scenario_source(src):
+    """The demo unit has an OCR camera, which makes ScoreConnect optional and
+    folds the chain away. Only the "ocr" scenario keeps that; the others make
+    ScoreConnect the score source so the chain they describe is on screen."""
+    if _demo_sc_scenario() in ("ocr", "ocr-no-data"):
+        return {"source": "ocr", "ok": True, "issue": None, "ocrConnected": True,
+                "ocrPort": "Port 3", "scoreConnectRunning": True, "ocrKnown": True}
+    running = _demo_sc_scenario() not in ("sc3-down",)
+    return {"source": "scoreconnect", "ok": running, "issue": None if running else "scoreconnect-down",
+            "ocrConnected": False, "ocrPort": None, "scoreConnectRunning": running, "ocrKnown": True}
+
+
 def _demo_scoreconnect_live():
     """Lightweight live-poll demo data — mirrors Get-ScoreConnectLive.ps1."""
+    global _DEMO_FROZEN_RAW
+    s = _demo_sc_scenario()
+    if s in ("sc3-down", "legacy"):
+        return {"reachable": False, "rawData": None, "dataStatus": None,
+                "error": "Connection refused", "ts": datetime.now().isoformat()}
+    if not _demo_sc_data_flowing():
+        return {"reachable": True, "rawData": None,
+                "dataStatus": ("Data is present but not in the proper format" if s == "wrong-format"
+                               else "No Scoreboard data is being received"),
+                "ts": datetime.now().isoformat(), "error": None}
+    raw = _demo_raw_data()
+    status = "Data is present and in the correct format"
+    if s == "stopped":
+        _DEMO_FROZEN_RAW = _DEMO_FROZEN_RAW or raw
+        raw, status = _DEMO_FROZEN_RAW, "Connected"
     return {
         "reachable": True,
-        "rawData": _demo_raw_data(),
-        "dataStatus": "Data is present and in the correct format",
+        "rawData": raw,
+        "dataStatus": status,
         "ts": datetime.now().isoformat(),
         "error": None,
     }
@@ -227,14 +300,19 @@ def _demo_scoreconnect():
     Bot number is intentionally included but is notoriously stale on real
     hardware — SC III often reports a previous unit's number until reset.
     """
-    has_data = True
-    data_status = "Data is present and in the correct format"
+    scenario = _demo_sc_scenario()
+    has_data = _demo_sc_data_flowing()
+    data_status = ("Connected" if scenario == "stopped"
+                   else "Data is present but not in the proper format" if scenario == "wrong-format"
+                   else "Data is present and in the correct format" if has_data
+                   else "No Scoreboard data is being received")
     raw_data = _demo_raw_data() if has_data else None
 
     bot_id = str(random.randint(10000, 99999))
     bot_connected = random.choice([True, False])
 
-    return {
+    usb = scenario != "no-usb"
+    payload = {
         "reachable": True,
         "baseUrl": "http://localhost:5000",
         "version": "1.4.0.10",
@@ -242,10 +320,12 @@ def _demo_scoreconnect():
         "rawData": raw_data,
         "networkStatus": "Internet is detected",
         "hasLocalStream": has_data,  # local stream tracks data presence
+        # Matches the demo SC III simulator (sc3_client.DemoSc3), so the setup
+        # editor and the status payload describe the same unit.
         "configuration": {
             "vendor": "Daktronics",
-            "sport": "Daktronics Football",
-            "vendorConfigurationName": "Wireless",
+            "sport": "Daktronics 3000 Football",
+            "vendorConfigurationName": "Wired",
         },
         "botStatus": {
             "isConnected": bot_connected,
@@ -253,10 +333,12 @@ def _demo_scoreconnect():
             "botServerAddress": None,
             "lastErrorMessage": None,
         },
-        "scoreLinkConnected": True,
-        "scoreLinkPort": "COM7",
-        "scoreLinkModel": "ScoreLink",
-        "scoreLinkStatusLabel": "ScoreLink device connected (COM7)",
+        "scoreLinkConnected": usb,
+        "scoreLinkPort": "COM7" if usb else "",
+        # Blank, as on vpu-home: Windows gave the device no name, so Pulse
+        # cannot tell a ScoreLink from a ScoreLink II on its own.
+        "scoreLinkModel": "",
+        "scoreLinkStatusLabel": "ScoreLink device connected (COM7)" if usb else "ScoreLink not connected",
         "error": None,
         "sc2": {
             "reachable": True,
@@ -287,6 +369,13 @@ def _demo_scoreconnect():
             "error": None,
         },
     }
+    if scenario in ("sc3-down", "legacy"):
+        payload.update({"reachable": False, "version": None, "dataStatus": None, "rawData": None,
+                        "hasLocalStream": None, "configuration": None, "botStatus": None,
+                        "error": "ScoreConnect III is not answering on http://localhost:5000"})
+        if scenario == "sc3-down":
+            payload["sc2"] = None
+    return payload
 
 
 # ── Synthetic camera CGI probe (demo mode) ───────────────────
@@ -845,10 +934,11 @@ DEMO = {
     # connection" warning (field log 2026-08-28: a VPU dark in LMI ~16 hours),
     # set sslFailures ~201, handshakeFailures ~60, gatewayFailures ~141,
     # attempts ~142, logins 0, firstSslFailure/lastSslFailure spanning the
-    # day, lastLogin None, blockedNow True, recoveredAt None. To DEMO the
-    # recovered/info variant (packet inspection disabled while you watch),
-    # keep the failures but set logins 1, lastLogin/recoveredAt a few minutes
-    # after lastSslFailure, and blockedNow False.
+    # day, lastLogin None, connectedNow False, blockedNow True, recoveredAt
+    # None. To DEMO the recovered/info variant (packet inspection disabled
+    # while you watch), keep the failures but set logins 1,
+    # lastLogin/lastConnected/recoveredAt a few minutes after lastSslFailure,
+    # connectedNow True, and blockedNow False.
     "Get-LmiGatewayLog.ps1": lambda **kw: {
         "installed": True,
         "logsFound": True,
@@ -863,9 +953,50 @@ DEMO = {
         "firstSslFailure": None,
         "lastSslFailure": None,
         "lastLogin": (datetime.now() - timedelta(days=2, hours=5)).strftime("%Y-%m-%d %H:%M:%S"),
+        "lastConnected": (datetime.now() - timedelta(days=2, hours=5)).strftime("%Y-%m-%d %H:%M:%S"),
+        "lastSession": None,
+        "sessionActive": False,
+        "gatewayConnected": True,
+        "connectedNow": True,
+        "minutesSinceSslFailure": None,
+        "staleMinutes": 120,
         "blockedNow": False,
         "recoveredAt": None,
         "gatewayHosts": ["control.lmi-app25-04.logmein.com", "control.lmi-app25-10.logmein.com"],
+    },
+    # Graphics delivery scan - the healthy shape: two recent events, one
+    # normal cold-start timeout each, then steady hand-offs VPU.exe received.
+    # To DEMO the 5.37.x missing-scorebug fault (Tanque Verde / MacLaren),
+    # set the newest event's delivered 0, deadlineFails ~127, maxAttempt
+    # ~127, vpuReceived 0. To DEMO the no-scoreboard-type case (Merrol Hyde),
+    # set config.graphicEngineType "NONE_SELECTED" and engineDisabled.lines
+    # ~120 with first/last during an event.
+    "Get-GraphicsDelivery.ps1": lambda **kw: {
+        "logsFound": True,
+        "logDir": "C:\\Pixellot\\Data\\Log",
+        "daysBack": 7,
+        "zipSupport": True,
+        "truncated": False,
+        "readErrors": 0,
+        "elapsedMs": 940,
+        "filesScanned": {"graphicsManager": 8, "vpu": 8, "agent": 8},
+        "config": {"graphicEngineType": "CGENGINE", "graphicsEnabled": "true",
+                   "graphicsModeOnInit": "LOGOS_ONLY"},
+        "events": [
+            {"eventId": "6ab698d77272ca41617bfb8d",
+             "firstSeen": (datetime.utcnow() - timedelta(days=1, hours=2)).strftime("%Y-%m-%dT%H:%M:%S"),
+             "lastSeen": (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S"),
+             "delivered": 241, "deadlineFails": 1, "unavailableFails": 3, "otherFails": 0,
+             "maxAttempt": 4, "vpuReceived": 241},
+            {"eventId": "6a906eefa895efc9e24118c1",
+             "firstSeen": (datetime.utcnow() - timedelta(days=3, hours=2)).strftime("%Y-%m-%dT%H:%M:%S"),
+             "lastSeen": (datetime.utcnow() - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%S"),
+             "delivered": 238, "deadlineFails": 1, "unavailableFails": 0, "otherFails": 0,
+             "maxAttempt": 1, "vpuReceived": 238},
+        ],
+        "engineDisabled": {"lines": 0, "first": None, "last": None,
+                           "lastSetScoreboardType": None, "lastSetAt": None},
+        "scoreboardData": {"noDataLines": 0, "invalidDataLines": 0, "last": None},
     },
     "Test-NtpDrift.ps1": lambda **kw: {"offsetSeconds": round(random.uniform(-0.3, 0.5), 3), "status": "ok", "source": "0.us.pool.ntp.org", "configuredSource": "0.us.pool.ntp.org", "networkSynced": True},
     "Get-NtpPeers.ps1": lambda **kw: {
@@ -985,6 +1116,12 @@ DEMO = {
             "isPending": True,
             "reasons": ["Windows Update is waiting to finish"],
         },
+        # Shape read off vpu-6493 (HP EliteDesk 800 G4) via HP_BIOSEnumeration.
+        "afterPowerLoss": {
+            "status": "read", "value": "Power On",
+            "options": ["Power Off", "Power On", "Previous State"],
+            "manufacturer": "HP", "model": "HP EliteDesk 800 G4 WKS TWR", "message": None,
+        },
         "lastBoot": (datetime.now() - timedelta(minutes=25)).isoformat(),
         "uptime": "0d 0h 25m",
         # The PnP task that reboots after a driver install flags reboot-required
@@ -1050,12 +1187,22 @@ DEMO = {
         "lastCrash": (datetime.now() - timedelta(hours=3)).isoformat(),
         "lastAutoRestart": (datetime.now() - timedelta(hours=3)).isoformat(),
         "daysBack": 7,
+        "guardPresent": True,
+        "guardEnabled": True,
+        "guardLastRun": (datetime.now() - timedelta(days=2)).isoformat(),
+        "guardLastResult": 0,
         "error": None,
     },
-    "Get-ScoreLinkStatus.ps1": lambda **kw: {
-        "connected": True, "port": "COM7", "model": "ScoreLink",
-        "statusLabel": "ScoreLink device connected (COM7)",
+    "Set-Sc3ServiceRecovery.ps1": lambda **kw: {
+        "success": True, "configured": True, "guardInstalled": True, "guardError": None,
+        "message": "Crash auto-restart is on: Windows restarts ScoreConnect III 5 seconds after a crash, "
+                   "and it stays on after ScoreConnect updates.",
     },
+    "Get-ScoreLinkStatus.ps1": lambda **kw: (
+        {"connected": False, "port": "", "model": "", "statusLabel": "ScoreLink not connected"}
+        if _demo_sc_scenario() == "no-usb" else
+        {"connected": True, "port": "COM7", "model": "",
+         "statusLabel": "ScoreLink device connected (COM7)"}),
     "Get-PixellotConfig.ps1": lambda **kw: {
         # Camera firmware / tvMode / serial mirror the live CGI probe
         # (_probe_camera_ip in main.py) — Admin:1234 param.cgi, same data the
@@ -1273,6 +1420,52 @@ DEMO = {
         "registryValueName": "dependencies",
         "registryKeyPresent": True,
     },
+    "Get-CoordinatorHealth.ps1": lambda **kw: {
+        # Healthy shape, but WITH the previous failure still inside the lookback
+        # window - that is what a unit looks like shortly after the watchdog
+        # task was run to fix it, and it exercises the card's history line
+        # without firing a critical the live checks would contradict.
+        # Shape mirrors a real 5.37.1 VPU (measured 2026-09-16).
+        "verdict": "ok",
+        "watchdogTask": {
+            "present": True,
+            "state": "Running",
+            "runAs": "Pixellot",
+            "runLevel": "Highest",
+            "elevated": True,
+            "repeatIntervalMinutes": 1,
+            "action": "C:\\Pixellot\\bin\\KeepAgentUp.exe",
+            "source": "schtasks",
+        },
+        "processes": [
+            {"name": "KeepAgentUp", "pidFirst": 9940, "pidSecond": 9940,
+             "running": True, "cycling": False, "owner": "VPU\\Pixellot"},
+            {"name": "Agent", "pidFirst": 11324, "pidSecond": 11324,
+             "running": True, "cycling": False, "owner": "VPU\\Pixellot"},
+            {"name": "Coordinator", "pidFirst": 10596, "pidSecond": 10596,
+             "running": True, "cycling": False, "owner": "VPU\\Pixellot"},
+        ],
+        "websocket": {
+            "port": 9001,
+            "prefix": "http://+:9001/",
+            "listening": True,
+            "bindOk": 1,
+            "bindFailed": 9,
+            "fatalNoComms": 9,
+            "lastError": "Error | 2026-09-16 15:49:55.211 |Coordinator Main |WebSocketServer.cs(218) |Start |exception encountered while starting websocket server : Access is denied   at System.Net.HttpListener.AddAllPrefixes()",
+            "lastErrorTime": "2026-09-16 15:49:55",
+            "firstErrorTime": "2026-09-16 15:49:13",
+            "lastBindOkTime": "2026-09-16 15:50:42",
+            "logFile": "Coordinator_vpu_20260916_000004.log",
+            "urlAclPresent": False,
+            "urlAclDetail": None,
+        },
+        "uacEnabled": True,
+        "sampleSeconds": 6,
+        "hoursBack": 6,
+        "findings": [],
+        "notes": "Port 9001 is always owned by PID 4 (HTTP.SYS); listener ownership is not a health signal.",
+    },
     "Test-PixellotInstallState.ps1": lambda **kw: {
         "dirExists": True,
         "dir": "C:\\pixellot\\downloadedversion",
@@ -1293,17 +1486,38 @@ DEMO = {
     # already running, so a manual run exits 0 without restarting anything.
     # ("KeekAgentUp" is Pixellot's typo, verbatim from the real exe.)
     "Restart-PixellotAgent.ps1": lambda **kw: {
-        "success": False,
+        # Demo shows the benign no-op: the watchdog was already running AND
+        # both processes are up, so nothing needed restarting. The dangerous
+        # variant of the same stdout - watchdog resident while agent or
+        # coordinator is DOWN - is verdict "watchdog-resident-but-down", which
+        # is a failure with a remedy rather than a reassuring note.
+        "success": True,
+        "verdict": "already-healthy",
+        "method": "task",
+        "watchdogTask": {
+            "present": True,
+            "state": "Running",
+            "runLevel": "Highest",
+            "elevated": True,
+        },
+        "pulseElevated": True,
         "watchdogResident": True,
         "exitCode": 0,
         "path": "C:\\pixellot\\bin\\keepagentup.exe",
         "stdout": 'KeekAgentUp Exit as another "KeekAgentUp" process is running',
         "stderr": "",
+        "stderrBenign": False,
         "agentStatus": "Running (process, PID 7772)",
         "coordinatorStatus": "Running (process, PID 6140)",
+        "agentStatusBefore": "Running (process, PID 7772)",
+        "coordinatorStatusBefore": "Running (process, PID 6140)",
         "agentPidBefore": 7772,
         "agentPidAfter": 7772,
-        "message": "The keepagentup watchdog is already resident on this VPU, so this run exited without restarting anything. The agent was NOT restarted.",
+        "agentCycling": False,
+        "coordinatorCycling": False,
+        "sampleSeconds": 5,
+        "message": "The watchdog was already running, so nothing needed restarting. The Agent and Coordinator are both up.",
+        "remedy": None,
     },
     "Get-AudioDevices.ps1": lambda **kw: {
         "devices": [
@@ -1487,6 +1701,11 @@ def _demo_pixellot_events():
     }
 
 
+def _demo_esr(events):
+    from cloud_api import esr_summary  # lazy: cloud_api imports demo_data
+    return esr_summary(events)
+
+
 def demo_cloud_events(venue_id, local_events):
     """Demo counterpart of cloud_api.fetch_cloud — same payload shape."""
     now = datetime.now()
@@ -1640,6 +1859,7 @@ def demo_cloud_events(venue_id, local_events):
             "darkCourt": "Error", "hdBandwidth": "Ok", "panoBandwidth": "Ok",
         },
         "eqsAvgScore": 0.8125,
+        "esr": _demo_esr(events),
         "events": events,
         "causeHints": [
             {"severity": "warning",
