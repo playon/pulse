@@ -23,6 +23,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-08
+
 ### Changed
 - If you start Pulse from a `run_pulse.bat` saved on the VPU's desktop or in Downloads, Pulse now updates that file to the current launcher by itself, so it gets the latest fixes. It only changes files that exactly match an older Pulse launcher; anything else is left alone.
 - The launch window is easier to follow: one short list under **Updating Pulse** and **Starting Pulse**, one line per step, with retries tidied away. If something fails, the box at the bottom says what went wrong and what to do next. The launcher no longer reinstalls Chrome when it is already installed for just one Windows user.
