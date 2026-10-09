@@ -57,7 +57,7 @@ typography:
     fontWeight: 400
   nav:
     fontFamily: "ui-sans-serif, system-ui, sans-serif"
-    fontSize: "0.9rem"
+    fontSize: "0.875rem"
     fontWeight: 500
   label:
     fontFamily: "ui-sans-serif, system-ui, sans-serif"
@@ -172,15 +172,28 @@ A cool slate neutral ramp carries all structure. Six semantic accents carry stat
 **Character:** Neutral and mechanical. The system fonts are chosen for reliability on a Windows 10 LTSC image, not for personality.
 
 ### Hierarchy
-- **Body** (400, 0.875rem): page prose, table cells, finding titles.
-- **Nav** (500, 0.9rem): sidebar labels. The active item is the same size, tinted blue.
-- **Data** (400, ~0.75rem, monospace): IPs, ports, byte strings, timestamps, log lines.
-- **Label** (600, 0.7rem, 0.08em tracking, uppercase): card section labels and table headers. Short, never a sentence.
-- **Badge** (600, 0.7rem, 0.04em tracking, uppercase): status tokens only (PASS, RUNNING, NOT FOUND).
+Dense UI roles use a five-step scale, defined once as `--fs-*` tokens on `:root`. Never write a literal `rem` size for one of these roles.
 
-The scale is dense and clustered: roughly a dozen sizes between 0.65rem and 0.95rem, with 0.7 to 0.85rem carrying most of the screen. Metadata at 10 to 12px is normal here, so its colour contrast matters more than usual.
+| Token | Size | Roles |
+|---|---|---|
+| `--fs-micro` | 0.7rem (11.2px) | badges, card and table labels, unit captions, timestamps. **The floor.** |
+| `--fs-meta` | 0.75rem | secondary metadata, table headers, outline buttons |
+| `--fs-small` | 0.8rem | supporting copy, key-value rows, table cells |
+| `--fs-body` | 0.875rem | body text and sidebar nav |
+| `--fs-lead` | 0.95rem | card titles and lead values |
+
+- **Body** (400, `--fs-body`): page prose, table cells, finding titles.
+- **Nav** (500, `--fs-body`): sidebar labels. The active item is the same size, tinted blue.
+- **Data** (400, `--fs-meta`, monospace): IPs, ports, byte strings, timestamps, log lines.
+- **Label** (600, `--fs-micro`, 0.08em tracking, uppercase): card section labels and table headers. Short, never a sentence.
+- **Badge** (600, `--fs-micro`, 0.04em tracking, uppercase): status tokens only (PASS, RUNNING, NOT FOUND).
+- **Page and display** (1rem to 2.5rem, literal values or fluid `clamp()`): page titles and the large readouts on the scoreboard board and splash. These sit above the scale and keep their own values. Fluid sizes never fall below `--fs-micro` at their small end.
+
+Metadata at 11 to 12px is normal here, so its colour contrast matters more than usual.
 
 ### Named Rules
+**The Eleven Pixel Floor Rule.** Nothing that carries meaning renders below 0.7rem (11.2px), including the small end of a fluid size. Pulse is read over a compressed remote-desktop session, where 8 to 10px text smears.
+
 **The Short Caps Rule.** Uppercase and tracking belong to labels and status tokens of a word or two. Never set a sentence in capitals.
 
 **The Say-It-In-Words Rule.** Copy is written for a field tech to read aloud to a school. A collector's raw string is never UI copy; it goes through the state vocabulary first (see the `pulse-status-vocabulary` skill).

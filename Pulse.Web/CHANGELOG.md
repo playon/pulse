@@ -23,6 +23,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 
 ## [Unreleased]
 
+### Changed
+- Small text is easier to read over remote desktop. Nothing in Pulse is smaller than 11 pixels any more, and the many near-identical text sizes are now five consistent ones.
+
 ## [1.4.0] - 2026-10-08
 
 ### Changed
