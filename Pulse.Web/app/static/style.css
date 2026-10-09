@@ -1167,6 +1167,7 @@ html.dark .channel-moved-banner {
 .finding-open {
     display: inline-flex;
     align-items: center;
+    min-height: 24px;
     gap: 3px;
     font-size: var(--fs-meta);
     font-weight: 600;
@@ -3493,7 +3494,7 @@ button.scc-node:hover { background: var(--c-surface-2); border-color: var(--c-bo
 
 /* Collapsed list of unplugged/disabled devices */
 .audio-inactive-summary {
-  cursor: pointer; font-size: var(--fs-body); font-weight: 600;
+  padding: 4px 0; cursor: pointer; font-size: var(--fs-body); font-weight: 600;
   color: var(--c-muted); user-select: none;
 }
 .audio-inactive-summary:hover { color: var(--c-text); }
@@ -3651,6 +3652,7 @@ button.scc-node:hover { background: var(--c-surface-2); border-color: var(--c-bo
     color: var(--c-dim);
 }
 .finding-evidence > summary {
+    padding: 5px 0;
     cursor: pointer;
     width: max-content;
     color: var(--c-muted);
