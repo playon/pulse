@@ -3006,23 +3006,45 @@ details[open] > .fi-hist-summary::before { transform: rotate(90deg); }
     box-shadow: 0 2px 8px rgba(0,0,0,0.15);
 }
 html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
-/* Hero variant — top of page, larger everything */
+/* Hero variant: the stage. The live score is what the agent came for, so it is
+   the largest thing on the tab. It is its own size container: every figure
+   scales with the width the stage actually gets (beside the connection rail,
+   or the full width), not with the window. Text only ever grows from the old
+   sizes; the floors below are the previous values. */
 .sc-board-hero {
+    container-type: inline-size;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
     border-radius: 12px;
-    padding: 1.75rem 2rem 1.5rem;
+    padding: 2rem 1.75rem 1.75rem;
+    background: linear-gradient(180deg, var(--c-board-bg) 0%, var(--c-board-bg-deep) 100%);
 }
-.sc-board-hero .sc-team-name  { font-size: 1.15rem; }
-.sc-board-hero .sc-team-label { font-size: 0.6rem; }
-.sc-board-hero .sc-score      { font-size: 3.5rem; }
-.sc-board-hero .sc-score-sep  { font-size: 2.2rem; }
-.sc-board-hero .sc-clock      { font-size: 1.8rem; }
-.sc-board-hero .sc-period-label { font-size: 1.5rem; font-weight: 800; color: var(--c-board-text); letter-spacing: 0.04em; margin-bottom: 0.15rem; }
+.sc-board-hero .sc-team-name  { font-size: clamp(1.15rem, 3.4cqi, 1.6rem); }
+.sc-board-hero .sc-team-label { font-size: clamp(0.65rem, 2.1cqi, 0.95rem); }
+.sc-board-hero .sc-score      { font-size: clamp(3.5rem, 13cqi, 7.5rem); }
+.sc-board-hero .sc-score-sep  { font-size: clamp(2.2rem, 7cqi, 3.5rem); }
+.sc-board-hero .sc-clock      { font-size: clamp(1.8rem, 6.5cqi, 3.25rem); }
+.sc-board-hero .sc-period-label { font-size: clamp(1.5rem, 4.4cqi, 2.4rem); font-weight: 800; color: var(--c-board-text); letter-spacing: 0.04em; margin-bottom: 0.15rem; }
+.sc-board-hero .sc-cap        { font-size: clamp(0.6rem, 1.7cqi, 0.78rem); }
 .sc-board-hero .sc-poss       { width: 10px; height: 10px; }
-.sc-board-hero .sc-stat-val   { font-size: 1.15rem; }
-.sc-board-hero .sc-stat-lbl   { font-size: 0.55rem; }
+.sc-board-hero .sc-stat-val   { font-size: clamp(1.15rem, 3.2cqi, 1.7rem); }
+.sc-board-hero .sc-stat-lbl   { font-size: clamp(0.58rem, 1.5cqi, 0.72rem); }
 .sc-board-hero .sc-bonus      { width: 24px; height: 24px; font-size: 0.7rem; }
-.sc-board-hero .sc-center     { min-width: 200px; padding: 0 1.75rem; }
-.sc-board-hero .sc-stats      { margin-top: 1rem; padding-top: 1rem; }
+.sc-board-hero .sc-center     { min-width: 0; padding: 0 clamp(0.75rem, 3.2cqi, 2rem); }
+.sc-board-hero .sc-stats      { margin-top: clamp(1rem, 3cqi, 1.75rem); padding-top: clamp(1rem, 2.6cqi, 1.5rem); }
+/* The stage is as tall as the connection beside it. The score cluster takes the
+   middle of that height and the plate sits at the foot, so the spare height
+   holds what ScoreConnect is reading rather than empty board. */
+.sc-board-hero .sc-header { margin-top: auto; }
+.sc-plate {
+    margin-top: auto;
+    padding-top: clamp(1rem, 3cqi, 1.75rem);
+    display: flex; flex-wrap: wrap; justify-content: center; align-items: baseline;
+    gap: 0.2rem 0.6rem;
+    font-size: clamp(0.72rem, 1.7cqi, 0.86rem);
+}
+.sc-plate-val { color: var(--c-board-text-2); letter-spacing: 0.04em; }
 
 .sc-board-empty {
     padding: 2.5rem 1.5rem;
@@ -3135,11 +3157,6 @@ html.dark .sc-board { box-shadow: none; border-color: var(--c-board-border-2); }
     letter-spacing: 0.04em;
 }
 
-@keyframes pulse-live {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.3; }
-}
-
 /* Raw scoreboard data string (Daktronics RTD etc.) */
 .sc-raw-data {
     margin-top: 0.75rem;
@@ -3249,10 +3266,14 @@ button.scc-node:hover { background: var(--c-surface-2); border-color: var(--c-bo
 
 /* Findings sit first on the tab, in the same card every tab uses. */
 #scc-findings-wrap > .card { margin-top: 1.25rem; }
-#page > #scc-findings-wrap + .card { margin-top: 1.25rem; }
-.scc-ask { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; margin-top: 1rem; }
-.scc-ask-q { font-size: 0.8rem; font-weight: 600; color: var(--c-muted); }
-.scc-ask-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+/* Every block under the findings (the working stack, the live scoreboard, the
+   details, the upgrade prompt) sits 1.25rem below the one before it. The
+   scoreboard had no top margin and the details card had 1rem, so the tab's
+   rhythm broke at exactly those two joins. */
+#page > #scc-findings-wrap ~ .scc-stage-wrap,
+#page > #scc-findings-wrap ~ .card { margin-top: 1.25rem; }
+.scc-ask { display: flex; flex-direction: column; gap: 0.35rem; }
+.scc-ask-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.4rem; }
 .scc-chip {
   padding: 0.35rem 0.75rem; border: 1px solid var(--c-border); border-radius: 999px;
   background: var(--c-surface); color: var(--c-text); font: inherit; font-size: 0.78rem; cursor: pointer;
@@ -3260,8 +3281,47 @@ button.scc-node:hover { background: var(--c-surface-2); border-color: var(--c-bo
 .scc-chip:hover { border-color: var(--c-accent-blue); }
 .scc-chip.is-on { border-color: var(--c-accent-blue); background: var(--c-tint-blue); color: var(--c-accent-blue); font-weight: 600; }
 
-.scc-panel:not(:empty) { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--c-border); }
-.scc-panel > * + * { margin-top: 1.25rem; }
+/* The tab's working area is a stack of separate cards, one per job: where it
+   is broken (the picture), the panel Change setup or a part opens, and what to
+   ask the school. They sit on the same 1.25rem rhythm as every other card on
+   the page; the open panel carries the blue of the control that opened it. */
+/* The stage: the live score is the hero and the connection is its sidekick.
+   One grid places the score, the connection, the open panel and the question.
+   On a wide window the connection is a rail beside the score; on a narrow one
+   it sits below it. With no readable score (.is-solo) the connection simply
+   takes the whole width. The wrappers the connection renders into do not take
+   part in layout, so their cards are the grid's own items. */
+.scc-stage-wrap { container-type: inline-size; }
+.scc-stage {
+  display: grid; gap: 1.25rem; align-items: stretch;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "stage" "rail" "panel" "ask";
+}
+.scc-stack, #scc-body { display: contents; }
+.scc-stage > .sc-board { grid-area: stage; min-width: 0; }
+.scc-rail { grid-area: rail; min-width: 0; }
+/* An OCR-scored unit folds the connection to one line: it hugs its content
+   beside the score instead of stretching to the score's height. */
+.scc-rail.scc-collapsed { align-self: start; }
+.scc-panel-slot { grid-area: panel; min-width: 0; }
+.scc-card-ask { grid-area: ask; min-width: 0; }
+.scc-panel-slot:empty { display: none; }
+@container (min-width: 50rem) {
+  .scc-stage:not(.is-solo) {
+    grid-template-columns: minmax(0, 1fr) clamp(19rem, 32cqi, 23.5rem);
+    grid-template-areas: "stage rail" "panel panel" "ask ask";
+  }
+  /* The sidekick recedes: a smaller title and smaller pictures, so the
+     connection reads as a companion to the score, not a competitor. */
+  .scc-stage:not(.is-solo) .scc-rail .scc-title { font-size: 0.95rem; }
+  .scc-stage:not(.is-solo) .scc-rail .scc-node .scc-img { width: 4.25rem; }
+  .scc-stage:not(.is-solo) .scc-rail .scc-link { min-height: 1.75rem; }
+  .scc-stage:not(.is-solo) .scc-rail .scc-wire { height: 1.75rem; }
+}
+.scc-card-panel { border-color: var(--c-accent-blue); }
+.scc-card > * + * { margin-top: 1.25rem; }
+.scc-card .scc-title { margin: 0 0 0.75rem; }
+.scc-ask .scc-title { margin: 0; }
 .scc-sub { font-size: 0.88rem; font-weight: 600; color: var(--c-text); margin: 0 0 0.6rem; }
 .scc-note { font-size: 0.78rem; color: var(--c-muted); line-height: 1.45; margin: 0; }
 .scc-error { font-size: 0.82rem; color: var(--c-accent-red); line-height: 1.45; margin: 0; }
