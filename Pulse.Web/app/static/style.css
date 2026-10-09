@@ -35,7 +35,7 @@
   --c-accent-green:  #137638;  /* 4.6:1 on double-tinted green, 5.7:1 on a card */
   --c-accent-red:    #bf2121;  /* 4.6:1 on double-tinted red,   6.1:1 on a card */
   --c-accent-amber:  #9b4708;  /* 4.6:1 on double-tinted amber, 6.4:1 on a card */
-  --c-accent-blue:   #2460e3;  /* 4.6:1 on tinted blue,         5.5:1 on a card */
+  --c-accent-blue:   #1f54cc;  /* 5.3:1 on the active-nav tint, 6.6:1 on a card (was #2460e3: 4.4 and 5.4) */
   --c-accent-teal:   #0f766e;  /* darkened from #2dd4bf for WCAG AA on light surfaces (was #0d9488 at 3.7:1, now 5.5:1) */
   --c-accent-purple: #7c3aed;  /* darkened from #a78bfa for WCAG AA on light surfaces */
   /* Camera status tokens — one source of truth for the port LEDs, the tile
