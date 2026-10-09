@@ -980,6 +980,8 @@ html.dark .channel-moved-banner {
 .dash-sev-critical { background: var(--c-tint-red); color: var(--c-accent-red); }
 .dash-sev-warn     { background: var(--c-tint-amber); color: var(--c-accent-amber); }
 .dash-sev-ok       { background: var(--c-tint-green); color: var(--c-accent-green); }
+/* "Fix soon" is plain purple text, not a tinted pill: purple on its own tint fails AA. */
+.dash-sev-soon     { background: transparent; color: var(--c-accent-purple); }
 
 /* ── Stream Readiness card ────────────────────────────────────
    The 90-second triage artifact: one big PASS/WARN/FAIL verdict at the top of
@@ -1306,6 +1308,7 @@ html.dark .channel-moved-banner {
 .dash-sev-critical .dash-sev-dot { background: var(--c-accent-red); }
 .dash-sev-warn .dash-sev-dot     { background: var(--c-accent-amber); }
 .dash-sev-ok .dash-sev-dot       { background: var(--c-accent-green); }
+.dash-sev-soon .dash-sev-dot     { background: var(--c-accent-purple); }
 
 /* Active findings card */
 .dash-findings-card { margin-top: 1rem; }
