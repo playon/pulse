@@ -3249,10 +3249,15 @@ button.scc-node:hover { background: var(--c-surface-2); border-color: var(--c-bo
 
 /* Findings sit first on the tab, in the same card every tab uses. */
 #scc-findings-wrap > .card { margin-top: 1.25rem; }
-#page > #scc-findings-wrap + .card { margin-top: 1.25rem; }
-.scc-ask { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; margin-top: 1rem; }
-.scc-ask-q { font-size: 0.8rem; font-weight: 600; color: var(--c-muted); }
-.scc-ask-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+/* Every block under the findings (the working stack, the live scoreboard, the
+   details, the upgrade prompt) sits 1.25rem below the one before it. The
+   scoreboard had no top margin and the details card had 1rem, so the tab's
+   rhythm broke at exactly those two joins. */
+#page > #scc-findings-wrap ~ .scc-stack,
+#page > #scc-findings-wrap ~ .card,
+#page > #scc-findings-wrap ~ .sc-board-hero { margin-top: 1.25rem; }
+.scc-ask { display: flex; flex-direction: column; gap: 0.35rem; }
+.scc-ask-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.4rem; }
 .scc-chip {
   padding: 0.35rem 0.75rem; border: 1px solid var(--c-border); border-radius: 999px;
   background: var(--c-surface); color: var(--c-text); font: inherit; font-size: 0.78rem; cursor: pointer;
@@ -3260,8 +3265,17 @@ button.scc-node:hover { background: var(--c-surface-2); border-color: var(--c-bo
 .scc-chip:hover { border-color: var(--c-accent-blue); }
 .scc-chip.is-on { border-color: var(--c-accent-blue); background: var(--c-tint-blue); color: var(--c-accent-blue); font-weight: 600; }
 
-.scc-panel:not(:empty) { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--c-border); }
-.scc-panel > * + * { margin-top: 1.25rem; }
+/* The tab's working area is a stack of separate cards, one per job: where it
+   is broken (the picture), the panel Change setup or a part opens, and what to
+   ask the school. They sit on the same 1.25rem rhythm as every other card on
+   the page; the open panel carries the blue of the control that opened it. */
+.scc-stack, #scc-body { min-width: 0; }
+#scc-body { display: flex; flex-direction: column; gap: 1.25rem; }
+.scc-panel-slot:empty { display: none; }
+.scc-card-panel { border-color: var(--c-accent-blue); }
+.scc-card > * + * { margin-top: 1.25rem; }
+.scc-card .scc-title { margin: 0 0 0.75rem; }
+.scc-ask .scc-title { margin: 0; }
 .scc-sub { font-size: 0.88rem; font-weight: 600; color: var(--c-text); margin: 0 0 0.6rem; }
 .scc-note { font-size: 0.78rem; color: var(--c-muted); line-height: 1.45; margin: 0; }
 .scc-error { font-size: 0.82rem; color: var(--c-accent-red); line-height: 1.45; margin: 0; }

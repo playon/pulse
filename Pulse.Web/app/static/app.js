@@ -9316,7 +9316,8 @@ function _sccAskHtml(data) {
   var syms = (data.chainCopy || {}).symptoms || {};
   var ids = Object.keys(syms);
   if (!ids.length) return "";
-  return '<div class="scc-ask"><span class="scc-ask-q" id="scc-ask-q">What is the school seeing?</span>' +
+  return '<div class="scc-ask"><h2 class="scc-title" id="scc-ask-q">What is the school seeing?</h2>' +
+    '<p class="scc-note">Pick the closest match. Pulse marks where to look in the picture above.</p>' +
     '<div class="scc-ask-chips" role="group" aria-labelledby="scc-ask-q">' +
     ids.map(function(id) {
       var on = _scc.symptom === id;
@@ -9371,7 +9372,7 @@ function _sccPickerHtml(data, part, parts) {
   var clear = { device: { device: null }, cable: { cable: null }, extension: { extension: null }, controller: { controller: null, model: null } }[part];
   var footer = part === "controller" && data.reachable
     ? '<button type="button" class="btn-outline btn-ol-blue" onclick="sccTogglePanel(\'setup\')">' + svgIcon("settings", 14) + ' Change ScoreConnect setup</button>' : "";
-  return '<div class="scc-picker"><h3 class="scc-sub">' + esc(q) + '</h3>' +
+  return '<div class="scc-picker"><h2 class="scc-title">' + esc(q) + '</h2>' +
     (note ? '<p class="scc-note scc-note-above">' + esc(note) + '</p>' : "") +
     '<div class="scc-options' + (part === "extension" ? " scc-options-text" : "") + '" role="radiogroup" aria-label="' + esc(q) + '">' +
     opts.map(function(o) {
@@ -9523,7 +9524,7 @@ function _sccSetupChanges(s) {
 
 function _sccSetupHtml(data) {
   var s = _scc.setup;
-  var head = '<h3 class="scc-sub">ScoreConnect III setup</h3>';
+  var head = '<h2 class="scc-title">ScoreConnect III setup</h2>';
   if (!s || s.phase === "loading") return '<div class="scc-setup">' + head + '<p class="scc-note">Reading ScoreConnect III’s setup…</p></div>';
   if (s.phase === "error") return '<div class="scc-setup">' + head + '<p class="scc-error">Couldn’t read ScoreConnect III’s setup: ' + esc(s.message) + '</p>' +
     '<button type="button" class="btn-outline btn-ol-muted" onclick="sccTogglePanel(\'setup\');sccTogglePanel(\'setup\')">Try again</button></div>';
@@ -9588,6 +9589,7 @@ function _sccSetupHtml(data) {
     '</div>' +
     '<div class="scc-picker-foot">' +
       '<button type="button" class="btn-outline btn-ol-blue"' + (inc ? " disabled" : "") + ' onclick="sccSetupReview()">Review changes</button>' +
+      '<button type="button" class="btn-outline btn-ol-blue" onclick="sccFindCodeFromSetup(this)" title="Tries the console codes for the vendor ScoreConnect is set to now">' + svgIcon("search", 14) + ' Find the code</button>' +
       '<button type="button" class="btn-outline btn-ol-muted" onclick="sccTogglePanel(\'setup\')">Cancel</button>' +
       (inc ? '<span class="scc-note">' + esc(inc) + '</span>' : "") +
       (prev ? '<button type="button" class="btn-outline btn-ol-muted scc-restore" onclick="sccSetupRestore()">' + svgIcon("refresh", 14) + ' Restore ' + esc(prev.vendorSportName || "previous setup") + '</button>' : "") +
@@ -9739,20 +9741,61 @@ async function sccScanOpen() {
   _sccRender(true);
 }
 
+// The Find the code button in Change setup. Always available. A console
+// ScoreConnect already reads gets one confirmation first; otherwise the search
+// starts straight away on the sport ScoreConnect is set to (the form's own
+// default), and "Try every code" is one click away if that sport has no match.
+async function sccFindCodeFromSetup(btn) {
+  if (_sccScanRunning()) { sccScanOpen(); return; }
+  var label = btn && btn.innerHTML;
+  if (btn) { btn.disabled = true; btn.textContent = "Checking…"; }
+  var restore = function() { if (btn) { btn.disabled = false; btn.innerHTML = label; } };
+  var r = await api("/api/scoreconnect/sc3/scan?plan=1");
+  var plan = r && !r.error && r.plan;
+  if (!plan) {
+    // No vendor to scan, or no answer: the scan panel says which.
+    restore();
+    return sccScanOpen();
+  }
+  var cd = cached("scoreconnect");
+  var reading = r.console === "reading" || (r.console == null && !!cd && _sccSignals(cd).flow === "live");
+  if (reading && !window.confirm(_SCC_SCAN_READING_WARNING)) { restore(); return; }
+  var keys = plan.sports.map(function(x) { return x.key; });
+  var cur = plan.currentSportKey, count = function(k) { return (plan.sports.filter(function(x) { return x.key === k; })[0] || {}).count || 0; };
+  var sport = keys.indexOf(cur) !== -1 && count(cur) ? cur : null;
+  _scc.panel = "scan";
+  _scc.scan = { phase: "form", plan: plan, scan: null, sport: sport };
+  if (!(sport ? count(sport) : plan.allCount)) { _sccRender(true); return; }  // nothing to try: the form says so
+  sccScanStart(sport, reading);
+}
+
 function sccScanSport(k) {
   if (!_scc.scan) return;
   _scc.scan.sport = k || null;
   _sccRender(true);
 }
 
-async function sccScanStart(sport) {
+// What the tech is told before codes are tried on a console ScoreConnect
+// already reads. Each code saved interrupts the score for several seconds, and
+// the scan keeps the first code that reads, which may not be today's.
+var _SCC_SCAN_READING_WARNING = "ScoreConnect is already reading the console, so the score is working.\n\n" +
+  "Find the code tries other codes one at a time. Each one interrupts the score for a few seconds, and Pulse keeps the first one that reads, which may not be the setup you have now. Change setup can put the current one back.\n\n" +
+  "Try other codes anyway?";
+
+async function sccScanStart(sport, force) {
   var st = _scc.scan;
   if (!st) return;
   if (sport !== undefined) st.sport = sport;
   st.phase = "run";
   st.scan = { state: "starting", tried: [], total: 0 };
   _sccRender(true);
-  var r = await apiPost("/api/scoreconnect/sc3/scan", { confirm: true, sport: st.sport });
+  var r = await apiPost("/api/scoreconnect/sc3/scan", { confirm: true, sport: st.sport, force: force === true });
+  // The console began reading between the form and the click: ask, then retry.
+  if (r && r.alreadyReading && force !== true) {
+    if (window.confirm(_SCC_SCAN_READING_WARNING)) return sccScanStart(st.sport, true);
+    st.phase = "form"; st.scan = null; _sccRender(true);
+    return;
+  }
   if (!r || r.error) { st.phase = "error"; st.message = (r && r.message) || "No answer from Pulse"; st.scan = null; _sccRender(true); return; }
   st.scan = r.scan;
   _sccRender(true);
@@ -9802,7 +9845,7 @@ function _sccScanTriedLine(sc) {
 
 function _sccScanHtml(data) {
   var st = _scc.scan || {};
-  var head = '<h3 class="scc-sub">Find the console’s code</h3>';
+  var head = '<h2 class="scc-title">Find the console’s code</h2>';
   var close = '<button type="button" class="btn-outline btn-ol-muted" onclick="_scc.scan=null;sccTogglePanel(\'scan\')">Close</button>';
   if (st.phase === "loading") return '<div class="scc-setup scc-scan">' + head + '<p class="scc-note">Reading ScoreConnect III’s codes…</p></div>';
   if (st.phase === "error") return '<div class="scc-setup scc-scan">' + head + '<p class="scc-error">' + esc(st.message) + '</p><div class="scc-picker-foot">' + close + '</div></div>';
@@ -9870,8 +9913,11 @@ function _sccScanHtml(data) {
       '<p class="scc-note">Check the console’s brand is ' + esc(sc.vendorName || "") + '. ' + (sc.sport ? "If the school isn’t sure of the sport, try every code." : "") + '</p>' +
       '<div class="scc-picker-foot">' + (sc.sport ? '<button type="button" class="btn-outline btn-ol-blue" onclick="_scc.scan.phase=\'form\';sccScanStart(null)">' + svgIcon("search", 14) + ' Try every code</button>' : "") + close + '</div>';
   } else if (sc.state === "lost") {
-    body = '<p class="scc-warn">' + svgIcon("triangle", 14) + '<span>The console stopped sending data partway through, so Pulse stopped and put back ' + esc(orig) + '.</span></p>' +
-      '<p class="scc-note">Ask the school: is the console on and running a game? Then try again.</p>' +
+    var never = sc.startedFrom === "none";
+    body = '<p class="scc-warn">' + svgIcon("triangle", 14) + '<span>' + (never
+        ? 'No data reached ScoreConnect while Pulse tried codes, so there was nothing to match. Pulse stopped and put back ' + esc(orig) + '.'
+        : 'The console stopped sending data partway through, so Pulse stopped and put back ' + esc(orig) + '.') + '</span></p>' +
+      '<p class="scc-note">Ask the school: is the console on and running a game?' + (never ? ' Is the cable pushed in at both ends?' : '') + ' Then try again.</p>' +
       '<div class="scc-picker-foot"><button type="button" class="btn-outline btn-ol-blue" onclick="sccScanOpen()">Try again</button>' + close + '</div>';
   } else if (sc.state === "stopped") {
     body = '<p class="scc-note">Stopped after ' + n + (n === 1 ? " code" : " codes") + '. Pulse put back ' + esc(orig) + '.</p>' + _sccScanTriedLine(sc) +
@@ -9907,12 +9953,10 @@ function scChainHtml(data) {
       (anySC ? '<button type="button" class="btn-outline btn-ol-muted scc-show" onclick="_scc.showOnOcr=true;renderScoreConnect()">Show the ScoreConnect connection</button>' : "") + '</div>';
   }
   if (!anySC && !(data.error && data.scoreLinkConnected != null)) return "";
-  return '<section class="card scc" id="sc-chain" aria-labelledby="scc-title">' +
-    '<div class="scc-head"><h2 class="scc-title" id="scc-title">Scoreboard connection</h2>' +
-      (data.reachable ? '<button type="button" class="btn-outline btn-ol-blue" onclick="sccTogglePanel(\'setup\')" aria-controls="scc-panel" aria-expanded="' + (_scc.panel === "setup") + '">' + svgIcon("settings", 14) + ' Change setup</button>' : "") +
-    '</div>' +
-    '<div id="scc-body">' + _sccBodyHtml(data) + '</div>' +
-  '</section>';
+  // A stack of separate cards (connection, what the school sees, the open
+  // panel), not one card with everything inside: the setup form and the
+  // connection picture used to blend into one surface.
+  return '<div id="sc-chain" class="scc-stack"><div id="scc-body">' + _sccBodyHtml(data) + '</div></div>';
 }
 
 function _sccBodyHtml(data) {
@@ -9920,10 +9964,22 @@ function _sccBodyHtml(data) {
   var sig = _sccSignals(data);
   var breaks = _sccBreaks(data, sig, parts);
   _scc.sig = JSON.stringify([sig.sc3, sig.usb, sig.flow, sig.stopped, sig.drops >= 2, (sig.serial || {}).state, !!(sig.serial || {}).configProblem, sig.wrongFormat, _scc.symptom, _scc.panel]);
-  return _sccStatusHtml(data, sig, breaks) +
-    '<div class="scc-track" role="list" aria-label="Scoreboard connection, from the VPU to the console">' + _sccTrackHtml(data, sig, parts, breaks) + '</div>' +
-    _sccAskHtml(data) +
-    '<div id="scc-panel" class="scc-panel">' + _sccPanelHtml(data, parts) + _sccSymptomHtml(data, parts) + '</div>';
+  // Change setup lives in this card's header, so it is redrawn with the card
+  // and aria-expanded follows the panel.
+  var head = '<div class="scc-head"><h2 class="scc-title" id="scc-title">Scoreboard connection</h2>' +
+    (data.reachable ? '<button type="button" class="btn-outline btn-ol-blue" onclick="sccTogglePanel(\'setup\')" aria-controls="scc-panel" aria-expanded="' + (_scc.panel === "setup") + '">' + svgIcon("settings", 14) + ' Change setup</button>' : "") +
+    '</div>';
+  var chain = '<section class="card scc" aria-labelledby="scc-title">' + head + _sccStatusHtml(data, sig, breaks) +
+    '<div class="scc-track" role="list" aria-label="Scoreboard connection, from the VPU to the console">' + _sccTrackHtml(data, sig, parts, breaks) + '</div></section>';
+  var ask = _sccAskHtml(data) + _sccSymptomHtml(data, parts);
+  var panel = _sccPanelHtml(data, parts);
+  // Reading order is: where it is broken (the picture), the panel that
+  // Change setup or a part opened (right under what opened it), then what to
+  // ask the school. #scc-panel is always present (the parts' aria-controls
+  // points at it) and takes no room while empty.
+  return chain +
+    '<div id="scc-panel" class="scc-panel-slot">' + (panel ? '<section class="card scc-card scc-card-panel">' + panel + '</section>' : "") + '</div>' +
+    (ask ? '<section class="card scc-card">' + ask + '</section>' : "");
 }
 
 // Redraw the chain body. `force` for user actions; live ticks redraw only

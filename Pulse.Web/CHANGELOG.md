@@ -26,6 +26,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 ## [1.4.0] - 2026-10-08
 
 ### Changed
+- ScoreConnect tab: the scoreboard connection, the setup or code search you opened, and "What is the school seeing?" are now separate cards with even spacing, instead of one card where they ran together. The live scoreboard and the details card sit the same distance apart as the rest.
 - If you start Pulse from a `run_pulse.bat` saved on the VPU's desktop or in Downloads, Pulse now updates that file to the current launcher by itself, so it gets the latest fixes. It only changes files that exactly match an older Pulse launcher; anything else is left alone.
 - The launch window is easier to follow: one short list under **Updating Pulse** and **Starting Pulse**, one line per step, with retries tidied away. If something fails, the box at the bottom says what went wrong and what to do next. The launcher no longer reinstalls Chrome when it is already installed for just one Windows user.
 - Findings on the Dashboard, Network Test and Camera Connectivity are now one short list: one line per finding, most urgent first, with the fix a click away. A summary at the top says how many stop tonight's game, how many are risks tonight, how many to fix soon, and how many are just worth knowing. "Fix soon" is new: a real problem that won't affect tonight's game, such as a web filter blocking LogMeIn, used to be labelled "Risk tonight". The worth-knowing notes fold into one line, and every tab uses the same words for how serious a finding is.
@@ -34,6 +35,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - Network Test: the port number on each port tile (for example "UDP 2088") is now larger and easier to read, so you can read it back to the school's IT.
 
 ### Added
+- ScoreConnect tab: **Find the code** is now also in Change setup, and works whether or not ScoreConnect is getting data. If ScoreConnect already reads the console, Pulse asks you to confirm before trying other codes; if it isn't, the search starts straight away.
 - Event Streaming: the top banner now shows **ESR**, the share of this school's last 10 public events that went on air (hover for details). Unlisted and test events are left out. Pulse counts it from the NFHS events list, so it can differ slightly from the Sigma ESR dashboard. The Unity key is now labelled and easier to read.
 - Power Events: a new **After power loss** card shows whether the VPU turns back on by itself after a power cut. If the BIOS is set to stay off, it tells you where to change it. Pulse can read this on HP VPUs; on other models it says it can't check rather than showing a pass.
 - ScoreConnect: when the console's data doesn't match ScoreConnect's setup, **Find the code** tries each of the brand's codes for the sport the school names (about 11 seconds a code), stops at the one that reads, and puts the old setup back if none does.

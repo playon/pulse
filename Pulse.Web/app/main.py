@@ -5150,6 +5150,10 @@ def _sc3_call():
                 # SC III is set to Daktronics 3000 Football; the console sends
                 # Daktronics Football, so Find the code has something to find.
                 _demo_sc3.console_sport = "Daktronics Football"
+            elif _demo_sc_scenario() == "no-data":
+                # A console of another brand reads as no data at all: Find the
+                # code runs, nothing reads, and it ends "no data reached".
+                _demo_sc3.console_sport = "Nevco Football"
         return _demo_sc3
     return sc3_client.http_transport(sc3_base_url())
 
@@ -5598,9 +5602,11 @@ async def api_sc3_restore(request: Request):
 
 
 # ── Find the code: try each sport code until SC III reads the console ──
-# Offered only while SC III says the console's data is present but not in the
-# format its setup expects (the wrong-format finding). One scan at a time;
-# setup saves wait for it. The scan loop is sc3_client.run_scan.
+# Offered from the wrong-format finding and from Change setup, whatever the
+# console is doing. A console SC III already reads is only scanned once the
+# tech confirms (force), since each code tried stops the score for a few
+# seconds. One scan at a time; setup saves wait for it. The scan loop is
+# sc3_client.run_scan.
 
 import threading as _threading  # noqa: E402
 from datetime import datetime as _scan_dt  # noqa: E402
@@ -5639,20 +5645,28 @@ def _sc3_scan_plan(call):
 
 @app.get("/api/scoreconnect/sc3/scan")
 async def api_sc3_scan_get(plan: int = 0):
-    """The running or last scan; with ?plan=1 also what a new scan would try."""
+    """The running or last scan; with ?plan=1 also what a new scan would try
+    and what the console is doing now (reading | wrong | none)."""
     out = {"error": False, "scan": _sc3_scan_view()}
     if plan and not _sc3_scanning():
+        call = _sc3_call()
         try:
-            out["plan"], _cur = await asyncio.to_thread(_sc3_scan_plan, _sc3_call())
+            out["plan"], _cur = await asyncio.to_thread(_sc3_scan_plan, call)
         except sc3_client.Sc3Error as e:
             return {"error": True, "message": str(e), "scan": out["scan"]}
+        try:
+            verdict, has_data, _busy = await asyncio.to_thread(sc3_client.read_scan_status, call)
+            out["console"] = sc3_client.scan_start_state(verdict, has_data)
+        except sc3_client.Sc3Error:
+            out["console"] = None  # unknown: the form says nothing either way
     return out
 
 
 @app.post("/api/scoreconnect/sc3/scan")
 async def api_sc3_scan_start(request: Request):
-    """Start a scan. Body {confirm: true, sport: "football" | null}; null tries
-    every code the vendor has."""
+    """Start a scan. Body {confirm: true, sport: "football" | null, force: bool};
+    null tries every code the vendor has. force is the tech's confirmation to
+    scan a console SC III already reads."""
     global _sc3_scan
     body = await request.json()
     if not isinstance(body, dict) or body.get("confirm") is not True:
@@ -5665,10 +5679,12 @@ async def api_sc3_scan_start(request: Request):
     _sc3_scan = {"state": "starting"}
     call = _sc3_call()
     try:
-        verdict, _d, _b = await asyncio.to_thread(sc3_client.read_scan_status, call)
-        if verdict == "correct":
+        verdict, has_data, _b = await asyncio.to_thread(sc3_client.read_scan_status, call)
+        started_from = sc3_client.scan_start_state(verdict, has_data)
+        refusal = sc3_client.scan_start_refusal(started_from, body.get("force") is True)
+        if refusal:
             _sc3_scan = {"state": "idle"}
-            return {"error": True, "message": "ScoreConnect is already reading the console, so there is no code to find."}
+            return {"error": True, "alreadyReading": True, "message": refusal}
         plan, cur = await asyncio.to_thread(_sc3_scan_plan, call)
         if not plan:
             _sc3_scan = {"state": "idle"}
@@ -5731,7 +5747,10 @@ async def api_sc3_scan_start(request: Request):
                  "original": cur.get("vendorSportName"), "total": len(candidates), "tried": [],
                  "current": None, "found": None, "restored": None, "message": None,
                  "secondsPerCode": sc3_client.SCAN_SECONDS_PER_CODE,
-                 "startedAt": _scan_dt.now().isoformat(timespec="seconds"), "earlierPrevious": bool(earlier_previous)}
+                 "startedAt": _scan_dt.now().isoformat(timespec="seconds"), "earlierPrevious": bool(earlier_previous),
+                 # reading | wrong | none: a scan that began with no data ends
+                 # "lost" because nothing ever arrived, not because it stopped.
+                 "startedFrom": started_from}
     asyncio.create_task(asyncio.to_thread(work))
     return {"error": False, "scan": _sc3_scan_view()}
 

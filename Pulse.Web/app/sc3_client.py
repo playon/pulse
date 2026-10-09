@@ -571,6 +571,25 @@ def read_scan_status(call):
             bool(str(d.get("data") or "").strip()), bool(d.get("botConfigurationInProgress")))
 
 
+def scan_start_state(verdict, has_data):
+    """What the console is doing as a scan is asked for: "reading" (SC III
+    reads it), "wrong" (data, not the format the setup expects) or "none"
+    (no data SC III can see). Same reading as _await_verdict: "correct format"
+    with an empty data field reads nothing."""
+    if verdict == "correct":
+        return "reading" if has_data else "none"
+    return "wrong" if verdict == "wrong" else "none"
+
+
+def scan_start_refusal(state, force):
+    """The reason not to start a scan, or None. A console SC III already reads
+    is only scanned when the tech confirmed it (force): every code tried stops
+    the score updating for a few seconds."""
+    if state == "reading" and not force:
+        return "ScoreConnect is already reading the console. Confirm to try other codes anyway."
+    return None
+
+
 def _await_verdict(read_status, sleep, clock, wait_s):
     deadline = clock() + wait_s
     last = None
