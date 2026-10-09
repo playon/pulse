@@ -8195,7 +8195,7 @@ function installSc3() {
           </div>
           ${anyMissing ? `<div class="sc3-cfg-warn">Pulse could not read every setting from ${esc(legacyName)} — open the ScoreConnect app and note the missing ones before continuing.</div>` : ""}
         </div>
-        <div class="text-pulse-muted" style="font-size:0.8rem;line-height:1.5;margin-top:0.75rem">
+        <div class="text-pulse-muted" style="font-size:var(--fs-small);line-height:1.5;margin-top:0.75rem">
           The install runs in the background and progress shows here — no installer window
           opens. One Windows administrator prompt appears on the VPU desktop; approve it to continue.
           Takes about 2–3 minutes.
@@ -8319,9 +8319,9 @@ function _renderSc3Progress(status) {
         <div class="sc3-bar-track">
           <div class="sc3-bar-fill" style="width:${pct}%;background:${barColor}"></div>
         </div>
-        ${complete ? `<div class="status-pass" style="display:flex;align-items:center;gap:0.4rem;font-size:0.85rem;margin-top:0.75rem">${svgIcon("check", 14)} <span>${esc(msg || "ScoreConnect III is installed and running.")}</span></div>` : ""}
-        ${err ? `<div class="status-fail" style="font-size:0.8rem;margin-top:0.75rem">${esc(err)}</div>` : ""}
-        ${stale && !err ? `<div class="status-fail" style="font-size:0.8rem;margin-top:0.75rem">The install appears stalled — no update from the installer in over 30 seconds.</div>` : ""}
+        ${complete ? `<div class="status-pass" style="display:flex;align-items:center;gap:0.4rem;font-size:var(--fs-body);margin-top:0.75rem">${svgIcon("check", 14)} <span>${esc(msg || "ScoreConnect III is installed and running.")}</span></div>` : ""}
+        ${err ? `<div class="status-fail" style="font-size:var(--fs-small);margin-top:0.75rem">${esc(err)}</div>` : ""}
+        ${stale && !err ? `<div class="status-fail" style="font-size:var(--fs-small);margin-top:0.75rem">The install appears stalled — no update from the installer in over 30 seconds.</div>` : ""}
         ${status.logTail ? `
         <details class="sc3-log" ${failed ? "open" : ""}>
           <summary>Install log</summary>
@@ -8785,7 +8785,7 @@ function renderScoreConnect() {
           <div class="sc-period-label" id="sc3-period">${esc(_sc3PeriodText(rtdShown, config.sport))}</div>
           <div class="sc-cap sc-cap-gap">Time</div>
           <div class="sc-clock" id="sc3-clock">${rtdShown && rtdShown.clock ? esc(rtdShown.clock) : "--:--"}</div>
-          <div id="sc3-live-badge" style="margin-top:0.4rem;font-size:0.62rem;letter-spacing:0.1em;color:${dataReceiving ? "var(--c-board-ok)" : "var(--c-board-bad)"};display:flex;align-items:center;justify-content:center;gap:0.3rem">
+          <div id="sc3-live-badge" style="margin-top:0.4rem;font-size:var(--fs-micro);letter-spacing:0.1em;color:${dataReceiving ? "var(--c-board-ok)" : "var(--c-board-bad)"};display:flex;align-items:center;justify-content:center;gap:0.3rem">
             ${_sc3StageBadge(dataReceiving ? "live" : "disconnected", 0)}
           </div>
         </div>
@@ -8829,7 +8829,7 @@ function renderScoreConnect() {
         <div style="margin-top:2px;color:var(--c-accent-blue)">${svgIcon("refresh", 18)}</div>
         <div style="flex:1">
           <div class="font-semibold" style="margin-bottom:0.25rem">Upgrade to ScoreConnect III</div>
-          <div class="text-pulse-muted" style="font-size:0.8rem;line-height:1.5">
+          <div class="text-pulse-muted" style="font-size:var(--fs-small);line-height:1.5">
             ScoreConnect III is the preferred version. It provides live scoreboard data, parsed
             scores, and live status, without interfering with the data stream.
           </div>
@@ -8838,7 +8838,7 @@ function renderScoreConnect() {
               ${svgIcon("download", 14)} Install ScoreConnect III
             </button>
           </div>
-          <div class="text-pulse-muted" style="font-size:0.72rem;margin-top:0.5rem">
+          <div class="text-pulse-muted" style="font-size:var(--fs-meta);margin-top:0.5rem">
             The official installer runs in the background with progress shown here in Pulse.
             One Windows administrator prompt appears on the VPU desktop.
           </div>
@@ -8860,7 +8860,7 @@ function renderScoreConnect() {
         ${kvRow("UID", sc2.uid)}
         ${sc2.botNumber ? kvRow("Bot Number", sc2.botNumber) : ""}
         ${sc2.vendor ? (sc2.vendorIsCode
-          ? kvRowHtml("Vendor", `${esc(String(sc2.vendor))} <span class="text-pulse-muted" style="font-size:0.75rem">(code)</span>`)
+          ? kvRowHtml("Vendor", `${esc(String(sc2.vendor))} <span class="text-pulse-muted" style="font-size:var(--fs-meta)">(code)</span>`)
           : kvRow("Vendor", sc2.vendor)) : ""}
         ${sc2.sport ? kvRow("Sport Code", sc2.sport) : ""}
         ${sc2.license ? kvRow("License Expires", sc2.license) : ""}
@@ -8871,7 +8871,7 @@ function renderScoreConnect() {
       </div>
       ${sc2.networkIfaces && sc2.networkIfaces.length ? `
       <div style="margin-top:0.75rem;padding-top:0.75rem;border-top:1px solid var(--c-border)">
-        <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--c-muted);margin-bottom:0.5rem">Network Interfaces</div>
+        <div style="font-size:var(--fs-micro);text-transform:uppercase;letter-spacing:0.05em;color:var(--c-muted);margin-bottom:0.5rem">Network Interfaces</div>
         <div class="kv-grid">
           ${sc2.networkIfaces.map(n => kvRow(n.name, n.address)).join("")}
         </div>
@@ -10586,7 +10586,7 @@ function _scConfigHistoryHtml(entries, current, bare) {
   if (bare) return note + items;
   return '<div class="card mt-4">' +
     sectionTitle("clock", "Previous Configurations") +
-    '<div class="text-pulse-muted" style="font-size:0.75rem;margin:-0.25rem 0 0.6rem;line-height:1.5">' +
+    '<div class="text-pulse-muted" style="font-size:var(--fs-meta);margin:-0.25rem 0 0.6rem;line-height:1.5">' +
       "Recorded automatically each time the scoreboard configuration changes while data is confirmed flowing. " +
       "Bot numbers are best-effort. ScoreConnect III can report a stale number until its service restarts." +
     "</div>" + items + "</div>";
@@ -10647,7 +10647,7 @@ function _fiHistoryHtml(runs) {
       return "<tr><td><strong>" + esc(h.phase || "") + "</strong></td>" +
         '<td class="font-mono">' + esc(h.speed || "") + "</td>" +
         '<td><span class="' + sc + '">' + esc(h.severity || "") + "</span></td>" +
-        '<td class="text-pulse-muted" style="font-size:0.78rem">' + esc(h.verdict || "") + "</td></tr>";
+        '<td class="text-pulse-muted" style="font-size:var(--fs-small)">' + esc(h.verdict || "") + "</td></tr>";
     }).join("");
     return '<details class="fi-hist-run">' +
       '<summary class="fi-hist-summary">' +
@@ -10750,12 +10750,12 @@ function renderFaultIsolator() {
     var rows = _fi.history.map(function(h) {
       var sc = h.severity === "Pass" ? "status-pass" : h.severity === "Fail" ? "status-fail" : "status-info";
       return "<tr>" +
-        '<td class="font-mono" style="font-size:0.7rem;color:var(--c-dim)">' + esc(h.ts) + "</td>" +
+        '<td class="font-mono" style="font-size:var(--fs-micro);color:var(--c-dim)">' + esc(h.ts) + "</td>" +
         '<td><span class="' + sc + '">' + esc(h.severity) + "</span></td>" +
         "<td><strong>" + esc(h.phase) + "</strong></td>" +
-        '<td class="text-pulse-muted" style="font-size:0.78rem">' + esc(h.config) + "</td>" +
-        '<td class="font-mono" style="font-size:0.78rem">' + esc(h.speed) + "</td>" +
-        '<td class="text-pulse-muted" style="font-size:0.78rem">' + esc(h.verdict) + "</td>" +
+        '<td class="text-pulse-muted" style="font-size:var(--fs-small)">' + esc(h.config) + "</td>" +
+        '<td class="font-mono" style="font-size:var(--fs-small)">' + esc(h.speed) + "</td>" +
+        '<td class="text-pulse-muted" style="font-size:var(--fs-small)">' + esc(h.verdict) + "</td>" +
         "</tr>";
     }).join("");
     return '<div class="mt-4">' +

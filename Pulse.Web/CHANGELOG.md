@@ -25,6 +25,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 
 ### Changed
 - Plain words instead of hover-only hints: "ESR" now reads "Event success rate", software warnings (like unsupported antivirus) show their reason on the page, and Camera Connectivity says why Get Camera Frames is switched off while the Pixellot video software is running. "Admin CGI" is now "each camera's admin page", and the disk columns read "Wear used" and "Hours on".
+- Small text is easier to read over remote desktop. Nothing in Pulse is smaller than 11 pixels any more, and the many near-identical text sizes are now five consistent ones.
 
 ## [1.4.0] - 2026-10-08
 
