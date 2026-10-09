@@ -1822,15 +1822,15 @@ function _ceEsrChip(cloud) {
   const esr = cloud.esr;
   if (!esr) {
     const why = cloud.errors && cloud.errors.events ? "couldn't load events" : "unavailable";
-    return `<span title="Pulse could not load this school's event history, so it could not count ESR.">${severityChip("muted", `ESR ${why}`)}</span>`;
+    return `<span title="Pulse could not load this school's event history, so it could not work out the event success rate.">${severityChip("muted", `Event success rate ${why}`)}</span>`;
   }
   if (!esr.counted) {
-    return `<span title="No past public events with a known result yet.">${severityChip("muted", "ESR: no past events")}</span>`;
+    return `<span title="No past public events with a known result yet.">${severityChip("muted", "Event success rate: no past events")}</span>`;
   }
   const pct = Math.round(esr.rate * 100);
   const tip = `Event Success Rate: ${esr.succeeded} of the last ${esr.counted} public events went on air. ` +
     "Unlisted and test events are not counted. Pulse counts this from the NFHS events API, so it can differ slightly from the Sigma ESR dashboard.";
-  return `<span title="${esc(tip)}">${severityChip(esr.rate >= 0.9 ? "ok" : "warning", `ESR ${pct}% (${esr.succeeded}/${esr.counted})`)}</span>`;
+  return `<span title="${esc(tip)}">${severityChip(esr.rate >= 0.9 ? "ok" : "warning", `Event success rate ${pct}% (${esr.succeeded} of ${esr.counted})`)}</span>`;
 }
 
 function renderCloudEvents() {
@@ -2075,7 +2075,7 @@ function renderCameraHardware() {
   const cards = entries.map((e) => _camHardwareCard(e.cam, e.port)).join("");
   const empty = `<div class="cam-no-detect">No cameras detected on any active port.</div>`;
   const noCgiNote = (entries.length && !anyCgi)
-    ? `<div class="cam-connecting-note">${svgIcon("refresh", 12)} Probing camera heads (Admin CGI)… identity-only data shown until probes complete. Use Refresh to force a re-probe.</div>`
+    ? `<div class="cam-connecting-note">${svgIcon("refresh", 12)} Checking each camera's admin page… only identity details are shown until the checks finish. Use Refresh to check again.</div>`
     : "";
 
   $page().innerHTML = `
@@ -3562,7 +3562,7 @@ function renderApplications() {
               const c = s.concern;
               const rowCls = c ? ` class="sw-row-${esc(c.severity)}"` : "";
               const concernCell = hasConcerns ? `<td>${c
-                ? `<span class="sw-concern-badge sw-concern-${esc(c.severity)}" title="${esc(c.reason)}">${esc(c.shortLabel || c.label)}</span>`
+                ? `<span class="sw-concern-badge sw-concern-${esc(c.severity)}">${esc(c.shortLabel || c.label)}</span><div class="sw-concern-reason">${esc(c.reason)}</div>`
                 : `<span class="text-pulse-muted text-xs">—</span>`}</td>` : "";
               return `<tr${rowCls}>
                 <td>${esc(s.displayName)}</td>
@@ -6378,7 +6378,7 @@ function renderCameras() {
         ${svgIcon("refresh", 14)} Refresh
       </button>
       <button id="cam-frames-btn" class="btn-outline btn-ol-blue" onclick="_camVerifyVideo()"${data.vpuRunning ? " disabled" : ""}
-        title="${data.vpuRunning ? "Disabled while the Pixellot capture engine (vpu.exe) is running, because capturing frames could interfere with the live stream." : "Grabs a single frame from each camera to confirm it is streaming and show what it sees."}">
+        title="Grabs a single frame from each camera to confirm it is streaming and show what it sees.">
         ${svgIcon("camera", 14)} Get Camera Frames
       </button>
       <button class="btn-outline btn-ol-blue" onclick="navigate('fault-isolator')">
@@ -6386,6 +6386,7 @@ function renderCameras() {
       </button>`
     )}
 
+    ${data.vpuRunning ? `<div class="cam-frames-note">Get Camera Frames is off while the Pixellot video software (vpu.exe) is running, because grabbing frames could interrupt the live stream.</div>` : ""}
     <div class="cam-page-body">
       <div id="cam-findings-wrap">${_camFindingsHtml(findings)}</div>
 
@@ -6989,7 +6990,7 @@ function renderDiskHealth() {
     <div class="card mt-4">
       ${sectionTitle("hdd", "Physical Disks")}
       <table class="data-table"><thead><tr>
-        <th>Name</th><th>Type</th><th>Bus</th><th>Size</th><th title="Percentage of the SSD's rated write life used. From the drive's SMART/reliability counters.">Wear</th><th>Temp</th><th title="Total powered-on hours">Power-On</th><th>Health</th>
+        <th>Name</th><th>Type</th><th>Bus</th><th>Size</th><th title="Percentage of the SSD's rated write life used. From the drive's SMART/reliability counters.">Wear used</th><th>Temp</th><th title="Total powered-on hours">Hours on</th><th>Health</th>
       </tr></thead><tbody>
       ${physical.map(d => {
         const s = d.smart || {};

@@ -23,6 +23,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 
 ## [Unreleased]
 
+### Changed
+- Plain words instead of hover-only hints: "ESR" now reads "Event success rate", software warnings (like unsupported antivirus) show their reason on the page, and Camera Connectivity says why Get Camera Frames is switched off while the Pixellot video software is running. "Admin CGI" is now "each camera's admin page", and the disk columns read "Wear used" and "Hours on".
+
 ## [1.4.0] - 2026-10-08
 
 ### Changed
