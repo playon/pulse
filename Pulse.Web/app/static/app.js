@@ -8693,7 +8693,7 @@ function renderScoreConnect() {
     // chain still draw, since that is exactly when the agent needs them.
     _sccReset();
     $page().innerHTML = '<div id="scc-findings-wrap">' + _sccFindingsTopHtml(data) + '</div>'
-      + scChainHtml(data)
+      + '<div class="scc-stage-wrap"><div class="scc-stage is-solo">' + scChainHtml(data) + '</div></div>'
       + errorBox(data.message || (typeof data.error === "string" ? data.error : null))
       + '<div id="sc-config-history-wrap">' + (_scHistCache ? _scConfigHistoryHtml(_scHistCache, null) : "") + "</div>";
     _scLoadConfigHistory(null);
@@ -8764,8 +8764,12 @@ function renderScoreConnect() {
 
     <!-- Findings first, like every other tab; then the physical chain -->
     <div id="scc-findings-wrap">${_sccFindingsTopHtml(data)}</div>
-    ${scChainHtml(data)}
 
+    <!-- The stage: the live score is the hero (first, large) and the
+         scoreboard connection is its sidekick (a rail beside it on wide
+         windows, below it on narrow ones). Without a readable score the
+         connection simply takes the whole width. -->
+    <div class="scc-stage-wrap"><div class="scc-stage${showScoreboard ? "" : " is-solo"}">
     <!-- Live Scoreboard — shown whenever the parser can read the feed -->
     ${showScoreboard ? `
     <div class="sc-board sc-board-hero" id="sc3-hero-board">
@@ -8805,12 +8809,17 @@ function renderScoreConnect() {
           <div class="sc-stat-val" id="sc3-clockstate">${esc(_sc3ClockStateText(rtdShown))}</div>
         </div>
       </div>
+      <!-- What ScoreConnect is reading. The hero is the score; this is the
+           setup behind it, beside the picture of the connection that feeds it. -->
+      ${_sc3PlateHtml(config)}
     </div>
     ` : isDetected ? "" /* No score to show: the findings and the chain above
        already say why, and a black "No Data" block only repeated them. It
        comes back on its own once a readable feed arrives (promotion in the
        live poll). Data Pulse cannot read opens the raw data in the details. */
     : !(sc2 && sc2.reachable) ? `<div class="sc-board sc-board-hero sc-board-empty">${esc(_scNoServiceText(data))}</div>` : ""}
+    ${scChainHtml(data)}
+    </div></div>
 
     <!-- ScoreConnect → SC III Upgrade Prompt -->
     ${sc2 && sc2.reachable && !isDetected ? `
@@ -8907,6 +8916,7 @@ function renderScoreConnect() {
   // receiving data, so the hero updates the moment the feed starts. Safe:
   // stateless REST, no SC II contact, no WMI.
   if (isDetected) {
+    _sccWakeStageNow();
     _sc3StartLivePoll(config.vendor, config.sport, showScoreboard);
   } else {
     _sc3StopLivePoll();
@@ -9818,6 +9828,7 @@ function _sccScanPoll() {
     // tab so the chain and findings describe what it now reports.
     _scc.scan.phase = "done";
     _scc.scan.stopping = false;
+    if (_scc.scan.scan && _scc.scan.scan.state === "found" && !document.getElementById("sc3-hero-board")) _sccWakeStage = true;
     _scc.drops = 0; _scc.wasLive = false; _scc.flow = null; _scc.status = null;
     _scc.watchUntil = Date.now() + 45000;
     dataCache.scoreconnect = null;
@@ -9905,7 +9916,7 @@ function _sccScanHtml(data) {
     var d = cached("scoreconnect");
     var flowing = d && _sccSignals(d).flow === "live";
     body = '<p class="scc-status scc-status-ok">' + svgIcon("check", 16) + '<span>Found it. ScoreConnect reads the console on ' + esc(_sccShortSport(sc.vendorName, (sc.found || {}).name)) + '.</span></p>' +
-      '<p class="scc-note">' + (flowing ? "Check the score below matches the console." : "Waiting for the score to show below. Then check it matches the console.") +
+      '<p class="scc-note">' + (flowing ? "Check the score above matches the console." : "Waiting for the score to show above. Then check it matches the console.") +
       ' To go back, Change setup has Restore ' + esc(orig) + '.</p>' + _sccScanTriedLine(sc) +
       '<div class="scc-picker-foot">' + close + '</div>';
   } else if (sc.state === "none") {
@@ -9949,7 +9960,7 @@ function scChainHtml(data) {
   // OCR reads the score: ScoreConnect is optional, so the chain folds away
   // behind one line, still one click from view for a venue that has both.
   if (src.source === "ocr" && src.ok && !_scc.showOnOcr) {
-    return '<div class="card scc scc-collapsed"><p class="scc-status scc-status-ok">' + svgIcon("check", 16) + '<span>' + esc(copy.ocr) + '</span></p>' +
+    return '<div class="card scc scc-rail scc-collapsed"><p class="scc-status scc-status-ok">' + svgIcon("check", 16) + '<span>' + esc(copy.ocr) + '</span></p>' +
       (anySC ? '<button type="button" class="btn-outline btn-ol-muted scc-show" onclick="_scc.showOnOcr=true;renderScoreConnect()">Show the ScoreConnect connection</button>' : "") + '</div>';
   }
   if (!anySC && !(data.error && data.scoreLinkConnected != null)) return "";
@@ -9969,7 +9980,7 @@ function _sccBodyHtml(data) {
   var head = '<div class="scc-head"><h2 class="scc-title" id="scc-title">Scoreboard connection</h2>' +
     (data.reachable ? '<button type="button" class="btn-outline btn-ol-blue" onclick="sccTogglePanel(\'setup\')" aria-controls="scc-panel" aria-expanded="' + (_scc.panel === "setup") + '">' + svgIcon("settings", 14) + ' Change setup</button>' : "") +
     '</div>';
-  var chain = '<section class="card scc" aria-labelledby="scc-title">' + head + _sccStatusHtml(data, sig, breaks) +
+  var chain = '<section class="card scc scc-rail" aria-labelledby="scc-title">' + head + _sccStatusHtml(data, sig, breaks) +
     '<div class="scc-track" role="list" aria-label="Scoreboard connection, from the VPU to the console">' + _sccTrackHtml(data, sig, parts, breaks) + '</div></section>';
   var ask = _sccAskHtml(data) + _sccSymptomHtml(data, parts);
   var panel = _sccPanelHtml(data, parts);
@@ -9979,7 +9990,7 @@ function _sccBodyHtml(data) {
   // points at it) and takes no room while empty.
   return chain +
     '<div id="scc-panel" class="scc-panel-slot">' + (panel ? '<section class="card scc-card scc-card-panel">' + panel + '</section>' : "") + '</div>' +
-    (ask ? '<section class="card scc-card">' + ask + '</section>' : "");
+    (ask ? '<section class="card scc-card scc-card-ask">' + ask + '</section>' : "");
 }
 
 // Redraw the chain body. `force` for user actions; live ticks redraw only
@@ -9995,7 +10006,9 @@ function _sccRender(force) {
     if (next === _scc.sig) return;
   }
   var focusId = document.activeElement && document.activeElement.id;
+  var before = _sccLinkStates(body);
   body.innerHTML = _sccBodyHtml(d);
+  _sccRingChanged(body, before);
   var top = document.getElementById("scc-findings-wrap");
   if (top) top.innerHTML = _sccFindingsTopHtml(d);
   if (focusId) { var el = document.getElementById(focusId); if (el) el.focus(); }
@@ -10099,14 +10112,15 @@ function _sc3TeamName(name) {
   return /^(home|visitor|guest|away)$/i.test(n) ? "" : n;
 }
 
-// Status dot: green + flashing when active, grey + static when off. Pass an
-// explicit `color` (e.g. amber) to override — used for the out-of-date warning
-// so the dot color matches the message instead of staying green.
+// Status dot: green when active, grey when off, both steady. Pass an explicit
+// `color` (e.g. amber) to override — used for the out-of-date warning so the
+// dot color matches the message instead of staying green. It used to pulse
+// forever; over LogMeIn that repaints the tab for no information (the words
+// beside it say Running / Not responding).
 function _scDot(on, color) {
   var c = color || (on ? "var(--c-accent-green)" : "var(--c-dim)");
-  var anim = on ? "animation:pulse-live 1.4s ease-in-out infinite;" : "";
   return '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;'
-    + 'background:' + c + ';' + anim + 'margin-right:7px;vertical-align:middle"></span>';
+    + 'background:' + c + ';margin-right:7px;vertical-align:middle"></span>';
 }
 
 // ScoreConnect III "Status" row cell. The service is Running unless the live
@@ -10128,15 +10142,17 @@ function _sc3StageBadge(stage, secs) {
   // board in BOTH themes, so a light-theme accent here renders dark-on-black
   // (the old --c-accent-green was 3.7:1 in light mode).
   var map = {
-    live:         { c: "var(--c-board-ok)",     flash: true,  txt: "LIVE" },
-    stale:        { c: "var(--c-board-accent)", flash: true,  txt: "STALE · " + secs + "s" },
-    disconnected: { c: "var(--c-board-bad)",    flash: false, txt: "NO SIGNAL" },
-    offline:      { c: "var(--c-board-muted)",  flash: false, txt: "ScoreConnect III Offline" }
+    live:         { c: "var(--c-board-ok)",     txt: "LIVE" },
+    stale:        { c: "var(--c-board-accent)", txt: "STALE · " + secs + "s" },
+    disconnected: { c: "var(--c-board-bad)",    txt: "NO SIGNAL" },
+    offline:      { c: "var(--c-board-muted)",  txt: "ScoreConnect III Offline" }
   };
   var s = map[stage] || map.offline;
-  var anim = s.flash ? "animation:pulse-live 1.4s ease-in-out infinite;" : "";
+  // A steady dot: the word beside it says LIVE / STALE, and a dot that pulses
+  // forever repaints the board for as long as the tab is open, which over
+  // LogMeIn is bandwidth for no information.
   return '<span style="width:6px;height:6px;border-radius:50%;background:' + s.c + ';'
-    + 'display:inline-block;' + anim + '"></span>' + s.txt;
+    + 'display:inline-block;"></span>' + s.txt;
 }
 // Colour for #sc3-live-badge, which lives on the dark board — board tokens for
 // the same reason as _sc3StageBadge above.
@@ -10151,7 +10167,7 @@ function _sc3DataStatusHtml(stage, secs, statusText) {
     return _scDot(true) + '<span class="status-pass">' + esc(statusText || "Data is present and in the correct format") + '</span>';
   }
   if (stage === "stale") {
-    return '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--c-accent-amber);animation:pulse-live 1.4s ease-in-out infinite;margin-right:7px;vertical-align:middle"></span>'
+    return '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--c-accent-amber);margin-right:7px;vertical-align:middle"></span>'
       + '<span style="color:var(--c-accent-amber)">Data stale, no new packets (disconnecting in ' + secs + 's)</span>';
   }
   if (stage === "offline") {
@@ -10277,6 +10293,7 @@ function _sc3StartLivePoll(vendor, sport, showScoreboard) {
     if (!showScoreboard && st.stage === "live" && live && live.rawData && parseRtdScores(live.rawData, vendor, sport)) {
       var cd = cached("scoreconnect");
       if (cd) { cd.rawData = live.rawData; cd.dataStatus = live.dataStatus; }
+      _sccWakeStage = true;
       renderScoreConnect();
       return;
     }
@@ -10289,8 +10306,8 @@ function _sc3StartLivePoll(vendor, sport, showScoreboard) {
       if (p) {
         _sc3SetText("sc3-clock", p.clock || "--:--");
         _sc3SetText("sc3-period", _sc3PeriodText(p, sport));
-        if (p.guestScore != null) _sc3SetText("sc3-guest", String(p.guestScore));
-        if (p.homeScore != null)  _sc3SetText("sc3-home", String(p.homeScore));
+        if (p.guestScore != null) _sc3SetScore("sc3-guest", String(p.guestScore));
+        if (p.homeScore != null)  _sc3SetScore("sc3-home", String(p.homeScore));
         _sc3SetText("sc3-down", _sc3DownText(p));
         _sc3SetText("sc3-ballon", _sc3BallOnText(p));
         _sc3SetText("sc3-clockstate", _sc3ClockStateText(p));
@@ -10333,9 +10350,82 @@ function _sc3LiveTarget() {
   return document.getElementById("sc3-hero-board") || document.getElementById("sc-chain") || document.getElementById("sc3-details");
 }
 
+// The stage's footer plate: vendor, sport and connection ScoreConnect III is
+// set to read, as the details card lists them. Nothing when none is set.
+function _sc3PlateHtml(config) {
+  var setup = [config.vendor, _sccShortSport(config.vendor, config.sport), config.vendorConfigurationName].filter(Boolean).join(" · ");
+  return setup ? '<div class="sc-plate"><span class="sc-cap">Reading</span><span class="sc-plate-val">' + esc(setup) + '</span></div>' : "";
+}
+
 function _sc3SetText(id, text) {
   var el = document.getElementById(id);
   if (el && el.textContent !== text) el.textContent = text;
+}
+
+// ── Motion on the ScoreConnect tab ───────────────────────────
+// Pulse is mostly used over LogMeIn, which pays for every repainted pixel, so
+// nothing here moves at rest. Three one-shot moments, each fired by a change
+// in the data and each over in under a second: a score rolls when it changes,
+// a link in the connection rings when its status flips, and the stage wakes
+// when the score first arrives (including after Find the code succeeds).
+// All of it is skipped under prefers-reduced-motion.
+var _SCC_EASE_OUT = "cubic-bezier(0.16, 1, 0.3, 1)";
+var _sccWakeStage = false;   // set when a score is about to appear for the first time
+
+function _sccMotionOk() {
+  try { return !window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (e) { return true; }
+}
+
+// A score that changes: the new digits rise into place and settle from the
+// board's accent to their own colour. The first fill from "—" is not a change.
+function _sc3SetScore(id, text) {
+  var el = document.getElementById(id);
+  if (!el || el.textContent === text) return;
+  var had = /\d/.test(el.textContent);
+  el.textContent = text;
+  if (!had || !el.animate || !_sccMotionOk()) return;
+  var rest = getComputedStyle(el).color;
+  el.animate([
+    { transform: "translateY(0.3em)", opacity: 0, color: "var(--c-board-accent)" },
+    { transform: "none", opacity: 1, color: "var(--c-board-accent)", offset: 0.35 },
+    { transform: "none", opacity: 1, color: rest }
+  ], { duration: 900, easing: _SCC_EASE_OUT });
+}
+
+// The score appeared where there was none: the stage comes up once.
+function _sccWakeStageNow() {
+  if (!_sccWakeStage) return;
+  _sccWakeStage = false;
+  var board = document.getElementById("sc3-hero-board");
+  if (!board || !board.animate || !_sccMotionOk()) return;
+  board.animate([
+    { opacity: 0, transform: "translateY(10px) scale(0.985)", filter: "brightness(1.7)" },
+    { opacity: 1, transform: "none", filter: "none" }
+  ], { duration: 700, easing: _SCC_EASE_OUT });
+}
+
+// Which links of the connection are in which state, ignoring the open panel.
+function _sccLinkStates(root) {
+  var out = {};
+  root.querySelectorAll(".scc-node").forEach(function(n) {
+    if (n.id) out[n.id] = n.className.replace(/\bis-open\b/g, "").replace(/\s+/g, " ").trim();
+  });
+  return out;
+}
+
+// A link whose state changed rings once in the colour of its new state.
+function _sccRingChanged(root, before) {
+  if (!_sccMotionOk()) return;
+  var css = getComputedStyle(document.documentElement);
+  var now = _sccLinkStates(root);
+  Object.keys(now).forEach(function(id) {
+    if (before[id] == null || before[id] === now[id]) return;
+    var el = document.getElementById(id);
+    if (!el || !el.animate) return;
+    var c = css.getPropertyValue(/\bis-break\b/.test(now[id]) ? "--c-accent-red" : /\bis-lit\b/.test(now[id]) ? "--c-accent-blue" : "--c-accent-green").trim();
+    if (!c) return;
+    el.animate([{ boxShadow: "0 0 0 4px " + c }, { boxShadow: "0 0 0 0 transparent" }], { duration: 900, easing: _SCC_EASE_OUT });
+  });
 }
 
 // ── ScoreConnect configuration history ───────────────────────
