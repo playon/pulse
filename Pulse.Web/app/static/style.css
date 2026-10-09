@@ -1793,8 +1793,15 @@ html.dark .channel-moved-banner {
     font-weight: 700;
     letter-spacing: 0.03em;
     text-transform: uppercase;
-    cursor: help;
     white-space: nowrap;
+}
+.sw-concern-reason {
+    margin-top: 4px;
+    font-size: 0.75rem;
+    line-height: 1.4;
+    color: var(--c-muted);
+    white-space: normal;
+    max-width: 38ch;
 }
 .sw-concern-critical { background: var(--c-pill-critical); color: var(--c-on-accent); }
 .sw-concern-warning  { background: var(--c-pill-warning);  color: var(--c-on-accent); }
@@ -2619,6 +2626,12 @@ details[open] > .cam-details-btn::before { transform: rotate(90deg); }
     font-size: var(--fs-micro);
     font-weight: 500;
     color: var(--c-accent-blue);
+}
+.cam-frames-note {
+    margin: 0 0 12px;
+    font-size: 0.75rem;
+    line-height: 1.4;
+    color: var(--c-muted);
 }
 .cam-connecting-note svg { animation: cam-spin 1.2s linear infinite; }
 @keyframes cam-spin { to { transform: rotate(360deg); } }
