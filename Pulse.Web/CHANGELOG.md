@@ -24,6 +24,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 ## [Unreleased]
 
 ### Added
+- Search from anywhere: press / (or Ctrl+K) or click "Search tabs and findings" at the top of the left menu to jump to any tab or any current finding by typing a few letters. "Next problem" at the top of the list takes you straight to the worst flagged tab. Use the arrow keys and Enter, and Esc to close.
 - A line under the page title on every tab (except the Dashboard) shows the unit's stream-readiness verdict, for example "Nothing is stopping tonight's game, 2 risks tonight", with a button back to the Dashboard. If the Dashboard check hasn't run, failed, or is more than 15 minutes old, the line says so instead of showing a stale verdict.
 
 ### Changed
