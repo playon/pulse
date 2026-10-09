@@ -172,16 +172,38 @@ function updateNav() {
 // findings, so the sidebar doubles as the at-a-glance health map (replaces the
 // old Subsystems panel). Only warning/critical show an icon — healthy and
 // non-subsystem links (Dashboard, Settings, …) show nothing.
-function updateNavHealth() {
-  const health = {};
+// Lane -> tone, from the same rules the Dashboard uses for its findings
+// (_dashToneFn), so the sidebar, the palette and the Dashboard say the same
+// thing about the same problem. "Worth knowing" and "Fix soon" findings do not
+// flag a lane: the triangle means tonight is at risk. Windows Events has no
+// findings of its own; it is derived from the event log (_subsystemHealth) and
+// stays a plain risk.
+var _LANE_RANK = { critical: 3, warning: 2, soon: 1 };
+function _laneTones(dash, includeSoon) {
+  var out = {};
+  if (dash && !dash.error) {
+    var toneOf = _dashToneFn(dash);
+    (dash.findings || []).forEach(function(f) {
+      var t = toneOf(f);
+      if (!_LANE_RANK[t] || (t === "soon" && !includeSoon)) return;
+      var page = _findingPageFor(f.category);
+      if (!out[page] || _LANE_RANK[t] > _LANE_RANK[out[page]]) out[page] = t;
+    });
+  }
   try {
-    _subsystemHealth((cached("dashboard") || {}).findings || [])
-      .forEach((s) => { health[s.id] = s.health; });
-  } catch (e) { return; }
+    _subsystemHealth((dash && dash.findings) || []).forEach(function(sub) {
+      if (sub.id === "events" && sub.health !== "OK" && !out.events) out.events = "warning";
+    });
+  } catch (e) {}
+  return out;
+}
+
+function updateNavHealth() {
+  const lanes = _laneTones(cached("dashboard"));
   document.querySelectorAll(".nav-item").forEach((el) => {
     const slot = el.querySelector(".nav-status");
     if (!slot) return;
-    const h = health[el.dataset.page];
+    const h = lanes[el.dataset.page] === "critical" ? "Critical" : lanes[el.dataset.page] === "warning" ? "Warning" : "";
     if (h === "Critical" || h === "Warning") {
       slot.className = "nav-status " + (h === "Critical" ? "nav-status-crit" : "nav-status-warn");
       // The glyph is identical for both levels; only its colour differs. Give
@@ -266,20 +288,11 @@ function confirmAction(opts) {
 // and the Dashboard's finding rows (findingJump), so it cannot disagree.
 var _palette = null;
 
-function _paletteHealth() {
-  var map = {};
-  try {
-    _subsystemHealth((cached("dashboard") || {}).findings || []).forEach(function(s) { map[s.id] = s.health; });
-  } catch (e) {}
-  return map;
-}
-
 function _paletteEntries(query) {
-  var health = _paletteHealth();
   var dash = cached("dashboard");
   var q = (query || "").trim().toLowerCase();
   var RANK = { critical: 3, warning: 2, soon: 1 };
-  var findings = [], laneTone = {};
+  var findings = [], laneTone = _laneTones(dash, true);
   if (dash && !dash.error) {
     var toneOf = _dashToneFn(dash);
     (dash.findings || []).forEach(function(f) {
@@ -288,12 +301,9 @@ function _paletteEntries(query) {
       var page = _findingPageFor(f.category);
       findings.push({ kind: "finding", id: page, title: f.title || "", label: f.title || "", group: _pageLabel(page),
         icon: "alert", tone: tone, flag: verdictFor(tone === "critical" ? "critical" : tone === "warning" ? "warning" : "info").word, rank: RANK[tone] });
-      if (!laneTone[page] || RANK[tone] > RANK[laneTone[page]]) laneTone[page] = tone;
     });
     findings.sort(function(a, b) { return b.rank - a.rank; });
   }
-  // The sidebar lights Windows Events from the event log, not from findings.
-  if (health.events && !laneTone.events) laneTone.events = "warning";
 
   var WORD = { critical: VERDICT.critical.word, warning: VERDICT.warning.word, soon: VERDICT.soon.word };
   var pages = [];
@@ -447,6 +457,14 @@ function _verdictStripModel() {
   var text = (blockers ? blockers + (blockers === 1 ? " thing is" : " things are") + " stopping tonight's game"
                        : "Nothing is stopping tonight's game")
     + " \u00b7 " + (risks ? risks + (risks === 1 ? " risk" : " risks") + " tonight" : "No risks tonight");
+  var here = 0;
+  if (currentPage !== "dashboard") {
+    var tf = _dashToneFn(dash);
+    (dash.findings || []).forEach(function(f) {
+      if (_LANE_RANK[tf(f)] && _findingPageFor(f.category) === currentPage) here++;
+    });
+  }
+  if (here) text += " \u00b7 " + here + " on this tab";
   var t = v.timestamp ? new Date(v.timestamp) : null;
   var age = t && !isNaN(t) ? Date.now() - t.getTime() : null;
   var asOf = t && !isNaN(t) ? t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
@@ -5362,10 +5380,16 @@ function renderNetwork() {
 
   const issues = _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, lmiLog, data.findings);
 
-  const hasCrit = issues.some(function(f) { return f.severity === "critical"; });
-  const hasWarn = issues.some(function(f) { return f.severity === "warning"; });
-  const sevClass = hasCrit ? "critical" : hasWarn ? "warn" : "ok";
-  const sevLabel = hasCrit ? "Fail" : hasWarn ? "Warning" : "Pass";
+  // The chip uses the verdict words and tones the Issues panel below it uses
+  // (_findingTone), not the raw collector severity: a collector "critical" is
+  // not "stops tonight's game", and the chip used to say FAIL above a row
+  // reading "Risk tonight".
+  const _netTones = issues.map(_findingTone);
+  const hasCrit = _netTones.indexOf("critical") !== -1;
+  const hasWarn = _netTones.indexOf("warning") !== -1;
+  const hasSoon = _netTones.indexOf("soon") !== -1;
+  const sevClass = hasCrit ? "critical" : hasWarn ? "warn" : hasSoon ? "soon" : "ok";
+  const sevLabel = hasCrit ? VERDICT.critical.word : hasWarn ? VERDICT.warning.word : hasSoon ? VERDICT.soon.word : "No problems";
   const statusChip = `<span class="dash-sev-pill dash-sev-${sevClass}"><span class="dash-sev-dot"></span> ${sevLabel}</span>`;
 
   // Primary adapter — join uplinkAdapter with adapters[] and ipConfig[]
