@@ -4657,3 +4657,63 @@ html.dark .lmi-countdown {
 html.dark .lmi-countdown.ok {
     color: var(--c-status-ok);
 }
+
+/* ── Verdict strip ─────────────────────────────────────────────
+   The unit verdict under the page title on every tab but the Dashboard. Tone
+   mirrors the readiness card (.rdy-card-*); a stale or missing verdict is
+   muted so it can never pass for a live one. */
+.verdict-strip {
+    position: sticky;
+    top: -0.5rem;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 1rem;
+    padding: 8px 12px;
+    background: var(--c-surface);
+    border: 1px solid var(--c-border);
+    border-radius: 8px;
+    font-size: var(--fs-small);
+    color: var(--c-text);
+}
+.verdict-strip[hidden] { display: none; }
+.verdict-strip-pass { border-color: var(--c-accent-green); }
+.verdict-strip-warn { border-color: var(--c-accent-amber); }
+.verdict-strip-fail { border-color: var(--c-accent-red); }
+.verdict-strip-word {
+    flex-shrink: 0;
+    padding: 2px 9px;
+    border-radius: 999px;
+    font-size: var(--fs-micro);
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    background: var(--c-border);
+    color: var(--c-muted);
+}
+.verdict-strip-pass .verdict-strip-word { background: var(--c-tint-green); color: var(--c-accent-green); }
+.verdict-strip-warn .verdict-strip-word { background: var(--c-tint-amber); color: var(--c-accent-amber); }
+.verdict-strip-fail .verdict-strip-word { background: var(--c-tint-red);   color: var(--c-accent-red); }
+.verdict-strip svg { flex-shrink: 0; color: var(--c-muted); }
+.verdict-strip-pass svg { color: var(--c-accent-green); }
+.verdict-strip-warn svg { color: var(--c-accent-amber); }
+.verdict-strip-fail svg { color: var(--c-accent-red); }
+.verdict-strip-text { flex: 1 1 auto; min-width: 0; }
+.verdict-strip-link {
+    flex-shrink: 0;
+    padding: 4px 10px;
+    border: 1px solid var(--c-accent-blue);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--c-accent-blue);
+    font-size: var(--fs-meta);
+    font-weight: 500;
+    cursor: pointer;
+}
+.verdict-strip-link:hover { background: var(--c-tint-blue); }
+.verdict-strip-link:focus-visible { outline: 2px solid var(--c-accent-blue); outline-offset: 2px; }
+@media (max-width: 700px) {
+    .verdict-strip { flex-wrap: wrap; }
+    .verdict-strip-link { margin-left: auto; }
+}

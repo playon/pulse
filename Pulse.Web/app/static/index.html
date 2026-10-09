@@ -74,7 +74,10 @@
             <div class="sidebar-footer"></div>
         </nav>
         <main id="content" class="flex-1 overflow-y-auto p-6">
-            <div class="max-w-6xl mx-auto" id="page"></div>
+            <div class="max-w-6xl mx-auto">
+                <div id="verdict-strip" class="verdict-strip" role="region" aria-label="Stream readiness verdict" hidden></div>
+                <div id="page"></div>
+            </div>
         </main>
     </div>
     <!-- LMI auto-close countdown (hidden unless the server is counting
