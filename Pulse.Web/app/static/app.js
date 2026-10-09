@@ -202,6 +202,62 @@ function updateNavHealth() {
   });
 }
 
+// ── Confirm dialog ───────────────────────────────────────────
+// Replaces the native confirm(): it names the action on its button, shows the
+// consequence formatted, never makes Enter the destructive answer, and does
+// not freeze the page. confirmAction() resolves true or false.
+//   opts.title         what is about to happen, as a question
+//   opts.body          text; blank line = new paragraph, "\u2022 " lines = list
+//   opts.confirmLabel  the action, e.g. "Delete 12 folders" (never "OK"/"Yes")
+//   opts.tone          "danger" for irreversible or disruptive, else neutral
+var _confirmOpen = null;
+function confirmAction(opts) {
+  if (_confirmOpen) _confirmOpen(false);
+  return new Promise(function(resolve) {
+    var opener = document.activeElement;
+    var danger = opts.tone === "danger";
+    var paras = String(opts.body || "").split("\n\n").filter(Boolean).map(function(p) {
+      var lines = p.split("\n");
+      if (lines.every(function(l) { return l.indexOf("\u2022 ") === 0; })) {
+        return "<ul>" + lines.map(function(l) { return "<li>" + esc(l.slice(2)) + "</li>"; }).join("") + "</ul>";
+      }
+      return "<p>" + lines.map(esc).join("<br>") + "</p>";
+    }).join("");
+    var wrap = document.createElement("div");
+    wrap.className = "confirm-modal";
+    wrap.innerHTML = '<div class="confirm-box" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-body">'
+      + '<h2 class="confirm-title" id="confirm-title">' + esc(opts.title) + '</h2>'
+      + '<div class="confirm-body" id="confirm-body">' + paras + '</div>'
+      + '<div class="confirm-actions">'
+      +   '<button type="button" class="btn-outline btn-ol-muted confirm-cancel">' + esc(opts.cancelLabel || "Cancel") + '</button>'
+      +   '<button type="button" class="btn-outline ' + (danger ? "btn-ol-red" : "btn-ol-blue") + ' confirm-ok">' + esc(opts.confirmLabel) + '</button>'
+      + '</div></div>';
+    var cancel = wrap.querySelector(".confirm-cancel"), ok = wrap.querySelector(".confirm-ok");
+    function done(v) {
+      document.removeEventListener("keydown", onKey, true);
+      wrap.remove();
+      _confirmOpen = null;
+      if (opener && opener.focus) { try { opener.focus(); } catch (e) {} }
+      resolve(v);
+    }
+    function onKey(e) {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); done(false); }
+      else if (e.key === "Tab") {
+        e.preventDefault();
+        (document.activeElement === cancel ? ok : cancel).focus();
+      }
+    }
+    cancel.addEventListener("click", function() { done(false); });
+    ok.addEventListener("click", function() { done(true); });
+    wrap.addEventListener("mousedown", function(e) { if (e.target === wrap) done(false); });
+    document.addEventListener("keydown", onKey, true);
+    _confirmOpen = done;
+    document.body.appendChild(wrap);
+    // A destructive question starts on Cancel so a stray Enter cannot confirm it.
+    (danger ? cancel : ok).focus();
+  });
+}
+
 // ── Verdict strip ────────────────────────────────────────────
 // The unit verdict ("is tonight's game OK") is the sentence an agent reads to
 // the school, and it lives on the Dashboard. On every other tab it vanished,
@@ -6803,12 +6859,12 @@ function renderServices() {
 
   // keepagentup.exe — confirmation modal + inline result
   document.getElementById("svc-keepagent-btn")?.addEventListener("click", async () => {
-    const ok = confirm(
-      "Restart Pixellot Agent + Coordinator?\n\n" +
-      "This runs c:\\pixellot\\bin\\keepagentup.exe, which will briefly stop and " +
-      "relaunch both services. Recording may pause for a few seconds.\n\n" +
-      "Proceed?"
-    );
+    const ok = await confirmAction({
+      title: "Restart Pixellot Agent and Coordinator?",
+      body: "This runs c:\\pixellot\\bin\\keepagentup.exe, which will briefly stop and " +
+        "relaunch both services. Recording may pause for a few seconds.",
+      confirmLabel: "Restart both services",
+    });
     if (!ok) return;
 
     const btn = document.getElementById("svc-keepagent-btn");
@@ -7125,10 +7181,11 @@ async function _runRepairTool(action) {
   };
   const slow = action === "RestoreHealth" || action === "SfcScan";
   if (slow) {
-    const ok = confirm(
-      `${titles[action]} can take 10–30 minutes to complete. ` +
-      `Pulse will block waiting for it.\n\nProceed?`
-    );
+    const ok = await confirmAction({
+      title: `${titles[action]}?`,
+      body: "This can take 10–30 minutes to complete. Pulse will block waiting for it.",
+      confirmLabel: "Start repair",
+    });
     if (!ok) return;
   }
 
@@ -7267,12 +7324,14 @@ async function _runStorageCleanup(preview) {
   const lines = [];
   if (daily.count) lines.push(`• ${daily.count} daily test clips older than 90 days (${daily.sizeGB} GB)`);
   if (recs.count) lines.push(`• ${recs.count} game recordings older than 1 year (${recs.sizeGB} GB)`);
-  const ok = confirm(
-    `Permanently delete ${totalCount} folders from D:\\recordedevents?\n\n` +
-    lines.join("\n") + "\n\n" +
-    "This cannot be undone. The folders do not go to the Recycle Bin.\n" +
-    "Nothing from the last 90 days will be touched.\n\nProceed?"
-  );
+  const ok = await confirmAction({
+    title: `Permanently delete ${totalCount} folders from D:\\recordedevents?`,
+    body: lines.join("\n") + "\n\n" +
+      "This cannot be undone. The folders do not go to the Recycle Bin.\n" +
+      "Nothing from the last 90 days will be touched.",
+    confirmLabel: `Delete ${totalCount} folders`,
+    tone: "danger",
+  });
   if (!ok) return;
 
   const btn = document.getElementById("dh-cleanup-run");
@@ -8157,7 +8216,7 @@ async function _shareDownloadReport(id) {
 }
 
 async function _shareDeleteReport(id) {
-  if (!confirm("Delete this received report?")) return;
+  if (!(await confirmAction({ title: "Delete this received report?", confirmLabel: "Delete report", tone: "danger" }))) return;
   await fetch("/api/peer/inbox/" + encodeURIComponent(id), { method: "DELETE" });
   _shareInbox.key = null;  // force the next tick to re-render
   _shareInboxTick();
@@ -9697,7 +9756,7 @@ async function sccSetupRestore() {
   var s = _scc.setup;
   var prev = s.previous && s.previous.setup;
   if (!prev) return;
-  if (!window.confirm("Put back " + (prev.vendorName || "") + " " + (prev.vendorSportName || "") + "? The score stops for about 15 seconds while ScoreConnect reconnects.")) return;
+  if (!(await confirmAction({ title: "Put back " + (prev.vendorName || "") + " " + (prev.vendorSportName || "") + "?", body: "The score stops for about 15 seconds while ScoreConnect reconnects.", confirmLabel: "Put back this setup" }))) return;
   s.phase = "saving";
   s.message = "Putting back the earlier setup…";
   _sccRender(true);
@@ -9816,7 +9875,7 @@ async function sccFindCodeFromSetup(btn) {
   }
   var cd = cached("scoreconnect");
   var reading = r.console === "reading" || (r.console == null && !!cd && _sccSignals(cd).flow === "live");
-  if (reading && !window.confirm(_SCC_SCAN_READING_WARNING)) { restore(); return; }
+  if (reading && !(await confirmAction(_SCC_SCAN_READING_CONFIRM))) { restore(); return; }
   var keys = plan.sports.map(function(x) { return x.key; });
   var cur = plan.currentSportKey, count = function(k) { return (plan.sports.filter(function(x) { return x.key === k; })[0] || {}).count || 0; };
   var sport = keys.indexOf(cur) !== -1 && count(cur) ? cur : null;
@@ -9835,9 +9894,12 @@ function sccScanSport(k) {
 // What the tech is told before codes are tried on a console ScoreConnect
 // already reads. Each code saved interrupts the score for several seconds, and
 // the scan keeps the first code that reads, which may not be today's.
-var _SCC_SCAN_READING_WARNING = "ScoreConnect is already reading the console, so the score is working.\n\n" +
-  "Find the code tries other codes one at a time. Each one interrupts the score for a few seconds, and Pulse keeps the first one that reads, which may not be the setup you have now. Change setup can put the current one back.\n\n" +
-  "Try other codes anyway?";
+var _SCC_SCAN_READING_CONFIRM = {
+  title: "Try other codes anyway?",
+  body: "ScoreConnect is already reading the console, so the score is working.\n\n" +
+    "Find the code tries other codes one at a time. Each one interrupts the score for a few seconds, and Pulse keeps the first one that reads, which may not be the setup you have now. Change setup can put the current one back.",
+  confirmLabel: "Try other codes",
+};
 
 async function sccScanStart(sport, force) {
   var st = _scc.scan;
@@ -9849,7 +9911,7 @@ async function sccScanStart(sport, force) {
   var r = await apiPost("/api/scoreconnect/sc3/scan", { confirm: true, sport: st.sport, force: force === true });
   // The console began reading between the form and the click: ask, then retry.
   if (r && r.alreadyReading && force !== true) {
-    if (window.confirm(_SCC_SCAN_READING_WARNING)) return sccScanStart(st.sport, true);
+    if (await confirmAction(_SCC_SCAN_READING_CONFIRM)) return sccScanStart(st.sport, true);
     st.phase = "form"; st.scan = null; _sccRender(true);
     return;
   }
@@ -11698,7 +11760,7 @@ function renderSettings() {
   });
 
   upApplyBtn?.addEventListener("click", async () => {
-    if (!confirm(`Download and install ${upLatest}?\n\nPulse will restart and this page will reload automatically.`)) return;
+    if (!(await confirmAction({ title: `Download and install ${upLatest}?`, body: "Pulse will restart and this page will reload automatically.", confirmLabel: "Download and install" }))) return;
     upApplyBtn.disabled = true;
     upCheckBtn.disabled = true;
     upMsg.textContent = "Starting update…";
@@ -11726,7 +11788,7 @@ function renderSettings() {
   const rebootMsg = document.getElementById("set-reboot-msg");
 
   restartBtn?.addEventListener("click", async () => {
-    if (!confirm("Restart the Pulse app?\n\nPulse closes and relaunches the same build. This page reloads once it's back, usually within a few seconds. The VPU and any recording keep running.")) return;
+    if (!(await confirmAction({ title: "Restart the Pulse app?", body: "Pulse closes and relaunches the same build. This page reloads once it's back, usually within a few seconds. The VPU and any recording keep running.", confirmLabel: "Restart Pulse" }))) return;
     restartBtn.disabled = true;
     rebootBtn.disabled = true;
     restartMsg.textContent = "Restarting…";
@@ -11748,7 +11810,7 @@ function renderSettings() {
   });
 
   rebootBtn?.addEventListener("click", async () => {
-    if (!confirm("Reboot the whole VPU?\n\nThis restarts Windows. Any active recording is interrupted, and the unit is offline for a few minutes. Pulse won't come back on its own. Reopen it from the desktop shortcut once Windows is back.")) return;
+    if (!(await confirmAction({ title: "Reboot the whole VPU?", body: "This restarts Windows. Any active recording is interrupted, and the unit is offline for a few minutes. Pulse won't come back on its own. Reopen it from the desktop shortcut once Windows is back.", confirmLabel: "Reboot the VPU", tone: "danger" }))) return;
     restartBtn.disabled = true;
     rebootBtn.disabled = true;
     rebootMsg.textContent = "Sending reboot…";
