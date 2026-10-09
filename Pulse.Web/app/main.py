@@ -2191,13 +2191,10 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                     "recommendation": (
                         f"The VPU is taking its time from {ntp_src} instead of an approved "
                         f"time server. If that server's clock drifts, the VPU can miss scheduled "
-                        f"events. A remote tech can switch it back to the approved servers."
+                        f"events. Escalate this to Pixellot remote support to switch it back to the approved servers."
                     ),
                     "details": [
                         f"Approved servers: {approved_list}",
-                        "Remote fix: run `w32tm /config /manualpeerlist:\"0.us.pool.ntp.org "
-                        "1.us.pool.ntp.org 2.us.pool.ntp.org 3.us.pool.ntp.org\" "
-                        "/syncfromflags:manual /update`, then restart the Windows Time service.",
                     ],
                 }
             )

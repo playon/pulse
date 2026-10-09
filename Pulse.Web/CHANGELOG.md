@@ -23,6 +23,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 
 ## [Unreleased]
 
+### Changed
+- The wrong-time-source finding no longer shows a command to run; it says to escalate to remote support.
+
 ## [1.4.0] - 2026-10-08
 
 ### Changed
