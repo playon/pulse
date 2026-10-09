@@ -202,6 +202,50 @@ function updateNavHealth() {
   });
 }
 
+// ── Verdict strip ────────────────────────────────────────────
+// The unit verdict ("is tonight's game OK") is the sentence an agent reads to
+// the school, and it lives on the Dashboard. On every other tab it vanished,
+// leaving only a nav triangle. This strip carries it under the page title
+// everywhere except the Dashboard (whose card already says it), in the same
+// words as the readiness card, and links back.
+//
+// It makes the four-state promise: loading, no verdict, failed and stale each
+// look different from a real verdict, and a stale verdict says how old it is.
+var _VERDICT_STALE_MS = 15 * 60 * 1000;
+function _verdictStripModel() {
+  var dash = cached("dashboard");
+  if (!dash) return { tone: "muted", word: "Checking", text: "Stream readiness is still being checked." };
+  if (dash.error) return { tone: "muted", word: "No verdict", text: "The Dashboard check failed, so there is no readiness verdict. Check each tab." };
+  var v = resolveReadiness(dash.readiness);
+  if (!v || !v.status) return { tone: "muted", word: "No verdict", text: "No readiness verdict for this unit." };
+  var meta = _RDY_META[v.status] || _RDY_META.WARN;
+  var blockers = (v.blockers || []).length, risks = (v.risks || []).length;
+  var text = (blockers ? blockers + (blockers === 1 ? " thing is" : " things are") + " stopping tonight's game"
+                       : "Nothing is stopping tonight's game")
+    + " \u00b7 " + (risks ? risks + (risks === 1 ? " risk" : " risks") + " tonight" : "No risks tonight");
+  var t = v.timestamp ? new Date(v.timestamp) : null;
+  var age = t && !isNaN(t) ? Date.now() - t.getTime() : null;
+  var asOf = t && !isNaN(t) ? t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+  if (age !== null && age > _VERDICT_STALE_MS && !(window.__PULSE_DEMO_MODE && _readinessDemoState)) {
+    return { tone: "muted", word: meta.word, icon: meta.icon,
+      text: text + " \u00b7 as of " + asOf + ", " + Math.round(age / 60000) + " min old. Refresh the Dashboard for a current verdict." };
+  }
+  return { tone: meta.tone, word: meta.word, icon: meta.icon, text: text + (asOf ? " \u00b7 as of " + asOf : "") };
+}
+
+function updateVerdictStrip() {
+  var el = document.getElementById("verdict-strip");
+  if (!el) return;
+  if (currentPage === "dashboard") { el.hidden = true; el.innerHTML = ""; return; }
+  var m = _verdictStripModel();
+  el.hidden = false;
+  el.className = "verdict-strip verdict-strip-" + m.tone;
+  el.innerHTML = (m.icon ? svgIcon(m.icon, 14) : "")
+    + '<span class="verdict-strip-word">' + esc(m.word) + '</span>'
+    + '<span class="verdict-strip-text">' + esc(m.text) + '</span>'
+    + '<button type="button" class="verdict-strip-link" onclick="navigate(\'dashboard\')">Open Dashboard</button>';
+}
+
 function renderPage(id) {
   const fn = pageRenderers[id];
   if (!fn) { $page().innerHTML = `<p class="text-pulse-muted">Unknown page: ${esc(id)}</p>`; return; }
@@ -215,6 +259,7 @@ function renderPage(id) {
   }
   try {
     fn();
+    updateVerdictStrip();
   } catch (err) {
     console.error("Render error on", id, err);
     $page().innerHTML = `<div class="card"><p class="text-red-400 font-bold">Render Error</p>
@@ -519,6 +564,7 @@ function fetchSection(key) {
     }
     // Refresh the sidebar health dots when the data that drives them lands.
     if (key === "dashboard" || key === "events") updateNavHealth();
+    if (key === "dashboard") updateVerdictStrip();
     // Re-render the current page only when the completed fetch is relevant to it.
     // For dashboard, only its own deps trigger a refresh — non-dashboard data
     // (events, audio, scoreconnect, etc.) doesn't change anything visible.
