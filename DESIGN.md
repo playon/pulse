@@ -13,7 +13,7 @@ colors:
   ok: "#137638"
   critical: "#bf2121"
   warning: "#9b4708"
-  info: "#2460e3"
+  info: "#1f54cc"
   teal: "#0f766e"
   purple: "#7c3aed"
   page-bg-dark: "#0f1117"
@@ -137,7 +137,7 @@ The system is quiet on purpose. Structure comes from a 1px border and a half-ste
 A cool slate neutral ramp carries all structure. Six semantic accents carry state. Every token is defined once for light on `:root` and remapped for dark on `html.dark`.
 
 ### Primary
-- **Signal Blue** (`#2460e3` light, `#60a5fa` dark): the selected nav item, focus outlines, links, the info badge and the outline-blue button. It is the only accent that does not mean a machine state.
+- **Signal Blue** (`#1f54cc` light, `#60a5fa` dark): the selected nav item, focus outlines, links, the info badge and the outline-blue button. It is the only accent that does not mean a machine state.
 
 ### Secondary
 - **Pass Green** (`#137638` light, `#22c55e` dark): healthy, running, passed.
