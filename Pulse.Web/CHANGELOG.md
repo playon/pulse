@@ -36,6 +36,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - Small text is easier to read over remote desktop. Nothing in Pulse is smaller than 11 pixels any more, and the many near-identical text sizes are now five consistent ones.
 
 ### Fixed
+- Search results now say "Fix soon" for a problem the Dashboard calls Fix soon (they said "Worth knowing"), and the "Open ..." links inside a finding are a little taller to click.
 - The selected item in the left menu and the blue "info" labels are easier to read in light mode (a slightly deeper blue).
 
 ## [1.4.0] - 2026-10-08

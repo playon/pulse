@@ -300,7 +300,7 @@ function _paletteEntries(query) {
       if (!RANK[tone]) return;          // "Worth knowing" is context, not a problem
       var page = _findingPageFor(f.category);
       findings.push({ kind: "finding", id: page, title: f.title || "", label: f.title || "", group: _pageLabel(page),
-        icon: "alert", tone: tone, flag: verdictFor(tone === "critical" ? "critical" : tone === "warning" ? "warning" : "info").word, rank: RANK[tone] });
+        icon: "alert", tone: tone, flag: VERDICT[tone].word, rank: RANK[tone] });
     });
     findings.sort(function(a, b) { return b.rank - a.rank; });
   }
