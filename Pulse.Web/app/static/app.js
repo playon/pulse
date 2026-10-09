@@ -258,6 +258,174 @@ function confirmAction(opts) {
   });
 }
 
+// ── Command palette ──────────────────────────────────────────
+// 21 tabs, all reached by clicking down a sidebar. "/" (or Ctrl/Cmd+K) opens a
+// search over the tabs and the current findings, and "Next problem" jumps to
+// the worst flagged lane, so an agent on a live call does not hunt for it.
+// Built from the same sources as the sidebar (NAV_SECTIONS, _subsystemHealth)
+// and the Dashboard's finding rows (findingJump), so it cannot disagree.
+var _palette = null;
+
+function _paletteHealth() {
+  var map = {};
+  try {
+    _subsystemHealth((cached("dashboard") || {}).findings || []).forEach(function(s) { map[s.id] = s.health; });
+  } catch (e) {}
+  return map;
+}
+
+function _paletteEntries(query) {
+  var health = _paletteHealth();
+  var dash = cached("dashboard");
+  var q = (query || "").trim().toLowerCase();
+  var RANK = { critical: 3, warning: 2, soon: 1 };
+  var findings = [], laneTone = {};
+  if (dash && !dash.error) {
+    var toneOf = _dashToneFn(dash);
+    (dash.findings || []).forEach(function(f) {
+      var tone = toneOf(f);
+      if (!RANK[tone]) return;          // "Worth knowing" is context, not a problem
+      var page = _findingPageFor(f.category);
+      findings.push({ kind: "finding", id: page, title: f.title || "", label: f.title || "", group: _pageLabel(page),
+        icon: "alert", tone: tone, flag: verdictFor(tone === "critical" ? "critical" : tone === "warning" ? "warning" : "info").word, rank: RANK[tone] });
+      if (!laneTone[page] || RANK[tone] > RANK[laneTone[page]]) laneTone[page] = tone;
+    });
+    findings.sort(function(a, b) { return b.rank - a.rank; });
+  }
+  // The sidebar lights Windows Events from the event log, not from findings.
+  if (health.events && !laneTone.events) laneTone.events = "warning";
+
+  var WORD = { critical: VERDICT.critical.word, warning: VERDICT.warning.word, soon: VERDICT.soon.word };
+  var pages = [];
+  NAV_SECTIONS.forEach(function(sec) {
+    sec.pages.forEach(function(p) {
+      var t = p.id === "dashboard" ? "" : (laneTone[p.id] || "");
+      pages.push({ kind: "page", id: p.id, label: p.label, group: sec.label, icon: p.icon, tone: t, flag: t ? WORD[t] : "", rank: RANK[t] || 0 });
+    });
+  });
+  pages.push({ kind: "page", id: "fault-isolator", label: "Camera Connection Troubleshooting", group: "TROUBLESHOOTING", icon: "zap", tone: "", flag: "", rank: 0 });
+
+  var worst = pages.filter(function(p) { return p.rank; }).sort(function(a, b) { return b.rank - a.rank; })[0];
+  var next = worst ? { kind: "page", id: worst.id, label: "Next problem: " + worst.label, group: worst.flag, icon: "triangle", tone: worst.tone, flag: "", next: true } : null;
+
+  function score(e) {
+    var hay = (e.label + " " + e.group).toLowerCase();
+    if (!q) return 1;
+    if (e.label.toLowerCase().indexOf(q) === 0) return 3;
+    if (e.label.toLowerCase().indexOf(q) !== -1) return 2;
+    return q.split(/\s+/).every(function(w) { return hay.indexOf(w) !== -1; }) ? 1 : 0;
+  }
+  var out = [];
+  if (!q) {
+    if (next) out.push(next);
+    out = out.concat(findings.slice(0, 8));
+    out = out.concat(pages.filter(function(p) { return p.tone; }).sort(function(a, b) { return b.rank - a.rank; }));
+    out = out.concat(pages.filter(function(p) { return !p.tone; }));
+  } else {
+    var all = findings.concat(pages).map(function(e) { return { e: e, s: score(e) }; }).filter(function(x) { return x.s; });
+    all.sort(function(a, b) { return b.s - a.s; });
+    out = all.map(function(x) { return x.e; });
+  }
+  var note = "";
+  if (!dash) note = "Findings appear once the Dashboard check finishes.";
+  else if (dash.error) note = "Findings are unavailable because the Dashboard check failed.";
+  return { items: out, note: note };
+}
+
+function _paletteRender() {
+  var p = _palette; if (!p) return;
+  var res = _paletteEntries(p.input.value);
+  p.items = res.items;
+  if (p.index >= p.items.length) p.index = Math.max(0, p.items.length - 1);
+  p.list.innerHTML = p.items.map(function(e, i) {
+    return '<li id="pal-opt-' + i + '" class="pal-opt' + (i === p.index ? " pal-active" : "") + (e.tone ? " pal-" + e.tone : "")
+      + '" role="option" aria-selected="' + (i === p.index) + '" data-i="' + i + '">'
+      + '<span class="pal-icon">' + svgIcon(e.icon || "grid", 14) + '</span>'
+      + '<span class="pal-label">' + esc(e.label) + '</span>'
+      + '<span class="pal-meta">' + (e.flag ? '<span class="pal-flag">' + esc(e.flag) + '</span>' : "") + esc(e.group || "") + '</span></li>';
+  }).join("") || '<li class="pal-empty">Nothing matches. Try a tab name, or part of a finding.</li>';
+  p.note.textContent = res.note;
+  p.note.hidden = !res.note;
+  p.input.setAttribute("aria-activedescendant", p.items.length ? "pal-opt-" + p.index : "");
+  p.status.textContent = p.items.length + (p.items.length === 1 ? " result" : " results");
+  var act = p.list.querySelector(".pal-active");
+  if (act && act.scrollIntoView) act.scrollIntoView({ block: "nearest" });
+}
+
+function _paletteChoose(i) {
+  var p = _palette; if (!p || !p.items[i]) return;
+  var e = p.items[i];
+  closePalette(false);
+  if (e.kind === "finding") findingJump(e.id, encodeURIComponent(e.title));
+  else navigate(e.id);
+}
+
+function closePalette(restoreFocus) {
+  var p = _palette; if (!p) return;
+  document.removeEventListener("keydown", p.onKey, true);
+  p.wrap.remove();
+  _palette = null;
+  if (restoreFocus !== false && p.opener && p.opener.focus) { try { p.opener.focus(); } catch (e) {} }
+}
+
+function openPalette(viaSlash) {
+  if (_palette || _confirmOpen) return;
+  var splash = document.getElementById("splash");
+  if (splash && getComputedStyle(splash).display !== "none" && !splash.classList.contains("splash-hidden")) return;
+  var opener = document.activeElement;
+  var wrap = document.createElement("div");
+  wrap.className = "pal-modal";
+  wrap.innerHTML = '<div class="pal-box" role="dialog" aria-modal="true" aria-label="Search tabs and findings">'
+    + '<div class="pal-search">' + svgIcon("search", 16)
+    + '<input type="text" class="pal-input" role="combobox" aria-expanded="true" aria-controls="pal-list" aria-autocomplete="list" placeholder="Search tabs and findings" autocomplete="off" spellcheck="false"></div>'
+    + '<p class="pal-note" hidden></p>'
+    + '<ul class="pal-list" id="pal-list" role="listbox" aria-label="Results"></ul>'
+    + '<div class="pal-foot"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>Enter</kbd> open</span><span><kbd>Esc</kbd> close</span></div>'
+    + '<div class="sr-only" role="status" aria-live="polite" id="pal-status"></div></div>';
+  var p = _palette = { wrap: wrap, opener: opener, index: 0, items: [],
+    input: wrap.querySelector(".pal-input"), list: wrap.querySelector(".pal-list"),
+    note: wrap.querySelector(".pal-note"), status: wrap.querySelector("#pal-status") };
+  p.onKey = function(e) {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closePalette(); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); p.index = Math.min(p.items.length - 1, p.index + 1); _paletteRender(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); p.index = Math.max(0, p.index - 1); _paletteRender(); }
+    else if (e.key === "Home") { e.preventDefault(); p.index = 0; _paletteRender(); }
+    else if (e.key === "End") { e.preventDefault(); p.index = Math.max(0, p.items.length - 1); _paletteRender(); }
+    else if (e.key === "Enter") { e.preventDefault(); _paletteChoose(p.index); }
+    else if (e.key === "Tab") { e.preventDefault(); }
+  };
+  p.openedAt = Date.now(); p.viaSlash = viaSlash === true;
+  p.input.addEventListener("input", function() {
+    // Some input paths deliver the "/" that opened the palette as a typed
+    // character after focus has moved; it is the shortcut, not a query.
+    if (p.viaSlash && Date.now() - p.openedAt < 400 && p.input.value === "/") p.input.value = "";
+    p.viaSlash = false;
+    p.index = 0; _paletteRender();
+  });
+  p.list.addEventListener("mousemove", function(e) {
+    var li = e.target.closest(".pal-opt");
+    if (li && +li.dataset.i !== p.index) { p.index = +li.dataset.i; _paletteRender(); }
+  });
+  p.list.addEventListener("click", function(e) {
+    var li = e.target.closest(".pal-opt");
+    if (li) _paletteChoose(+li.dataset.i);
+  });
+  wrap.addEventListener("mousedown", function(e) { if (e.target === wrap) closePalette(); });
+  document.addEventListener("keydown", p.onKey, true);
+  document.body.appendChild(wrap);
+  _paletteRender();
+  p.input.focus();
+}
+
+// "/" opens it unless the user is typing somewhere; Ctrl/Cmd+K works anywhere.
+document.addEventListener("keydown", function(e) {
+  if (_palette || e.defaultPrevented) return;
+  var t = e.target, tag = t && t.tagName;
+  var typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (t && t.isContentEditable);
+  if ((e.key === "k" || e.key === "K") && (e.ctrlKey || e.metaKey) && !e.altKey) { e.preventDefault(); openPalette(); }
+  else if (e.key === "/" && !typing && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); openPalette(true); }
+});
+
 // ── Verdict strip ────────────────────────────────────────────
 // The unit verdict ("is tonight's game OK") is the sentence an agent reads to
 // the school, and it lives on the Dashboard. On every other tab it vanished,
@@ -2847,6 +3015,62 @@ function readinessCard(verdict, freshness) {
     + '</div>';
 }
 
+// The Dashboard's verdict tone for a finding: the readiness policy's class
+// (with its supersede / never-demote rules, documented below), falling back to
+// the collector severity capped at a risk. Shared so the Dashboard, and the
+// command palette, say the same thing about the same finding.
+function _dashToneFn(dash) {
+  const _rdy = dash.readiness || {};
+  const _toneByCode = {};
+  (_rdy.blockers || []).forEach((b) => { if (b.code) _toneByCode[b.code] = "critical"; });
+  (_rdy.risks    || []).forEach((r) => { if (r.code) _toneByCode[r.code] = "warning";  });
+  (_rdy.info     || []).forEach((n) => { if (n.code) _toneByCode[n.code] = "info";     });
+  // The policy may ESCALATE a finding -- deciding what stops tonight's game is
+  // exactly its job -- but it must never silently DEMOTE one to an FYI.
+  //
+  // Demotion is the dangerous direction, and it happens for a legitimate
+  // reason: main.py:2540 classes `disk-critical` as info *because* readiness
+  // gates the same volume through its own per-drive F15a/F15b checks. One
+  // full drive, two records. Letting the info class win printed "Worth
+  // knowing" on a drive the same card was counting as a risk one line above.
+  //
+  // So: a blocker is critical, a risk is a risk, and anything the collector
+  // called a problem stays at least a risk even where the policy has no
+  // opinion or is deferring to a check it already counted.
+  return (f) => {
+    const own = verdictFor(f.severity).tone;
+    // A finding can name the readiness entry that supersedes it (main.py sets
+    // supersededBy where one condition is reported by two records -- a full
+    // C:/D: drive). Take that entry's class: it is the one the policy actually
+    // weighed, and the one the counts on this card are built from.
+    const superseded = f.supersededBy ? _toneByCode[f.supersededBy] : null;
+    if (superseded) return superseded;
+    const policy = _toneByCode[f.code];
+    if (!policy) {
+      // No policy class for this finding. Two ways to get here on a live
+      // unit: no readiness record rode along at all (an older payload, or a
+      // bundle shared in from another unit via peer.py), or the finding named
+      // a superseding entry whose own check did not fire -- `disk-critical`
+      // declares supersededBy: "disk-d-critical", and _compute_readiness
+      // skips it, so if F15b does not fire the finding has no class anywhere.
+      //
+      // Fall back to the collector's severity but CAP IT AT "risk". A
+      // collector severity of "critical" means "serious finding"; it does NOT
+      // mean "stops tonight's game". Those are different scales and only the
+      // policy decides the second one. Reading `own` unguarded is what put
+      // "Stops tonight's game" on a 91%-full recording drive, which does not
+      // stop an event.
+      return own === "info" ? "info" : "warning";
+    }
+    // The policy may ESCALATE -- deciding what stops tonight's game is its
+    // job -- but it must never silently DEMOTE a finding to an FYI.
+    // Demoting in words is still wrong ("Worth knowing"), but so is claiming
+    // tonight is at risk when the policy decided it isn't: "Fix soon".
+    if (policy === "info" && own !== "info") return "soon";
+    return policy;
+  };
+}
+
 function renderDashboard() {
   const dash = cached("dashboard");
   if (!dash) { $page().innerHTML = sectionLoading("Dashboard"); fetchSection("dashboard"); return; }
@@ -2890,55 +3114,7 @@ function renderDashboard() {
   // on the PASS chip the card read "Nothing is stopping tonight's game" above
   // two rows reading "Stops tonight's game". The card previews a state; the
   // findings describe the unit, and they stay true in every preview.
-  const _rdy = dash.readiness || {};
-  const _toneByCode = {};
-  (_rdy.blockers || []).forEach((b) => { if (b.code) _toneByCode[b.code] = "critical"; });
-  (_rdy.risks    || []).forEach((r) => { if (r.code) _toneByCode[r.code] = "warning";  });
-  (_rdy.info     || []).forEach((n) => { if (n.code) _toneByCode[n.code] = "info";     });
-  // The policy may ESCALATE a finding -- deciding what stops tonight's game is
-  // exactly its job -- but it must never silently DEMOTE one to an FYI.
-  //
-  // Demotion is the dangerous direction, and it happens for a legitimate
-  // reason: main.py:2540 classes `disk-critical` as info *because* readiness
-  // gates the same volume through its own per-drive F15a/F15b checks. One
-  // full drive, two records. Letting the info class win printed "Worth
-  // knowing" on a drive the same card was counting as a risk one line above.
-  //
-  // So: a blocker is critical, a risk is a risk, and anything the collector
-  // called a problem stays at least a risk even where the policy has no
-  // opinion or is deferring to a check it already counted.
-  const toneOf = (f) => {
-    const own = verdictFor(f.severity).tone;
-    // A finding can name the readiness entry that supersedes it (main.py sets
-    // supersededBy where one condition is reported by two records -- a full
-    // C:/D: drive). Take that entry's class: it is the one the policy actually
-    // weighed, and the one the counts on this card are built from.
-    const superseded = f.supersededBy ? _toneByCode[f.supersededBy] : null;
-    if (superseded) return superseded;
-    const policy = _toneByCode[f.code];
-    if (!policy) {
-      // No policy class for this finding. Two ways to get here on a live
-      // unit: no readiness record rode along at all (an older payload, or a
-      // bundle shared in from another unit via peer.py), or the finding named
-      // a superseding entry whose own check did not fire -- `disk-critical`
-      // declares supersededBy: "disk-d-critical", and _compute_readiness
-      // skips it, so if F15b does not fire the finding has no class anywhere.
-      //
-      // Fall back to the collector's severity but CAP IT AT "risk". A
-      // collector severity of "critical" means "serious finding"; it does NOT
-      // mean "stops tonight's game". Those are different scales and only the
-      // policy decides the second one. Reading `own` unguarded is what put
-      // "Stops tonight's game" on a 91%-full recording drive, which does not
-      // stop an event.
-      return own === "info" ? "info" : "warning";
-    }
-    // The policy may ESCALATE -- deciding what stops tonight's game is its
-    // job -- but it must never silently DEMOTE a finding to an FYI.
-    // Demoting in words is still wrong ("Worth knowing"), but so is claiming
-    // tonight is at risk when the policy decided it isn't: "Fix soon".
-    if (policy === "info" && own !== "info") return "soon";
-    return policy;
-  };
+  const toneOf = _dashToneFn(dash);
 
   const warnCount = findings.filter((f) => toneOf(f) === "warning").length;
   const critCount = findings.filter((f) => toneOf(f) === "critical").length;
