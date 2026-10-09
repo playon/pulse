@@ -2166,7 +2166,7 @@ html.dark .channel-moved-banner {
 .orient-fan { fill: none; stroke: var(--c-muted); stroke-width: 1; }
 .orient-portbank { fill: rgba(59,130,246,0.14); stroke: var(--c-accent-blue); stroke-width: 1.2; }
 .orient-port { fill: var(--c-status-connecting); }
-.orient-port-num { fill: var(--c-on-accent); font-size: 9px; font-weight: 700; text-anchor: middle; }
+.orient-port-num { fill: var(--c-on-accent); font-size: 12px; font-weight: 700; text-anchor: middle; }
 .orient-acbox { fill: none; stroke: var(--c-muted); stroke-width: 1.2; }
 .orient-acpin { fill: var(--c-muted); }
 .orient-caption { font-size: var(--fs-micro); line-height: 1.5; color: var(--c-muted); }
@@ -4672,9 +4672,6 @@ html.dark .lmi-countdown.ok {
    mirrors the readiness card (.rdy-card-*); a stale or missing verdict is
    muted so it can never pass for a live one. */
 .verdict-strip {
-    position: sticky;
-    top: -0.5rem;
-    z-index: 5;
     display: flex;
     align-items: center;
     gap: 10px;
@@ -4711,16 +4708,15 @@ html.dark .lmi-countdown.ok {
 .verdict-strip-text { flex: 1 1 auto; min-width: 0; }
 .verdict-strip-link {
     flex-shrink: 0;
-    padding: 4px 10px;
-    border: 1px solid var(--c-accent-blue);
-    border-radius: 6px;
-    background: transparent;
+    padding: 4px 2px;
     color: var(--c-accent-blue);
     font-size: var(--fs-meta);
     font-weight: 500;
+    text-decoration: underline;
+    text-underline-offset: 2px;
     cursor: pointer;
 }
-.verdict-strip-link:hover { background: var(--c-tint-blue); }
+.verdict-strip-link:hover { text-decoration-thickness: 2px; }
 .verdict-strip-link:focus-visible { outline: 2px solid var(--c-accent-blue); outline-offset: 2px; }
 @media (max-width: 700px) {
     .verdict-strip { flex-wrap: wrap; }
@@ -4855,3 +4851,14 @@ kbd {
 .pal-foot { display: flex; gap: 14px; padding: 8px 14px; border-top: 1px solid var(--c-border); font-size: var(--fs-micro); color: var(--c-muted); }
 .pal-foot kbd { margin-right: 3px; }
 @media (max-width: 767px) { .palette-btn kbd { display: none; } }
+
+/* A stale verdict stays muted but keeps the last known tone as a dot. */
+.verdict-strip-dot { display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: var(--c-muted); vertical-align: middle; }
+.verdict-strip-dot-pass { background: var(--c-accent-green); }
+.verdict-strip-dot-warn { background: var(--c-accent-amber); }
+.verdict-strip-dot-fail { background: var(--c-accent-red); }
+
+/* Cameras: with a port problem, the port cards come before the reference diagrams. */
+.cam-page-body > #cam-findings-wrap { order: -3; }
+.cam-page-body > #cam-video-wrap, .cam-page-body > #cam-s1-wrap { order: -2; }
+.cam-page-body > .cam-port-grid-first { order: -1; }

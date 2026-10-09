@@ -469,7 +469,7 @@ function _verdictStripModel() {
   var age = t && !isNaN(t) ? Date.now() - t.getTime() : null;
   var asOf = t && !isNaN(t) ? t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
   if (age !== null && age > _VERDICT_STALE_MS && !(window.__PULSE_DEMO_MODE && _readinessDemoState)) {
-    return { tone: "muted", word: meta.word, icon: meta.icon,
+    return { tone: "muted", word: meta.word, icon: meta.icon, dot: meta.tone,
       text: text + " \u00b7 as of " + asOf + ", " + Math.round(age / 60000) + " min old. Refresh the Dashboard for a current verdict." };
   }
   return { tone: meta.tone, word: meta.word, icon: meta.icon, text: text + (asOf ? " \u00b7 as of " + asOf : "") };
@@ -483,10 +483,18 @@ function updateVerdictStrip() {
   el.hidden = false;
   el.className = "verdict-strip verdict-strip-" + m.tone;
   el.innerHTML = (m.icon ? svgIcon(m.icon, 14) : "")
-    + '<span class="verdict-strip-word">' + esc(m.word) + '</span>'
+    + '<span class="verdict-strip-word">' + (m.dot ? '<span class="verdict-strip-dot verdict-strip-dot-' + esc(m.dot) + '" aria-hidden="true"></span>' : "") + esc(m.word) + '</span>'
     + '<span class="verdict-strip-text">' + esc(m.text) + '</span>'
-    + '<button type="button" class="verdict-strip-link" onclick="navigate(\'dashboard\')">Open Dashboard</button>';
+    + '<a href="#dashboard" class="verdict-strip-link" onclick="event.preventDefault();navigate(\'dashboard\')">Open Dashboard</a>';
+  // Tell a screen reader when the verdict CHANGES while you stay on a page,
+  // not on every tab switch (the strip is rewritten on each render). The
+  // as-of time is left out so a clock tick is not a change.
+  var live = document.getElementById("verdict-live");
+  var said = m.word + " " + m.text.replace(/ \u00b7 as of .*$/, "");
+  if (live && _verdictSaid !== null && _verdictSaidPage === currentPage && said !== _verdictSaid) live.textContent = "Stream readiness changed: " + said;
+  _verdictSaid = said; _verdictSaidPage = currentPage;
 }
+var _verdictSaid = null, _verdictSaidPage = null;
 
 function renderPage(id) {
   const fn = pageRenderers[id];
@@ -2754,7 +2762,7 @@ function _findingRowHtml(r, scope, i, opts) {
   var v = VERDICT[r.t] || verdictFor(f.severity);
   var key = scope + ":" + (f.title || "");
   var remembered = _findingOpen[key];
-  var open = remembered == null ? (i === 0 && r.t === "critical") : remembered;
+  var open = remembered == null ? (i === 0 && (r.t === "critical" || (opts.lone && r.t !== "info"))) : remembered;
   var id = "fd-" + scope + "-" + i;
   var rec = (f.recommendation || f.body || "").trim();
   var extra = opts.detailExtra ? opts.detailExtra(f) : "";
@@ -2783,6 +2791,9 @@ function findingListHtml(items, opts) {
   var rows = _sortByTone(items || [], opts.toneOf || _findingTone);
   var act = rows.filter(function(r) { return r.t !== "info"; });
   var notes = rows.filter(function(r) { return r.t === "info"; });
+  // A lone problem opens by default: nothing else competes for attention, so
+  // hiding its fix behind a click is just a click.
+  opts = Object.assign({}, opts, { lone: act.length === 1 });
   var html = act.map(function(r, i) { return _findingRowHtml(r, scope, i, opts); }).join("");
   if (notes.length && act.length) {
     // Folded: context, not work. Opened, the notes are ordinary rows.
@@ -5941,6 +5952,18 @@ function _camFindingsHtml(findings) {
   </div>`;
 }
 
+// A port problem puts the port cards above the reference diagrams, so an agent
+// reaches the broken port without scrolling past three pictures. With nothing
+// wrong the diagrams stay first.
+function _camSyncPortOrder(ports, info) {
+  var grid = document.getElementById("cam-port-grid");
+  if (!grid) return;
+  info = info || {};
+  var degraded = (ports || []).some(function(p) { return p && p.isUp && p.isDegraded; });
+  var short = info.expectedMainCameras != null && info.detectedMainCameras != null && info.detectedMainCameras < info.expectedMainCameras;
+  grid.classList.toggle("cam-port-grid-first", !!(degraded || short));
+}
+
 function _camPortGridHtml(ports) {
   const portSlots = [];
   for (let i = 0; i < Math.max(4, ports.length); i++) {
@@ -6210,7 +6233,7 @@ function _camOrientationPanelHtml() {
 // A POE port rectangle + centered number.
 function _orientPort(x, y, w, h, num) {
   return '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="1.5" class="orient-port"/>' +
-         '<text x="' + (x + w / 2) + '" y="' + (y + h / 2 + 3) + '" class="orient-port-num">' + num + '</text>';
+         '<text x="' + (x + w / 2) + '" y="' + (y + h / 2 + 4) + '" class="orient-port-num">' + num + '</text>';
 }
 
 // Force a fresh camera probe — clears the backend CGI cache and re-polls.
@@ -6707,6 +6730,8 @@ function renderCameras() {
 
   `;
 
+  _camSyncPortOrder(ports, data);
+
   // Restore a previously-captured frame set so navigating away and back (a
   // full re-render) doesn't silently discard it. Stamped with its capture
   // time so it can't be mistaken for live; a manual Refresh clears it.
@@ -6762,6 +6787,7 @@ function renderCameras() {
             openDetails[d.dataset.portIdx] = true;
           });
           grid.innerHTML = _camPortGridHtml(freshPorts);
+          _camSyncPortOrder(freshPorts, fresh);
           Object.keys(openDetails).forEach(function(idx) {
             var d = grid.querySelector('details[data-port-idx="' + idx + '"]');
             if (d) d.setAttribute('open', '');
