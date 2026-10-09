@@ -537,7 +537,7 @@ function loading() {
 
 function card(title, body, extra) {
   return `<div class="card ${extra || ""}">
-    ${title ? `<h3 class="text-sm font-semibold text-pulse-muted uppercase tracking-wide mb-3">${esc(title)}</h3>` : ""}
+    ${title ? `<h2 class="text-sm font-semibold text-pulse-muted uppercase tracking-wide mb-3">${esc(title)}</h2>` : ""}
     ${body}
   </div>`;
 }
@@ -2830,7 +2830,7 @@ function readinessCard(verdict, freshness) {
     + '<div class="rdy-main">'
     +   '<div class="rdy-badge rdy-badge-' + meta.tone + '">' + svgIcon(meta.icon, 28) + '<span class="rdy-badge-word">' + meta.word + '</span></div>'
     +   '<div class="rdy-headline">'
-    +     '<div class="rdy-title-row"><h3 class="rdy-title">Stream Readiness</h3>' + (asOf ? '<span class="rdy-asof">as of ' + esc(asOf) + '</span>' : '') + '</div>'
+    +     '<div class="rdy-title-row"><h2 class="rdy-title">Stream Readiness</h2>' + (asOf ? '<span class="rdy-asof">as of ' + esc(asOf) + '</span>' : '') + '</div>'
     +     '<p class="rdy-tag">' + esc(meta.tag) + '</p>'
     +     (freshness ? '<p class="rdy-fresh">' + svgIcon("check", 12) + ' ' + esc(freshness) + '</p>' : '')
     +   '</div>'
@@ -3158,7 +3158,7 @@ function renderDashboard() {
       <div class="findings-hdr">
         <div class="dash-card-hdr mb-0">
           <span class="dash-hdr-icon">${svgIcon("clipboard-list", 16)}</span>
-          <h3 class="card-label mb-0">FINDINGS</h3>
+          <h2 class="card-label mb-0">FINDINGS</h2>
         </div>
         ${dashList.summary}
         <button class="finding-copy" id="finding-copy-btn" aria-live="polite" onclick="copyFindingsForTicket()" title="Copy the unit, the verdict and every finding with its fix, ready to paste into a ticket">Copy for ticket</button>
@@ -3184,7 +3184,7 @@ function renderDashboard() {
       <div class="card">
         <div class="dash-card-hdr">
           <span class="dash-hdr-icon">${svgIcon("id-card", 16)}</span>
-          <h3 class="card-label mb-0">VPU IDENTITY</h3>
+          <h2 class="card-label mb-0">VPU IDENTITY</h2>
         </div>
         ${vpuName ? `<div class="text-sm text-pulse-muted mb-3">${esc(vpuName)}</div>` : ""}
         <div class="dash-kv">
@@ -3198,7 +3198,7 @@ function renderDashboard() {
       <div class="card">
         <div class="dash-card-hdr">
           <span class="dash-hdr-icon">${svgIcon("package", 16)}</span>
-          <h3 class="card-label mb-0">PIXELLOT SOFTWARE</h3>
+          <h2 class="card-label mb-0">PIXELLOT SOFTWARE</h2>
         </div>
         <div class="text-lg font-bold text-white">${esc(id.pixellotVersion || "—")}</div>
         <div class="text-xs text-pulse-muted mb-3">App Version</div>
@@ -3214,7 +3214,7 @@ function renderDashboard() {
       <div class="dash-card-hdr-row">
         <div class="dash-card-hdr mb-0">
           <span class="dash-hdr-icon">${svgIcon("activity", 16)}</span>
-          <h3 class="card-label mb-0">SYSTEM STATUS</h3>
+          <h2 class="card-label mb-0">SYSTEM STATUS</h2>
         </div>
         <span id="live-indicator" class="live-indicator">${_liveIndicatorHtml()}</span>
       </div>
@@ -3256,14 +3256,14 @@ function renderDashboard() {
       <div class="card">
         <div class="dash-card-hdr">
           <span class="dash-hdr-icon">${svgIcon("link", 16)}</span>
-          <h3 class="card-label mb-0">NETWORK INTERFACE CARD (NIC) CONNECTIONS</h3>
+          <h2 class="card-label mb-0">NETWORK INTERFACE CARD (NIC) CONNECTIONS</h2>
         </div>
         <div class="dash-nic-table" id="dash-nic-table">${_renderNicRows(nicPorts)}</div>
       </div>
       <div class="card">
         <div class="dash-card-hdr">
           <span class="dash-hdr-icon">${svgIcon("wifi", 16)}</span>
-          <h3 class="card-label mb-0">NETWORK</h3>
+          <h2 class="card-label mb-0">NETWORK</h2>
         </div>
         <div class="dash-net-kv">
           <div class="dash-net-row"><span></span><span class="dash-kv-l">Uplink Adapter</span><span class="dash-kv-v">${uplinkDisplay}</span></div>
@@ -3280,14 +3280,14 @@ function renderDashboard() {
       <div class="card">
         <div class="dash-card-hdr">
           <span class="dash-hdr-icon">${svgIcon("database", 16)}</span>
-          <h3 class="card-label mb-0">STORAGE</h3>
+          <h2 class="card-label mb-0">STORAGE</h2>
         </div>
         ${_renderVolumes(volumes)}
       </div>
       <div class="card">
         <div class="dash-card-hdr">
           <span class="dash-hdr-icon">${svgIcon("server", 16)}</span>
-          <h3 class="card-label mb-0">PIXELLOT SERVICES</h3>
+          <h2 class="card-label mb-0">PIXELLOT SERVICES</h2>
         </div>
         <div class="dash-svc-list">
           ${svcs.map((s) => `
@@ -3371,7 +3371,7 @@ function pageHeader(title, subtitle, actionsHtml) {
 function sectionTitle(icon, text) {
   return `<div class="section-hdr">
     <span class="section-hdr-icon">${svgIcon(icon, 16)}</span>
-    <h3 class="section-hdr-text">${esc(text)}</h3>
+    <h2 class="section-hdr-text">${esc(text)}</h2>
   </div>`;
 }
 
@@ -6667,7 +6667,7 @@ function renderServices() {
     function section(title, subtitle, items, emptyMsg) {
       return `<section class="svc-section">
         <div class="svc-section-head">
-          <h3 class="svc-section-title">${esc(title)}</h3>
+          <h2 class="svc-section-title">${esc(title)}</h2>
           <p class="svc-section-sub">${esc(subtitle)}</p>
         </div>
         <div class="svc-grid">

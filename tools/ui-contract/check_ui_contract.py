@@ -49,7 +49,7 @@ STATIC = os.path.join("Pulse.Web", "app", "static")
 # ---------------------------------------------------------------------------
 MAX_LITERALS = 44      # raw colour literals outside :root / html.dark
 MAX_FALLBACKS = 13     # var(--token, <literal>) second values
-MAX_BARE_OUTLINE = 9   # outline:none rules with no :focus-visible partner
+MAX_BARE_OUTLINE = 8   # outline:none rules with no :focus-visible partner
 
 # Tokens that live in the THEMED half of :root but are deliberately shared
 # across light and dark. style.css says so directly at the camera-status block:
