@@ -4717,3 +4717,36 @@ html.dark .lmi-countdown.ok {
     .verdict-strip { flex-wrap: wrap; }
     .verdict-strip-link { margin-left: auto; }
 }
+
+/* ── Confirm dialog ────────────────────────────────────────────
+   Replaces the native confirm(). Modal lift is the one place a shadow is
+   allowed (see DESIGN.md Elevation). */
+.confirm-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    background: var(--c-scrim);
+}
+.confirm-box {
+    width: 100%;
+    max-width: 460px;
+    padding: 20px;
+    background: var(--c-surface);
+    border: 1px solid var(--c-border);
+    border-radius: 12px;
+    box-shadow: 0 20px 60px var(--c-shadow-lift);
+    color: var(--c-text);
+}
+.confirm-title { margin: 0 0 10px; font-size: var(--fs-lead); font-weight: 600; line-height: 1.35; }
+.confirm-body { font-size: var(--fs-body); line-height: 1.5; color: var(--c-text); }
+.confirm-body p { margin: 0 0 10px; }
+.confirm-body ul { margin: 0 0 10px; padding-left: 1.2rem; list-style: disc; }
+.confirm-body li { margin-bottom: 3px; }
+.confirm-body > :last-child { margin-bottom: 0; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; flex-wrap: wrap; }
+.confirm-actions .btn-outline { min-height: 32px; padding: 6px 14px; font-size: var(--fs-small); }
+.confirm-actions .btn-outline:focus-visible { outline: 2px solid var(--c-accent-blue); outline-offset: 2px; }
