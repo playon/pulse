@@ -47,9 +47,9 @@ STATIC = os.path.join("Pulse.Web", "app", "static")
 # Ratchet baselines. These are debts that predate the guard, not permissions.
 # Lower each number when you pay one down; the guard fails if it goes up.
 # ---------------------------------------------------------------------------
-MAX_LITERALS = 46      # raw colour literals outside :root / html.dark
+MAX_LITERALS = 44      # raw colour literals outside :root / html.dark
 MAX_FALLBACKS = 13     # var(--token, <literal>) second values
-MAX_BARE_OUTLINE = 9   # outline:none rules with no :focus-visible partner
+MAX_BARE_OUTLINE = 8   # outline:none rules with no :focus-visible partner
 
 # Tokens that live in the THEMED half of :root but are deliberately shared
 # across light and dark. style.css says so directly at the camera-status block:
@@ -108,10 +108,7 @@ CONTRAST_BASELINE = {
     ("dark", "#ffffff", "#3b82f6"): 3.68,   # 4.5:1 needed -- --c-on-accent on --c-pill-info
     ("light", "#ffffff", "#ef4444"): 3.76,  # 4.5:1 needed -- --c-on-accent on --c-btn-danger
     ("dark", "#ffffff", "#ef4444"): 3.76,   # 4.5:1 needed -- --c-on-accent on --c-btn-danger
-    ("light", "#2460e3", "rgba(37,99,235,0.12)"): 3.95,  # 4.5 -- .badge-info / .sev-chip-info
-    ("light", "#64748b", "#e8eef5"): 4.07,  # 4.5:1 needed -- --c-dimmer on --c-deep-bg (sidebar)
     ("light", "#bf2121", "rgba(220,38,38,0.12)"): 4.25,  # 4.5 -- .badge-fail / .badge-stopped
-    ("light", "#64748b", "#f1f5f9"): 4.34,  # 4.5:1 needed -- --c-dimmer on --c-bg
     ("light", "#137638", "rgba(22,163,74,0.12)"): 4.43,  # 4.5 -- .badge-pass / .badge-running
 }
 

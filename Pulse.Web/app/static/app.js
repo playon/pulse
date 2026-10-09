@@ -172,16 +172,38 @@ function updateNav() {
 // findings, so the sidebar doubles as the at-a-glance health map (replaces the
 // old Subsystems panel). Only warning/critical show an icon — healthy and
 // non-subsystem links (Dashboard, Settings, …) show nothing.
-function updateNavHealth() {
-  const health = {};
+// Lane -> tone, from the same rules the Dashboard uses for its findings
+// (_dashToneFn), so the sidebar, the palette and the Dashboard say the same
+// thing about the same problem. "Worth knowing" and "Fix soon" findings do not
+// flag a lane: the triangle means tonight is at risk. Windows Events has no
+// findings of its own; it is derived from the event log (_subsystemHealth) and
+// stays a plain risk.
+var _LANE_RANK = { critical: 3, warning: 2, soon: 1 };
+function _laneTones(dash, includeSoon) {
+  var out = {};
+  if (dash && !dash.error) {
+    var toneOf = _dashToneFn(dash);
+    (dash.findings || []).forEach(function(f) {
+      var t = toneOf(f);
+      if (!_LANE_RANK[t] || (t === "soon" && !includeSoon)) return;
+      var page = _findingPageFor(f.category);
+      if (!out[page] || _LANE_RANK[t] > _LANE_RANK[out[page]]) out[page] = t;
+    });
+  }
   try {
-    _subsystemHealth((cached("dashboard") || {}).findings || [])
-      .forEach((s) => { health[s.id] = s.health; });
-  } catch (e) { return; }
+    _subsystemHealth((dash && dash.findings) || []).forEach(function(sub) {
+      if (sub.id === "events" && sub.health !== "OK" && !out.events) out.events = "warning";
+    });
+  } catch (e) {}
+  return out;
+}
+
+function updateNavHealth() {
+  const lanes = _laneTones(cached("dashboard"));
   document.querySelectorAll(".nav-item").forEach((el) => {
     const slot = el.querySelector(".nav-status");
     if (!slot) return;
-    const h = health[el.dataset.page];
+    const h = lanes[el.dataset.page] === "critical" ? "Critical" : lanes[el.dataset.page] === "warning" ? "Warning" : "";
     if (h === "Critical" || h === "Warning") {
       slot.className = "nav-status " + (h === "Critical" ? "nav-status-crit" : "nav-status-warn");
       // The glyph is identical for both levels; only its colour differs. Give
@@ -202,6 +224,278 @@ function updateNavHealth() {
   });
 }
 
+// ── Confirm dialog ───────────────────────────────────────────
+// Replaces the native confirm(): it names the action on its button, shows the
+// consequence formatted, never makes Enter the destructive answer, and does
+// not freeze the page. confirmAction() resolves true or false.
+//   opts.title         what is about to happen, as a question
+//   opts.body          text; blank line = new paragraph, "\u2022 " lines = list
+//   opts.confirmLabel  the action, e.g. "Delete 12 folders" (never "OK"/"Yes")
+//   opts.tone          "danger" for irreversible or disruptive, else neutral
+var _confirmOpen = null;
+function confirmAction(opts) {
+  if (_confirmOpen) _confirmOpen(false);
+  return new Promise(function(resolve) {
+    var opener = document.activeElement;
+    var danger = opts.tone === "danger";
+    var paras = String(opts.body || "").split("\n\n").filter(Boolean).map(function(p) {
+      var lines = p.split("\n");
+      if (lines.every(function(l) { return l.indexOf("\u2022 ") === 0; })) {
+        return "<ul>" + lines.map(function(l) { return "<li>" + esc(l.slice(2)) + "</li>"; }).join("") + "</ul>";
+      }
+      return "<p>" + lines.map(esc).join("<br>") + "</p>";
+    }).join("");
+    var wrap = document.createElement("div");
+    wrap.className = "confirm-modal";
+    wrap.innerHTML = '<div class="confirm-box" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-body">'
+      + '<h2 class="confirm-title" id="confirm-title">' + esc(opts.title) + '</h2>'
+      + '<div class="confirm-body" id="confirm-body">' + paras + '</div>'
+      + '<div class="confirm-actions">'
+      +   '<button type="button" class="btn-outline btn-ol-muted confirm-cancel">' + esc(opts.cancelLabel || "Cancel") + '</button>'
+      +   '<button type="button" class="btn-outline ' + (danger ? "btn-ol-red" : "btn-ol-blue") + ' confirm-ok">' + esc(opts.confirmLabel) + '</button>'
+      + '</div></div>';
+    var cancel = wrap.querySelector(".confirm-cancel"), ok = wrap.querySelector(".confirm-ok");
+    function done(v) {
+      document.removeEventListener("keydown", onKey, true);
+      wrap.remove();
+      _confirmOpen = null;
+      if (opener && opener.focus) { try { opener.focus(); } catch (e) {} }
+      resolve(v);
+    }
+    function onKey(e) {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); done(false); }
+      else if (e.key === "Tab") {
+        e.preventDefault();
+        (document.activeElement === cancel ? ok : cancel).focus();
+      }
+    }
+    cancel.addEventListener("click", function() { done(false); });
+    ok.addEventListener("click", function() { done(true); });
+    wrap.addEventListener("mousedown", function(e) { if (e.target === wrap) done(false); });
+    document.addEventListener("keydown", onKey, true);
+    _confirmOpen = done;
+    document.body.appendChild(wrap);
+    // A destructive question starts on Cancel so a stray Enter cannot confirm it.
+    (danger ? cancel : ok).focus();
+  });
+}
+
+// ── Command palette ──────────────────────────────────────────
+// 21 tabs, all reached by clicking down a sidebar. "/" (or Ctrl/Cmd+K) opens a
+// search over the tabs and the current findings, and "Next problem" jumps to
+// the worst flagged lane, so an agent on a live call does not hunt for it.
+// Built from the same sources as the sidebar (NAV_SECTIONS, _subsystemHealth)
+// and the Dashboard's finding rows (findingJump), so it cannot disagree.
+var _palette = null;
+
+function _paletteEntries(query) {
+  var dash = cached("dashboard");
+  var q = (query || "").trim().toLowerCase();
+  var RANK = { critical: 3, warning: 2, soon: 1 };
+  var findings = [], laneTone = _laneTones(dash, true);
+  if (dash && !dash.error) {
+    var toneOf = _dashToneFn(dash);
+    (dash.findings || []).forEach(function(f) {
+      var tone = toneOf(f);
+      if (!RANK[tone]) return;          // "Worth knowing" is context, not a problem
+      var page = _findingPageFor(f.category);
+      findings.push({ kind: "finding", id: page, title: f.title || "", label: f.title || "", group: _pageLabel(page),
+        icon: "alert", tone: tone, flag: VERDICT[tone].word, rank: RANK[tone] });
+    });
+    findings.sort(function(a, b) { return b.rank - a.rank; });
+  }
+
+  var WORD = { critical: VERDICT.critical.word, warning: VERDICT.warning.word, soon: VERDICT.soon.word };
+  var pages = [];
+  NAV_SECTIONS.forEach(function(sec) {
+    sec.pages.forEach(function(p) {
+      var t = p.id === "dashboard" ? "" : (laneTone[p.id] || "");
+      pages.push({ kind: "page", id: p.id, label: p.label, group: sec.label, icon: p.icon, tone: t, flag: t ? WORD[t] : "", rank: RANK[t] || 0 });
+    });
+  });
+  pages.push({ kind: "page", id: "fault-isolator", label: "Camera Connection Troubleshooting", group: "TROUBLESHOOTING", icon: "zap", tone: "", flag: "", rank: 0 });
+
+  var worst = pages.filter(function(p) { return p.rank; }).sort(function(a, b) { return b.rank - a.rank; })[0];
+  var next = worst ? { kind: "page", id: worst.id, label: "Next problem: " + worst.label, group: worst.flag, icon: "triangle", tone: worst.tone, flag: "", next: true } : null;
+
+  function score(e) {
+    var hay = (e.label + " " + e.group).toLowerCase();
+    if (!q) return 1;
+    if (e.label.toLowerCase().indexOf(q) === 0) return 3;
+    if (e.label.toLowerCase().indexOf(q) !== -1) return 2;
+    return q.split(/\s+/).every(function(w) { return hay.indexOf(w) !== -1; }) ? 1 : 0;
+  }
+  var out = [];
+  if (!q) {
+    if (next) out.push(next);
+    out = out.concat(findings.slice(0, 8));
+    out = out.concat(pages.filter(function(p) { return p.tone; }).sort(function(a, b) { return b.rank - a.rank; }));
+    out = out.concat(pages.filter(function(p) { return !p.tone; }));
+  } else {
+    var all = findings.concat(pages).map(function(e) { return { e: e, s: score(e) }; }).filter(function(x) { return x.s; });
+    all.sort(function(a, b) { return b.s - a.s; });
+    out = all.map(function(x) { return x.e; });
+  }
+  var note = "";
+  if (!dash) note = "Findings appear once the Dashboard check finishes.";
+  else if (dash.error) note = "Findings are unavailable because the Dashboard check failed.";
+  return { items: out, note: note };
+}
+
+function _paletteRender() {
+  var p = _palette; if (!p) return;
+  var res = _paletteEntries(p.input.value);
+  p.items = res.items;
+  if (p.index >= p.items.length) p.index = Math.max(0, p.items.length - 1);
+  p.list.innerHTML = p.items.map(function(e, i) {
+    return '<li id="pal-opt-' + i + '" class="pal-opt' + (i === p.index ? " pal-active" : "") + (e.tone ? " pal-" + e.tone : "")
+      + '" role="option" aria-selected="' + (i === p.index) + '" data-i="' + i + '">'
+      + '<span class="pal-icon">' + svgIcon(e.icon || "grid", 14) + '</span>'
+      + '<span class="pal-label">' + esc(e.label) + '</span>'
+      + '<span class="pal-meta">' + (e.flag ? '<span class="pal-flag">' + esc(e.flag) + '</span>' : "") + esc(e.group || "") + '</span></li>';
+  }).join("") || '<li class="pal-empty">Nothing matches. Try a tab name, or part of a finding.</li>';
+  p.note.textContent = res.note;
+  p.note.hidden = !res.note;
+  p.input.setAttribute("aria-activedescendant", p.items.length ? "pal-opt-" + p.index : "");
+  p.status.textContent = p.items.length + (p.items.length === 1 ? " result" : " results");
+  var act = p.list.querySelector(".pal-active");
+  if (act && act.scrollIntoView) act.scrollIntoView({ block: "nearest" });
+}
+
+function _paletteChoose(i) {
+  var p = _palette; if (!p || !p.items[i]) return;
+  var e = p.items[i];
+  closePalette(false);
+  if (e.kind === "finding") findingJump(e.id, encodeURIComponent(e.title));
+  else navigate(e.id);
+}
+
+function closePalette(restoreFocus) {
+  var p = _palette; if (!p) return;
+  document.removeEventListener("keydown", p.onKey, true);
+  p.wrap.remove();
+  _palette = null;
+  if (restoreFocus !== false && p.opener && p.opener.focus) { try { p.opener.focus(); } catch (e) {} }
+}
+
+function openPalette(viaSlash) {
+  if (_palette || _confirmOpen) return;
+  var splash = document.getElementById("splash");
+  if (splash && getComputedStyle(splash).display !== "none" && !splash.classList.contains("splash-hidden")) return;
+  var opener = document.activeElement;
+  var wrap = document.createElement("div");
+  wrap.className = "pal-modal";
+  wrap.innerHTML = '<div class="pal-box" role="dialog" aria-modal="true" aria-label="Search tabs and findings">'
+    + '<div class="pal-search">' + svgIcon("search", 16)
+    + '<input type="text" class="pal-input" role="combobox" aria-expanded="true" aria-controls="pal-list" aria-autocomplete="list" placeholder="Search tabs and findings" autocomplete="off" spellcheck="false"></div>'
+    + '<p class="pal-note" hidden></p>'
+    + '<ul class="pal-list" id="pal-list" role="listbox" aria-label="Results"></ul>'
+    + '<div class="pal-foot"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>Enter</kbd> open</span><span><kbd>Esc</kbd> close</span></div>'
+    + '<div class="sr-only" role="status" aria-live="polite" id="pal-status"></div></div>';
+  var p = _palette = { wrap: wrap, opener: opener, index: 0, items: [],
+    input: wrap.querySelector(".pal-input"), list: wrap.querySelector(".pal-list"),
+    note: wrap.querySelector(".pal-note"), status: wrap.querySelector("#pal-status") };
+  p.onKey = function(e) {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closePalette(); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); p.index = Math.min(p.items.length - 1, p.index + 1); _paletteRender(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); p.index = Math.max(0, p.index - 1); _paletteRender(); }
+    else if (e.key === "Home") { e.preventDefault(); p.index = 0; _paletteRender(); }
+    else if (e.key === "End") { e.preventDefault(); p.index = Math.max(0, p.items.length - 1); _paletteRender(); }
+    else if (e.key === "Enter") { e.preventDefault(); _paletteChoose(p.index); }
+    else if (e.key === "Tab") { e.preventDefault(); }
+  };
+  p.openedAt = Date.now(); p.viaSlash = viaSlash === true;
+  p.input.addEventListener("input", function() {
+    // Some input paths deliver the "/" that opened the palette as a typed
+    // character after focus has moved; it is the shortcut, not a query.
+    if (p.viaSlash && Date.now() - p.openedAt < 400 && p.input.value === "/") p.input.value = "";
+    p.viaSlash = false;
+    p.index = 0; _paletteRender();
+  });
+  p.list.addEventListener("mousemove", function(e) {
+    var li = e.target.closest(".pal-opt");
+    if (li && +li.dataset.i !== p.index) { p.index = +li.dataset.i; _paletteRender(); }
+  });
+  p.list.addEventListener("click", function(e) {
+    var li = e.target.closest(".pal-opt");
+    if (li) _paletteChoose(+li.dataset.i);
+  });
+  wrap.addEventListener("mousedown", function(e) { if (e.target === wrap) closePalette(); });
+  document.addEventListener("keydown", p.onKey, true);
+  document.body.appendChild(wrap);
+  _paletteRender();
+  p.input.focus();
+}
+
+// "/" opens it unless the user is typing somewhere; Ctrl/Cmd+K works anywhere.
+document.addEventListener("keydown", function(e) {
+  if (_palette || e.defaultPrevented) return;
+  var t = e.target, tag = t && t.tagName;
+  var typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (t && t.isContentEditable);
+  if ((e.key === "k" || e.key === "K") && (e.ctrlKey || e.metaKey) && !e.altKey) { e.preventDefault(); openPalette(); }
+  else if (e.key === "/" && !typing && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); openPalette(true); }
+});
+
+// ── Verdict strip ────────────────────────────────────────────
+// The unit verdict ("is tonight's game OK") is the sentence an agent reads to
+// the school, and it lives on the Dashboard. On every other tab it vanished,
+// leaving only a nav triangle. This strip carries it under the page title
+// everywhere except the Dashboard (whose card already says it), in the same
+// words as the readiness card, and links back.
+//
+// It makes the four-state promise: loading, no verdict, failed and stale each
+// look different from a real verdict, and a stale verdict says how old it is.
+var _VERDICT_STALE_MS = 15 * 60 * 1000;
+function _verdictStripModel() {
+  var dash = cached("dashboard");
+  if (!dash) return { tone: "muted", word: "Checking", text: "Stream readiness is still being checked." };
+  if (dash.error) return { tone: "muted", word: "No verdict", text: "The Dashboard check failed, so there is no readiness verdict. Check each tab." };
+  var v = resolveReadiness(dash.readiness);
+  if (!v || !v.status) return { tone: "muted", word: "No verdict", text: "No readiness verdict for this unit." };
+  var meta = _RDY_META[v.status] || _RDY_META.WARN;
+  var blockers = (v.blockers || []).length, risks = (v.risks || []).length;
+  var text = (blockers ? blockers + (blockers === 1 ? " thing is" : " things are") + " stopping tonight's game"
+                       : "Nothing is stopping tonight's game")
+    + " \u00b7 " + (risks ? risks + (risks === 1 ? " risk" : " risks") + " tonight" : "No risks tonight");
+  var here = 0;
+  if (currentPage !== "dashboard") {
+    var tf = _dashToneFn(dash);
+    (dash.findings || []).forEach(function(f) {
+      if (_LANE_RANK[tf(f)] && _findingPageFor(f.category) === currentPage) here++;
+    });
+  }
+  if (here) text += " \u00b7 " + here + " on this tab";
+  var t = v.timestamp ? new Date(v.timestamp) : null;
+  var age = t && !isNaN(t) ? Date.now() - t.getTime() : null;
+  var asOf = t && !isNaN(t) ? t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+  if (age !== null && age > _VERDICT_STALE_MS && !(window.__PULSE_DEMO_MODE && _readinessDemoState)) {
+    return { tone: "muted", word: meta.word, icon: meta.icon, dot: meta.tone,
+      text: text + " \u00b7 as of " + asOf + ", " + Math.round(age / 60000) + " min old. Refresh the Dashboard for a current verdict." };
+  }
+  return { tone: meta.tone, word: meta.word, icon: meta.icon, text: text + (asOf ? " \u00b7 as of " + asOf : "") };
+}
+
+function updateVerdictStrip() {
+  var el = document.getElementById("verdict-strip");
+  if (!el) return;
+  if (currentPage === "dashboard") { el.hidden = true; el.innerHTML = ""; return; }
+  var m = _verdictStripModel();
+  el.hidden = false;
+  el.className = "verdict-strip verdict-strip-" + m.tone;
+  el.innerHTML = (m.icon ? svgIcon(m.icon, 14) : "")
+    + '<span class="verdict-strip-word">' + (m.dot ? '<span class="verdict-strip-dot verdict-strip-dot-' + esc(m.dot) + '" aria-hidden="true"></span>' : "") + esc(m.word) + '</span>'
+    + '<span class="verdict-strip-text">' + esc(m.text) + '</span>'
+    + '<a href="#dashboard" class="verdict-strip-link" onclick="event.preventDefault();navigate(\'dashboard\')">Open Dashboard</a>';
+  // Tell a screen reader when the verdict CHANGES while you stay on a page,
+  // not on every tab switch (the strip is rewritten on each render). The
+  // as-of time is left out so a clock tick is not a change.
+  var live = document.getElementById("verdict-live");
+  var said = m.word + " " + m.text.replace(/ \u00b7 as of .*$/, "");
+  if (live && _verdictSaid !== null && _verdictSaidPage === currentPage && said !== _verdictSaid) live.textContent = "Stream readiness changed: " + said;
+  _verdictSaid = said; _verdictSaidPage = currentPage;
+}
+var _verdictSaid = null, _verdictSaidPage = null;
+
 function renderPage(id) {
   const fn = pageRenderers[id];
   if (!fn) { $page().innerHTML = `<p class="text-pulse-muted">Unknown page: ${esc(id)}</p>`; return; }
@@ -215,6 +509,7 @@ function renderPage(id) {
   }
   try {
     fn();
+    updateVerdictStrip();
   } catch (err) {
     console.error("Render error on", id, err);
     $page().innerHTML = `<div class="card"><p class="text-red-400 font-bold">Render Error</p>
@@ -436,7 +731,7 @@ function loading() {
 
 function card(title, body, extra) {
   return `<div class="card ${extra || ""}">
-    ${title ? `<h3 class="text-sm font-semibold text-pulse-muted uppercase tracking-wide mb-3">${esc(title)}</h3>` : ""}
+    ${title ? `<h2 class="text-sm font-semibold text-pulse-muted uppercase tracking-wide mb-3">${esc(title)}</h2>` : ""}
     ${body}
   </div>`;
 }
@@ -519,6 +814,7 @@ function fetchSection(key) {
     }
     // Refresh the sidebar health dots when the data that drives them lands.
     if (key === "dashboard" || key === "events") updateNavHealth();
+    if (key === "dashboard") updateVerdictStrip();
     // Re-render the current page only when the completed fetch is relevant to it.
     // For dashboard, only its own deps trigger a refresh — non-dashboard data
     // (events, audio, scoreconnect, etc.) doesn't change anything visible.
@@ -1822,15 +2118,15 @@ function _ceEsrChip(cloud) {
   const esr = cloud.esr;
   if (!esr) {
     const why = cloud.errors && cloud.errors.events ? "couldn't load events" : "unavailable";
-    return `<span title="Pulse could not load this school's event history, so it could not count ESR.">${severityChip("muted", `ESR ${why}`)}</span>`;
+    return `<span title="Pulse could not load this school's event history, so it could not work out the event success rate.">${severityChip("muted", `Event success rate ${why}`)}</span>`;
   }
   if (!esr.counted) {
-    return `<span title="No past public events with a known result yet.">${severityChip("muted", "ESR: no past events")}</span>`;
+    return `<span title="No past public events with a known result yet.">${severityChip("muted", "Event success rate: no past events")}</span>`;
   }
   const pct = Math.round(esr.rate * 100);
   const tip = `Event Success Rate: ${esr.succeeded} of the last ${esr.counted} public events went on air. ` +
     "Unlisted and test events are not counted. Pulse counts this from the NFHS events API, so it can differ slightly from the Sigma ESR dashboard.";
-  return `<span title="${esc(tip)}">${severityChip(esr.rate >= 0.9 ? "ok" : "warning", `ESR ${pct}% (${esr.succeeded}/${esr.counted})`)}</span>`;
+  return `<span title="${esc(tip)}">${severityChip(esr.rate >= 0.9 ? "ok" : "warning", `Event success rate ${pct}% (${esr.succeeded} of ${esr.counted})`)}</span>`;
 }
 
 function renderCloudEvents() {
@@ -2075,7 +2371,7 @@ function renderCameraHardware() {
   const cards = entries.map((e) => _camHardwareCard(e.cam, e.port)).join("");
   const empty = `<div class="cam-no-detect">No cameras detected on any active port.</div>`;
   const noCgiNote = (entries.length && !anyCgi)
-    ? `<div class="cam-connecting-note">${svgIcon("refresh", 12)} Probing camera heads (Admin CGI)… identity-only data shown until probes complete. Use Refresh to force a re-probe.</div>`
+    ? `<div class="cam-connecting-note">${svgIcon("refresh", 12)} Checking each camera's admin page… only identity details are shown until the checks finish. Use Refresh to check again.</div>`
     : "";
 
   $page().innerHTML = `
@@ -2466,7 +2762,7 @@ function _findingRowHtml(r, scope, i, opts) {
   var v = VERDICT[r.t] || verdictFor(f.severity);
   var key = scope + ":" + (f.title || "");
   var remembered = _findingOpen[key];
-  var open = remembered == null ? (i === 0 && r.t === "critical") : remembered;
+  var open = remembered == null ? (i === 0 && (r.t === "critical" || (opts.lone && r.t !== "info"))) : remembered;
   var id = "fd-" + scope + "-" + i;
   var rec = (f.recommendation || f.body || "").trim();
   var extra = opts.detailExtra ? opts.detailExtra(f) : "";
@@ -2495,6 +2791,9 @@ function findingListHtml(items, opts) {
   var rows = _sortByTone(items || [], opts.toneOf || _findingTone);
   var act = rows.filter(function(r) { return r.t !== "info"; });
   var notes = rows.filter(function(r) { return r.t === "info"; });
+  // A lone problem opens by default: nothing else competes for attention, so
+  // hiding its fix behind a click is just a click.
+  opts = Object.assign({}, opts, { lone: act.length === 1 });
   var html = act.map(function(r, i) { return _findingRowHtml(r, scope, i, opts); }).join("");
   if (notes.length && act.length) {
     // Folded: context, not work. Opened, the notes are ordinary rows.
@@ -2728,7 +3027,7 @@ function readinessCard(verdict, freshness) {
     + '<div class="rdy-main">'
     +   '<div class="rdy-badge rdy-badge-' + meta.tone + '">' + svgIcon(meta.icon, 28) + '<span class="rdy-badge-word">' + meta.word + '</span></div>'
     +   '<div class="rdy-headline">'
-    +     '<div class="rdy-title-row"><h3 class="rdy-title">Stream Readiness</h3>' + (asOf ? '<span class="rdy-asof">as of ' + esc(asOf) + '</span>' : '') + '</div>'
+    +     '<div class="rdy-title-row"><h2 class="rdy-title">Stream Readiness</h2>' + (asOf ? '<span class="rdy-asof">as of ' + esc(asOf) + '</span>' : '') + '</div>'
     +     '<p class="rdy-tag">' + esc(meta.tag) + '</p>'
     +     (freshness ? '<p class="rdy-fresh">' + svgIcon("check", 12) + ' ' + esc(freshness) + '</p>' : '')
     +   '</div>'
@@ -2743,6 +3042,62 @@ function readinessCard(verdict, freshness) {
     + '</div>'
     + demoBar
     + '</div>';
+}
+
+// The Dashboard's verdict tone for a finding: the readiness policy's class
+// (with its supersede / never-demote rules, documented below), falling back to
+// the collector severity capped at a risk. Shared so the Dashboard, and the
+// command palette, say the same thing about the same finding.
+function _dashToneFn(dash) {
+  const _rdy = dash.readiness || {};
+  const _toneByCode = {};
+  (_rdy.blockers || []).forEach((b) => { if (b.code) _toneByCode[b.code] = "critical"; });
+  (_rdy.risks    || []).forEach((r) => { if (r.code) _toneByCode[r.code] = "warning";  });
+  (_rdy.info     || []).forEach((n) => { if (n.code) _toneByCode[n.code] = "info";     });
+  // The policy may ESCALATE a finding -- deciding what stops tonight's game is
+  // exactly its job -- but it must never silently DEMOTE one to an FYI.
+  //
+  // Demotion is the dangerous direction, and it happens for a legitimate
+  // reason: main.py:2540 classes `disk-critical` as info *because* readiness
+  // gates the same volume through its own per-drive F15a/F15b checks. One
+  // full drive, two records. Letting the info class win printed "Worth
+  // knowing" on a drive the same card was counting as a risk one line above.
+  //
+  // So: a blocker is critical, a risk is a risk, and anything the collector
+  // called a problem stays at least a risk even where the policy has no
+  // opinion or is deferring to a check it already counted.
+  return (f) => {
+    const own = verdictFor(f.severity).tone;
+    // A finding can name the readiness entry that supersedes it (main.py sets
+    // supersededBy where one condition is reported by two records -- a full
+    // C:/D: drive). Take that entry's class: it is the one the policy actually
+    // weighed, and the one the counts on this card are built from.
+    const superseded = f.supersededBy ? _toneByCode[f.supersededBy] : null;
+    if (superseded) return superseded;
+    const policy = _toneByCode[f.code];
+    if (!policy) {
+      // No policy class for this finding. Two ways to get here on a live
+      // unit: no readiness record rode along at all (an older payload, or a
+      // bundle shared in from another unit via peer.py), or the finding named
+      // a superseding entry whose own check did not fire -- `disk-critical`
+      // declares supersededBy: "disk-d-critical", and _compute_readiness
+      // skips it, so if F15b does not fire the finding has no class anywhere.
+      //
+      // Fall back to the collector's severity but CAP IT AT "risk". A
+      // collector severity of "critical" means "serious finding"; it does NOT
+      // mean "stops tonight's game". Those are different scales and only the
+      // policy decides the second one. Reading `own` unguarded is what put
+      // "Stops tonight's game" on a 91%-full recording drive, which does not
+      // stop an event.
+      return own === "info" ? "info" : "warning";
+    }
+    // The policy may ESCALATE -- deciding what stops tonight's game is its
+    // job -- but it must never silently DEMOTE a finding to an FYI.
+    // Demoting in words is still wrong ("Worth knowing"), but so is claiming
+    // tonight is at risk when the policy decided it isn't: "Fix soon".
+    if (policy === "info" && own !== "info") return "soon";
+    return policy;
+  };
 }
 
 function renderDashboard() {
@@ -2788,55 +3143,7 @@ function renderDashboard() {
   // on the PASS chip the card read "Nothing is stopping tonight's game" above
   // two rows reading "Stops tonight's game". The card previews a state; the
   // findings describe the unit, and they stay true in every preview.
-  const _rdy = dash.readiness || {};
-  const _toneByCode = {};
-  (_rdy.blockers || []).forEach((b) => { if (b.code) _toneByCode[b.code] = "critical"; });
-  (_rdy.risks    || []).forEach((r) => { if (r.code) _toneByCode[r.code] = "warning";  });
-  (_rdy.info     || []).forEach((n) => { if (n.code) _toneByCode[n.code] = "info";     });
-  // The policy may ESCALATE a finding -- deciding what stops tonight's game is
-  // exactly its job -- but it must never silently DEMOTE one to an FYI.
-  //
-  // Demotion is the dangerous direction, and it happens for a legitimate
-  // reason: main.py:2540 classes `disk-critical` as info *because* readiness
-  // gates the same volume through its own per-drive F15a/F15b checks. One
-  // full drive, two records. Letting the info class win printed "Worth
-  // knowing" on a drive the same card was counting as a risk one line above.
-  //
-  // So: a blocker is critical, a risk is a risk, and anything the collector
-  // called a problem stays at least a risk even where the policy has no
-  // opinion or is deferring to a check it already counted.
-  const toneOf = (f) => {
-    const own = verdictFor(f.severity).tone;
-    // A finding can name the readiness entry that supersedes it (main.py sets
-    // supersededBy where one condition is reported by two records -- a full
-    // C:/D: drive). Take that entry's class: it is the one the policy actually
-    // weighed, and the one the counts on this card are built from.
-    const superseded = f.supersededBy ? _toneByCode[f.supersededBy] : null;
-    if (superseded) return superseded;
-    const policy = _toneByCode[f.code];
-    if (!policy) {
-      // No policy class for this finding. Two ways to get here on a live
-      // unit: no readiness record rode along at all (an older payload, or a
-      // bundle shared in from another unit via peer.py), or the finding named
-      // a superseding entry whose own check did not fire -- `disk-critical`
-      // declares supersededBy: "disk-d-critical", and _compute_readiness
-      // skips it, so if F15b does not fire the finding has no class anywhere.
-      //
-      // Fall back to the collector's severity but CAP IT AT "risk". A
-      // collector severity of "critical" means "serious finding"; it does NOT
-      // mean "stops tonight's game". Those are different scales and only the
-      // policy decides the second one. Reading `own` unguarded is what put
-      // "Stops tonight's game" on a 91%-full recording drive, which does not
-      // stop an event.
-      return own === "info" ? "info" : "warning";
-    }
-    // The policy may ESCALATE -- deciding what stops tonight's game is its
-    // job -- but it must never silently DEMOTE a finding to an FYI.
-    // Demoting in words is still wrong ("Worth knowing"), but so is claiming
-    // tonight is at risk when the policy decided it isn't: "Fix soon".
-    if (policy === "info" && own !== "info") return "soon";
-    return policy;
-  };
+  const toneOf = _dashToneFn(dash);
 
   const warnCount = findings.filter((f) => toneOf(f) === "warning").length;
   const critCount = findings.filter((f) => toneOf(f) === "critical").length;
@@ -3056,7 +3363,7 @@ function renderDashboard() {
       <div class="findings-hdr">
         <div class="dash-card-hdr mb-0">
           <span class="dash-hdr-icon">${svgIcon("clipboard-list", 16)}</span>
-          <h3 class="card-label mb-0">FINDINGS</h3>
+          <h2 class="card-label mb-0">FINDINGS</h2>
         </div>
         ${dashList.summary}
         <button class="finding-copy" id="finding-copy-btn" aria-live="polite" onclick="copyFindingsForTicket()" title="Copy the unit, the verdict and every finding with its fix, ready to paste into a ticket">Copy for ticket</button>
@@ -3082,7 +3389,7 @@ function renderDashboard() {
       <div class="card">
         <div class="dash-card-hdr">
           <span class="dash-hdr-icon">${svgIcon("id-card", 16)}</span>
-          <h3 class="card-label mb-0">VPU IDENTITY</h3>
+          <h2 class="card-label mb-0">VPU IDENTITY</h2>
         </div>
         ${vpuName ? `<div class="text-sm text-pulse-muted mb-3">${esc(vpuName)}</div>` : ""}
         <div class="dash-kv">
@@ -3096,7 +3403,7 @@ function renderDashboard() {
       <div class="card">
         <div class="dash-card-hdr">
           <span class="dash-hdr-icon">${svgIcon("package", 16)}</span>
-          <h3 class="card-label mb-0">PIXELLOT SOFTWARE</h3>
+          <h2 class="card-label mb-0">PIXELLOT SOFTWARE</h2>
         </div>
         <div class="text-lg font-bold text-white">${esc(id.pixellotVersion || "—")}</div>
         <div class="text-xs text-pulse-muted mb-3">App Version</div>
@@ -3112,7 +3419,7 @@ function renderDashboard() {
       <div class="dash-card-hdr-row">
         <div class="dash-card-hdr mb-0">
           <span class="dash-hdr-icon">${svgIcon("activity", 16)}</span>
-          <h3 class="card-label mb-0">SYSTEM STATUS</h3>
+          <h2 class="card-label mb-0">SYSTEM STATUS</h2>
         </div>
         <span id="live-indicator" class="live-indicator">${_liveIndicatorHtml()}</span>
       </div>
@@ -3154,14 +3461,14 @@ function renderDashboard() {
       <div class="card">
         <div class="dash-card-hdr">
           <span class="dash-hdr-icon">${svgIcon("link", 16)}</span>
-          <h3 class="card-label mb-0">NETWORK INTERFACE CARD (NIC) CONNECTIONS</h3>
+          <h2 class="card-label mb-0">NETWORK INTERFACE CARD (NIC) CONNECTIONS</h2>
         </div>
         <div class="dash-nic-table" id="dash-nic-table">${_renderNicRows(nicPorts)}</div>
       </div>
       <div class="card">
         <div class="dash-card-hdr">
           <span class="dash-hdr-icon">${svgIcon("wifi", 16)}</span>
-          <h3 class="card-label mb-0">NETWORK</h3>
+          <h2 class="card-label mb-0">NETWORK</h2>
         </div>
         <div class="dash-net-kv">
           <div class="dash-net-row"><span></span><span class="dash-kv-l">Uplink Adapter</span><span class="dash-kv-v">${uplinkDisplay}</span></div>
@@ -3178,14 +3485,14 @@ function renderDashboard() {
       <div class="card">
         <div class="dash-card-hdr">
           <span class="dash-hdr-icon">${svgIcon("database", 16)}</span>
-          <h3 class="card-label mb-0">STORAGE</h3>
+          <h2 class="card-label mb-0">STORAGE</h2>
         </div>
         ${_renderVolumes(volumes)}
       </div>
       <div class="card">
         <div class="dash-card-hdr">
           <span class="dash-hdr-icon">${svgIcon("server", 16)}</span>
-          <h3 class="card-label mb-0">PIXELLOT SERVICES</h3>
+          <h2 class="card-label mb-0">PIXELLOT SERVICES</h2>
         </div>
         <div class="dash-svc-list">
           ${svcs.map((s) => `
@@ -3269,7 +3576,7 @@ function pageHeader(title, subtitle, actionsHtml) {
 function sectionTitle(icon, text) {
   return `<div class="section-hdr">
     <span class="section-hdr-icon">${svgIcon(icon, 16)}</span>
-    <h3 class="section-hdr-text">${esc(text)}</h3>
+    <h2 class="section-hdr-text">${esc(text)}</h2>
   </div>`;
 }
 
@@ -3562,7 +3869,7 @@ function renderApplications() {
               const c = s.concern;
               const rowCls = c ? ` class="sw-row-${esc(c.severity)}"` : "";
               const concernCell = hasConcerns ? `<td>${c
-                ? `<span class="sw-concern-badge sw-concern-${esc(c.severity)}" title="${esc(c.reason)}">${esc(c.shortLabel || c.label)}</span>`
+                ? `<span class="sw-concern-badge sw-concern-${esc(c.severity)}">${esc(c.shortLabel || c.label)}</span><div class="sw-concern-reason">${esc(c.reason)}</div>`
                 : `<span class="text-pulse-muted text-xs">—</span>`}</td>` : "";
               return `<tr${rowCls}>
                 <td>${esc(s.displayName)}</td>
@@ -5084,10 +5391,16 @@ function renderNetwork() {
 
   const issues = _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, lmiLog, data.findings);
 
-  const hasCrit = issues.some(function(f) { return f.severity === "critical"; });
-  const hasWarn = issues.some(function(f) { return f.severity === "warning"; });
-  const sevClass = hasCrit ? "critical" : hasWarn ? "warn" : "ok";
-  const sevLabel = hasCrit ? "Fail" : hasWarn ? "Warning" : "Pass";
+  // The chip uses the verdict words and tones the Issues panel below it uses
+  // (_findingTone), not the raw collector severity: a collector "critical" is
+  // not "stops tonight's game", and the chip used to say FAIL above a row
+  // reading "Risk tonight".
+  const _netTones = issues.map(_findingTone);
+  const hasCrit = _netTones.indexOf("critical") !== -1;
+  const hasWarn = _netTones.indexOf("warning") !== -1;
+  const hasSoon = _netTones.indexOf("soon") !== -1;
+  const sevClass = hasCrit ? "critical" : hasWarn ? "warn" : hasSoon ? "soon" : "ok";
+  const sevLabel = hasCrit ? VERDICT.critical.word : hasWarn ? VERDICT.warning.word : hasSoon ? VERDICT.soon.word : "No problems";
   const statusChip = `<span class="dash-sev-pill dash-sev-${sevClass}"><span class="dash-sev-dot"></span> ${sevLabel}</span>`;
 
   // Primary adapter — join uplinkAdapter with adapters[] and ipConfig[]
@@ -5639,6 +5952,18 @@ function _camFindingsHtml(findings) {
   </div>`;
 }
 
+// A port problem puts the port cards above the reference diagrams, so an agent
+// reaches the broken port without scrolling past three pictures. With nothing
+// wrong the diagrams stay first.
+function _camSyncPortOrder(ports, info) {
+  var grid = document.getElementById("cam-port-grid");
+  if (!grid) return;
+  info = info || {};
+  var degraded = (ports || []).some(function(p) { return p && p.isUp && p.isDegraded; });
+  var short = info.expectedMainCameras != null && info.detectedMainCameras != null && info.detectedMainCameras < info.expectedMainCameras;
+  grid.classList.toggle("cam-port-grid-first", !!(degraded || short));
+}
+
 function _camPortGridHtml(ports) {
   const portSlots = [];
   for (let i = 0; i < Math.max(4, ports.length); i++) {
@@ -5908,7 +6233,7 @@ function _camOrientationPanelHtml() {
 // A POE port rectangle + centered number.
 function _orientPort(x, y, w, h, num) {
   return '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="1.5" class="orient-port"/>' +
-         '<text x="' + (x + w / 2) + '" y="' + (y + h / 2 + 3) + '" class="orient-port-num">' + num + '</text>';
+         '<text x="' + (x + w / 2) + '" y="' + (y + h / 2 + 4) + '" class="orient-port-num">' + num + '</text>';
 }
 
 // Force a fresh camera probe — clears the backend CGI cache and re-polls.
@@ -6378,7 +6703,7 @@ function renderCameras() {
         ${svgIcon("refresh", 14)} Refresh
       </button>
       <button id="cam-frames-btn" class="btn-outline btn-ol-blue" onclick="_camVerifyVideo()"${data.vpuRunning ? " disabled" : ""}
-        title="${data.vpuRunning ? "Disabled while the Pixellot capture engine (vpu.exe) is running, because capturing frames could interfere with the live stream." : "Grabs a single frame from each camera to confirm it is streaming and show what it sees."}">
+        title="Grabs a single frame from each camera to confirm it is streaming and show what it sees.">
         ${svgIcon("camera", 14)} Get Camera Frames
       </button>
       <button class="btn-outline btn-ol-blue" onclick="navigate('fault-isolator')">
@@ -6386,6 +6711,7 @@ function renderCameras() {
       </button>`
     )}
 
+    ${data.vpuRunning ? `<div class="cam-frames-note">Get Camera Frames is off while the Pixellot video software (vpu.exe) is running, because grabbing frames could interrupt the live stream.</div>` : ""}
     <div class="cam-page-body">
       <div id="cam-findings-wrap">${_camFindingsHtml(findings)}</div>
 
@@ -6403,6 +6729,8 @@ function renderCameras() {
     </div>
 
   `;
+
+  _camSyncPortOrder(ports, data);
 
   // Restore a previously-captured frame set so navigating away and back (a
   // full re-render) doesn't silently discard it. Stamped with its capture
@@ -6459,6 +6787,7 @@ function renderCameras() {
             openDetails[d.dataset.portIdx] = true;
           });
           grid.innerHTML = _camPortGridHtml(freshPorts);
+          _camSyncPortOrder(freshPorts, fresh);
           Object.keys(openDetails).forEach(function(idx) {
             var d = grid.querySelector('details[data-port-idx="' + idx + '"]');
             if (d) d.setAttribute('open', '');
@@ -6564,7 +6893,7 @@ function renderServices() {
     function section(title, subtitle, items, emptyMsg) {
       return `<section class="svc-section">
         <div class="svc-section-head">
-          <h3 class="svc-section-title">${esc(title)}</h3>
+          <h2 class="svc-section-title">${esc(title)}</h2>
           <p class="svc-section-sub">${esc(subtitle)}</p>
         </div>
         <div class="svc-grid">
@@ -6756,12 +7085,12 @@ function renderServices() {
 
   // keepagentup.exe — confirmation modal + inline result
   document.getElementById("svc-keepagent-btn")?.addEventListener("click", async () => {
-    const ok = confirm(
-      "Restart Pixellot Agent + Coordinator?\n\n" +
-      "This runs c:\\pixellot\\bin\\keepagentup.exe, which will briefly stop and " +
-      "relaunch both services. Recording may pause for a few seconds.\n\n" +
-      "Proceed?"
-    );
+    const ok = await confirmAction({
+      title: "Restart Pixellot Agent and Coordinator?",
+      body: "This runs c:\\pixellot\\bin\\keepagentup.exe, which will briefly stop and " +
+        "relaunch both services. Recording may pause for a few seconds.",
+      confirmLabel: "Restart both services",
+    });
     if (!ok) return;
 
     const btn = document.getElementById("svc-keepagent-btn");
@@ -6989,7 +7318,7 @@ function renderDiskHealth() {
     <div class="card mt-4">
       ${sectionTitle("hdd", "Physical Disks")}
       <table class="data-table"><thead><tr>
-        <th>Name</th><th>Type</th><th>Bus</th><th>Size</th><th title="Percentage of the SSD's rated write life used. From the drive's SMART/reliability counters.">Wear</th><th>Temp</th><th title="Total powered-on hours">Power-On</th><th>Health</th>
+        <th>Name</th><th>Type</th><th>Bus</th><th>Size</th><th title="Percentage of the SSD's rated write life used. From the drive's SMART/reliability counters.">Wear used</th><th>Temp</th><th title="Total powered-on hours">Hours on</th><th>Health</th>
       </tr></thead><tbody>
       ${physical.map(d => {
         const s = d.smart || {};
@@ -7078,10 +7407,11 @@ async function _runRepairTool(action) {
   };
   const slow = action === "RestoreHealth" || action === "SfcScan";
   if (slow) {
-    const ok = confirm(
-      `${titles[action]} can take 10–30 minutes to complete. ` +
-      `Pulse will block waiting for it.\n\nProceed?`
-    );
+    const ok = await confirmAction({
+      title: `${titles[action]}?`,
+      body: "This can take 10–30 minutes to complete. Pulse will block waiting for it.",
+      confirmLabel: "Start repair",
+    });
     if (!ok) return;
   }
 
@@ -7220,12 +7550,14 @@ async function _runStorageCleanup(preview) {
   const lines = [];
   if (daily.count) lines.push(`• ${daily.count} daily test clips older than 90 days (${daily.sizeGB} GB)`);
   if (recs.count) lines.push(`• ${recs.count} game recordings older than 1 year (${recs.sizeGB} GB)`);
-  const ok = confirm(
-    `Permanently delete ${totalCount} folders from D:\\recordedevents?\n\n` +
-    lines.join("\n") + "\n\n" +
-    "This cannot be undone. The folders do not go to the Recycle Bin.\n" +
-    "Nothing from the last 90 days will be touched.\n\nProceed?"
-  );
+  const ok = await confirmAction({
+    title: `Permanently delete ${totalCount} folders from D:\\recordedevents?`,
+    body: lines.join("\n") + "\n\n" +
+      "This cannot be undone. The folders do not go to the Recycle Bin.\n" +
+      "Nothing from the last 90 days will be touched.",
+    confirmLabel: `Delete ${totalCount} folders`,
+    tone: "danger",
+  });
   if (!ok) return;
 
   const btn = document.getElementById("dh-cleanup-run");
@@ -8110,7 +8442,7 @@ async function _shareDownloadReport(id) {
 }
 
 async function _shareDeleteReport(id) {
-  if (!confirm("Delete this received report?")) return;
+  if (!(await confirmAction({ title: "Delete this received report?", confirmLabel: "Delete report", tone: "danger" }))) return;
   await fetch("/api/peer/inbox/" + encodeURIComponent(id), { method: "DELETE" });
   _shareInbox.key = null;  // force the next tick to re-render
   _shareInboxTick();
@@ -8194,7 +8526,7 @@ function installSc3() {
           </div>
           ${anyMissing ? `<div class="sc3-cfg-warn">Pulse could not read every setting from ${esc(legacyName)} — open the ScoreConnect app and note the missing ones before continuing.</div>` : ""}
         </div>
-        <div class="text-pulse-muted" style="font-size:0.8rem;line-height:1.5;margin-top:0.75rem">
+        <div class="text-pulse-muted" style="font-size:var(--fs-small);line-height:1.5;margin-top:0.75rem">
           The install runs in the background and progress shows here — no installer window
           opens. One Windows administrator prompt appears on the VPU desktop; approve it to continue.
           Takes about 2–3 minutes.
@@ -8318,9 +8650,9 @@ function _renderSc3Progress(status) {
         <div class="sc3-bar-track">
           <div class="sc3-bar-fill" style="width:${pct}%;background:${barColor}"></div>
         </div>
-        ${complete ? `<div class="status-pass" style="display:flex;align-items:center;gap:0.4rem;font-size:0.85rem;margin-top:0.75rem">${svgIcon("check", 14)} <span>${esc(msg || "ScoreConnect III is installed and running.")}</span></div>` : ""}
-        ${err ? `<div class="status-fail" style="font-size:0.8rem;margin-top:0.75rem">${esc(err)}</div>` : ""}
-        ${stale && !err ? `<div class="status-fail" style="font-size:0.8rem;margin-top:0.75rem">The install appears stalled — no update from the installer in over 30 seconds.</div>` : ""}
+        ${complete ? `<div class="status-pass" style="display:flex;align-items:center;gap:0.4rem;font-size:var(--fs-body);margin-top:0.75rem">${svgIcon("check", 14)} <span>${esc(msg || "ScoreConnect III is installed and running.")}</span></div>` : ""}
+        ${err ? `<div class="status-fail" style="font-size:var(--fs-small);margin-top:0.75rem">${esc(err)}</div>` : ""}
+        ${stale && !err ? `<div class="status-fail" style="font-size:var(--fs-small);margin-top:0.75rem">The install appears stalled — no update from the installer in over 30 seconds.</div>` : ""}
         ${status.logTail ? `
         <details class="sc3-log" ${failed ? "open" : ""}>
           <summary>Install log</summary>
@@ -8693,7 +9025,7 @@ function renderScoreConnect() {
     // chain still draw, since that is exactly when the agent needs them.
     _sccReset();
     $page().innerHTML = '<div id="scc-findings-wrap">' + _sccFindingsTopHtml(data) + '</div>'
-      + scChainHtml(data)
+      + '<div class="scc-stage-wrap"><div class="scc-stage is-solo">' + scChainHtml(data) + '</div></div>'
       + errorBox(data.message || (typeof data.error === "string" ? data.error : null))
       + '<div id="sc-config-history-wrap">' + (_scHistCache ? _scConfigHistoryHtml(_scHistCache, null) : "") + "</div>";
     _scLoadConfigHistory(null);
@@ -8764,8 +9096,12 @@ function renderScoreConnect() {
 
     <!-- Findings first, like every other tab; then the physical chain -->
     <div id="scc-findings-wrap">${_sccFindingsTopHtml(data)}</div>
-    ${scChainHtml(data)}
 
+    <!-- The stage: the live score is the hero (first, large) and the
+         scoreboard connection is its sidekick (a rail beside it on wide
+         windows, below it on narrow ones). Without a readable score the
+         connection simply takes the whole width. -->
+    <div class="scc-stage-wrap"><div class="scc-stage${showScoreboard ? "" : " is-solo"}">
     <!-- Live Scoreboard — shown whenever the parser can read the feed -->
     ${showScoreboard ? `
     <div class="sc-board sc-board-hero" id="sc3-hero-board">
@@ -8780,7 +9116,7 @@ function renderScoreConnect() {
           <div class="sc-period-label" id="sc3-period">${esc(_sc3PeriodText(rtdShown, config.sport))}</div>
           <div class="sc-cap sc-cap-gap">Time</div>
           <div class="sc-clock" id="sc3-clock">${rtdShown && rtdShown.clock ? esc(rtdShown.clock) : "--:--"}</div>
-          <div id="sc3-live-badge" style="margin-top:0.4rem;font-size:0.62rem;letter-spacing:0.1em;color:${dataReceiving ? "var(--c-board-ok)" : "var(--c-board-bad)"};display:flex;align-items:center;justify-content:center;gap:0.3rem">
+          <div id="sc3-live-badge" style="margin-top:0.4rem;font-size:var(--fs-micro);letter-spacing:0.1em;color:${dataReceiving ? "var(--c-board-ok)" : "var(--c-board-bad)"};display:flex;align-items:center;justify-content:center;gap:0.3rem">
             ${_sc3StageBadge(dataReceiving ? "live" : "disconnected", 0)}
           </div>
         </div>
@@ -8805,12 +9141,17 @@ function renderScoreConnect() {
           <div class="sc-stat-val" id="sc3-clockstate">${esc(_sc3ClockStateText(rtdShown))}</div>
         </div>
       </div>
+      <!-- What ScoreConnect is reading. The hero is the score; this is the
+           setup behind it, beside the picture of the connection that feeds it. -->
+      ${_sc3PlateHtml(config)}
     </div>
     ` : isDetected ? "" /* No score to show: the findings and the chain above
        already say why, and a black "No Data" block only repeated them. It
        comes back on its own once a readable feed arrives (promotion in the
        live poll). Data Pulse cannot read opens the raw data in the details. */
     : !(sc2 && sc2.reachable) ? `<div class="sc-board sc-board-hero sc-board-empty">${esc(_scNoServiceText(data))}</div>` : ""}
+    ${scChainHtml(data)}
+    </div></div>
 
     <!-- ScoreConnect → SC III Upgrade Prompt -->
     ${sc2 && sc2.reachable && !isDetected ? `
@@ -8819,7 +9160,7 @@ function renderScoreConnect() {
         <div style="margin-top:2px;color:var(--c-accent-blue)">${svgIcon("refresh", 18)}</div>
         <div style="flex:1">
           <div class="font-semibold" style="margin-bottom:0.25rem">Upgrade to ScoreConnect III</div>
-          <div class="text-pulse-muted" style="font-size:0.8rem;line-height:1.5">
+          <div class="text-pulse-muted" style="font-size:var(--fs-small);line-height:1.5">
             ScoreConnect III is the preferred version. It provides live scoreboard data, parsed
             scores, and live status, without interfering with the data stream.
           </div>
@@ -8828,7 +9169,7 @@ function renderScoreConnect() {
               ${svgIcon("download", 14)} Install ScoreConnect III
             </button>
           </div>
-          <div class="text-pulse-muted" style="font-size:0.72rem;margin-top:0.5rem">
+          <div class="text-pulse-muted" style="font-size:var(--fs-meta);margin-top:0.5rem">
             The official installer runs in the background with progress shown here in Pulse.
             One Windows administrator prompt appears on the VPU desktop.
           </div>
@@ -8850,7 +9191,7 @@ function renderScoreConnect() {
         ${kvRow("UID", sc2.uid)}
         ${sc2.botNumber ? kvRow("Bot Number", sc2.botNumber) : ""}
         ${sc2.vendor ? (sc2.vendorIsCode
-          ? kvRowHtml("Vendor", `${esc(String(sc2.vendor))} <span class="text-pulse-muted" style="font-size:0.75rem">(code)</span>`)
+          ? kvRowHtml("Vendor", `${esc(String(sc2.vendor))} <span class="text-pulse-muted" style="font-size:var(--fs-meta)">(code)</span>`)
           : kvRow("Vendor", sc2.vendor)) : ""}
         ${sc2.sport ? kvRow("Sport Code", sc2.sport) : ""}
         ${sc2.license ? kvRow("License Expires", sc2.license) : ""}
@@ -8861,7 +9202,7 @@ function renderScoreConnect() {
       </div>
       ${sc2.networkIfaces && sc2.networkIfaces.length ? `
       <div style="margin-top:0.75rem;padding-top:0.75rem;border-top:1px solid var(--c-border)">
-        <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--c-muted);margin-bottom:0.5rem">Network Interfaces</div>
+        <div style="font-size:var(--fs-micro);text-transform:uppercase;letter-spacing:0.05em;color:var(--c-muted);margin-bottom:0.5rem">Network Interfaces</div>
         <div class="kv-grid">
           ${sc2.networkIfaces.map(n => kvRow(n.name, n.address)).join("")}
         </div>
@@ -8907,6 +9248,7 @@ function renderScoreConnect() {
   // receiving data, so the hero updates the moment the feed starts. Safe:
   // stateless REST, no SC II contact, no WMI.
   if (isDetected) {
+    _sccWakeStageNow();
     _sc3StartLivePoll(config.vendor, config.sport, showScoreboard);
   } else {
     _sc3StopLivePoll();
@@ -9316,7 +9658,8 @@ function _sccAskHtml(data) {
   var syms = (data.chainCopy || {}).symptoms || {};
   var ids = Object.keys(syms);
   if (!ids.length) return "";
-  return '<div class="scc-ask"><span class="scc-ask-q" id="scc-ask-q">What is the school seeing?</span>' +
+  return '<div class="scc-ask"><h2 class="scc-title" id="scc-ask-q">What is the school seeing?</h2>' +
+    '<p class="scc-note">Pick the closest match. Pulse marks where to look in the picture above.</p>' +
     '<div class="scc-ask-chips" role="group" aria-labelledby="scc-ask-q">' +
     ids.map(function(id) {
       var on = _scc.symptom === id;
@@ -9371,7 +9714,7 @@ function _sccPickerHtml(data, part, parts) {
   var clear = { device: { device: null }, cable: { cable: null }, extension: { extension: null }, controller: { controller: null, model: null } }[part];
   var footer = part === "controller" && data.reachable
     ? '<button type="button" class="btn-outline btn-ol-blue" onclick="sccTogglePanel(\'setup\')">' + svgIcon("settings", 14) + ' Change ScoreConnect setup</button>' : "";
-  return '<div class="scc-picker"><h3 class="scc-sub">' + esc(q) + '</h3>' +
+  return '<div class="scc-picker"><h2 class="scc-title">' + esc(q) + '</h2>' +
     (note ? '<p class="scc-note scc-note-above">' + esc(note) + '</p>' : "") +
     '<div class="scc-options' + (part === "extension" ? " scc-options-text" : "") + '" role="radiogroup" aria-label="' + esc(q) + '">' +
     opts.map(function(o) {
@@ -9523,7 +9866,7 @@ function _sccSetupChanges(s) {
 
 function _sccSetupHtml(data) {
   var s = _scc.setup;
-  var head = '<h3 class="scc-sub">ScoreConnect III setup</h3>';
+  var head = '<h2 class="scc-title">ScoreConnect III setup</h2>';
   if (!s || s.phase === "loading") return '<div class="scc-setup">' + head + '<p class="scc-note">Reading ScoreConnect III’s setup…</p></div>';
   if (s.phase === "error") return '<div class="scc-setup">' + head + '<p class="scc-error">Couldn’t read ScoreConnect III’s setup: ' + esc(s.message) + '</p>' +
     '<button type="button" class="btn-outline btn-ol-muted" onclick="sccTogglePanel(\'setup\');sccTogglePanel(\'setup\')">Try again</button></div>';
@@ -9588,6 +9931,7 @@ function _sccSetupHtml(data) {
     '</div>' +
     '<div class="scc-picker-foot">' +
       '<button type="button" class="btn-outline btn-ol-blue"' + (inc ? " disabled" : "") + ' onclick="sccSetupReview()">Review changes</button>' +
+      '<button type="button" class="btn-outline btn-ol-blue" onclick="sccFindCodeFromSetup(this)" title="Tries the console codes for the vendor ScoreConnect is set to now">' + svgIcon("search", 14) + ' Find the code</button>' +
       '<button type="button" class="btn-outline btn-ol-muted" onclick="sccTogglePanel(\'setup\')">Cancel</button>' +
       (inc ? '<span class="scc-note">' + esc(inc) + '</span>' : "") +
       (prev ? '<button type="button" class="btn-outline btn-ol-muted scc-restore" onclick="sccSetupRestore()">' + svgIcon("refresh", 14) + ' Restore ' + esc(prev.vendorSportName || "previous setup") + '</button>' : "") +
@@ -9638,7 +9982,7 @@ async function sccSetupRestore() {
   var s = _scc.setup;
   var prev = s.previous && s.previous.setup;
   if (!prev) return;
-  if (!window.confirm("Put back " + (prev.vendorName || "") + " " + (prev.vendorSportName || "") + "? The score stops for about 15 seconds while ScoreConnect reconnects.")) return;
+  if (!(await confirmAction({ title: "Put back " + (prev.vendorName || "") + " " + (prev.vendorSportName || "") + "?", body: "The score stops for about 15 seconds while ScoreConnect reconnects.", confirmLabel: "Put back this setup" }))) return;
   s.phase = "saving";
   s.message = "Putting back the earlier setup…";
   _sccRender(true);
@@ -9739,20 +10083,64 @@ async function sccScanOpen() {
   _sccRender(true);
 }
 
+// The Find the code button in Change setup. Always available. A console
+// ScoreConnect already reads gets one confirmation first; otherwise the search
+// starts straight away on the sport ScoreConnect is set to (the form's own
+// default), and "Try every code" is one click away if that sport has no match.
+async function sccFindCodeFromSetup(btn) {
+  if (_sccScanRunning()) { sccScanOpen(); return; }
+  var label = btn && btn.innerHTML;
+  if (btn) { btn.disabled = true; btn.textContent = "Checking…"; }
+  var restore = function() { if (btn) { btn.disabled = false; btn.innerHTML = label; } };
+  var r = await api("/api/scoreconnect/sc3/scan?plan=1");
+  var plan = r && !r.error && r.plan;
+  if (!plan) {
+    // No vendor to scan, or no answer: the scan panel says which.
+    restore();
+    return sccScanOpen();
+  }
+  var cd = cached("scoreconnect");
+  var reading = r.console === "reading" || (r.console == null && !!cd && _sccSignals(cd).flow === "live");
+  if (reading && !(await confirmAction(_SCC_SCAN_READING_CONFIRM))) { restore(); return; }
+  var keys = plan.sports.map(function(x) { return x.key; });
+  var cur = plan.currentSportKey, count = function(k) { return (plan.sports.filter(function(x) { return x.key === k; })[0] || {}).count || 0; };
+  var sport = keys.indexOf(cur) !== -1 && count(cur) ? cur : null;
+  _scc.panel = "scan";
+  _scc.scan = { phase: "form", plan: plan, scan: null, sport: sport };
+  if (!(sport ? count(sport) : plan.allCount)) { _sccRender(true); return; }  // nothing to try: the form says so
+  sccScanStart(sport, reading);
+}
+
 function sccScanSport(k) {
   if (!_scc.scan) return;
   _scc.scan.sport = k || null;
   _sccRender(true);
 }
 
-async function sccScanStart(sport) {
+// What the tech is told before codes are tried on a console ScoreConnect
+// already reads. Each code saved interrupts the score for several seconds, and
+// the scan keeps the first code that reads, which may not be today's.
+var _SCC_SCAN_READING_CONFIRM = {
+  title: "Try other codes anyway?",
+  body: "ScoreConnect is already reading the console, so the score is working.\n\n" +
+    "Find the code tries other codes one at a time. Each one interrupts the score for a few seconds, and Pulse keeps the first one that reads, which may not be the setup you have now. Change setup can put the current one back.",
+  confirmLabel: "Try other codes",
+};
+
+async function sccScanStart(sport, force) {
   var st = _scc.scan;
   if (!st) return;
   if (sport !== undefined) st.sport = sport;
   st.phase = "run";
   st.scan = { state: "starting", tried: [], total: 0 };
   _sccRender(true);
-  var r = await apiPost("/api/scoreconnect/sc3/scan", { confirm: true, sport: st.sport });
+  var r = await apiPost("/api/scoreconnect/sc3/scan", { confirm: true, sport: st.sport, force: force === true });
+  // The console began reading between the form and the click: ask, then retry.
+  if (r && r.alreadyReading && force !== true) {
+    if (await confirmAction(_SCC_SCAN_READING_CONFIRM)) return sccScanStart(st.sport, true);
+    st.phase = "form"; st.scan = null; _sccRender(true);
+    return;
+  }
   if (!r || r.error) { st.phase = "error"; st.message = (r && r.message) || "No answer from Pulse"; st.scan = null; _sccRender(true); return; }
   st.scan = r.scan;
   _sccRender(true);
@@ -9775,6 +10163,7 @@ function _sccScanPoll() {
     // tab so the chain and findings describe what it now reports.
     _scc.scan.phase = "done";
     _scc.scan.stopping = false;
+    if (_scc.scan.scan && _scc.scan.scan.state === "found" && !document.getElementById("sc3-hero-board")) _sccWakeStage = true;
     _scc.drops = 0; _scc.wasLive = false; _scc.flow = null; _scc.status = null;
     _scc.watchUntil = Date.now() + 45000;
     dataCache.scoreconnect = null;
@@ -9802,7 +10191,7 @@ function _sccScanTriedLine(sc) {
 
 function _sccScanHtml(data) {
   var st = _scc.scan || {};
-  var head = '<h3 class="scc-sub">Find the console’s code</h3>';
+  var head = '<h2 class="scc-title">Find the console’s code</h2>';
   var close = '<button type="button" class="btn-outline btn-ol-muted" onclick="_scc.scan=null;sccTogglePanel(\'scan\')">Close</button>';
   if (st.phase === "loading") return '<div class="scc-setup scc-scan">' + head + '<p class="scc-note">Reading ScoreConnect III’s codes…</p></div>';
   if (st.phase === "error") return '<div class="scc-setup scc-scan">' + head + '<p class="scc-error">' + esc(st.message) + '</p><div class="scc-picker-foot">' + close + '</div></div>';
@@ -9862,7 +10251,7 @@ function _sccScanHtml(data) {
     var d = cached("scoreconnect");
     var flowing = d && _sccSignals(d).flow === "live";
     body = '<p class="scc-status scc-status-ok">' + svgIcon("check", 16) + '<span>Found it. ScoreConnect reads the console on ' + esc(_sccShortSport(sc.vendorName, (sc.found || {}).name)) + '.</span></p>' +
-      '<p class="scc-note">' + (flowing ? "Check the score below matches the console." : "Waiting for the score to show below. Then check it matches the console.") +
+      '<p class="scc-note">' + (flowing ? "Check the score above matches the console." : "Waiting for the score to show above. Then check it matches the console.") +
       ' To go back, Change setup has Restore ' + esc(orig) + '.</p>' + _sccScanTriedLine(sc) +
       '<div class="scc-picker-foot">' + close + '</div>';
   } else if (sc.state === "none") {
@@ -9870,8 +10259,11 @@ function _sccScanHtml(data) {
       '<p class="scc-note">Check the console’s brand is ' + esc(sc.vendorName || "") + '. ' + (sc.sport ? "If the school isn’t sure of the sport, try every code." : "") + '</p>' +
       '<div class="scc-picker-foot">' + (sc.sport ? '<button type="button" class="btn-outline btn-ol-blue" onclick="_scc.scan.phase=\'form\';sccScanStart(null)">' + svgIcon("search", 14) + ' Try every code</button>' : "") + close + '</div>';
   } else if (sc.state === "lost") {
-    body = '<p class="scc-warn">' + svgIcon("triangle", 14) + '<span>The console stopped sending data partway through, so Pulse stopped and put back ' + esc(orig) + '.</span></p>' +
-      '<p class="scc-note">Ask the school: is the console on and running a game? Then try again.</p>' +
+    var never = sc.startedFrom === "none";
+    body = '<p class="scc-warn">' + svgIcon("triangle", 14) + '<span>' + (never
+        ? 'No data reached ScoreConnect while Pulse tried codes, so there was nothing to match. Pulse stopped and put back ' + esc(orig) + '.'
+        : 'The console stopped sending data partway through, so Pulse stopped and put back ' + esc(orig) + '.') + '</span></p>' +
+      '<p class="scc-note">Ask the school: is the console on and running a game?' + (never ? ' Is the cable pushed in at both ends?' : '') + ' Then try again.</p>' +
       '<div class="scc-picker-foot"><button type="button" class="btn-outline btn-ol-blue" onclick="sccScanOpen()">Try again</button>' + close + '</div>';
   } else if (sc.state === "stopped") {
     body = '<p class="scc-note">Stopped after ' + n + (n === 1 ? " code" : " codes") + '. Pulse put back ' + esc(orig) + '.</p>' + _sccScanTriedLine(sc) +
@@ -9903,16 +10295,14 @@ function scChainHtml(data) {
   // OCR reads the score: ScoreConnect is optional, so the chain folds away
   // behind one line, still one click from view for a venue that has both.
   if (src.source === "ocr" && src.ok && !_scc.showOnOcr) {
-    return '<div class="card scc scc-collapsed"><p class="scc-status scc-status-ok">' + svgIcon("check", 16) + '<span>' + esc(copy.ocr) + '</span></p>' +
+    return '<div class="card scc scc-rail scc-collapsed"><p class="scc-status scc-status-ok">' + svgIcon("check", 16) + '<span>' + esc(copy.ocr) + '</span></p>' +
       (anySC ? '<button type="button" class="btn-outline btn-ol-muted scc-show" onclick="_scc.showOnOcr=true;renderScoreConnect()">Show the ScoreConnect connection</button>' : "") + '</div>';
   }
   if (!anySC && !(data.error && data.scoreLinkConnected != null)) return "";
-  return '<section class="card scc" id="sc-chain" aria-labelledby="scc-title">' +
-    '<div class="scc-head"><h2 class="scc-title" id="scc-title">Scoreboard connection</h2>' +
-      (data.reachable ? '<button type="button" class="btn-outline btn-ol-blue" onclick="sccTogglePanel(\'setup\')" aria-controls="scc-panel" aria-expanded="' + (_scc.panel === "setup") + '">' + svgIcon("settings", 14) + ' Change setup</button>' : "") +
-    '</div>' +
-    '<div id="scc-body">' + _sccBodyHtml(data) + '</div>' +
-  '</section>';
+  // A stack of separate cards (connection, what the school sees, the open
+  // panel), not one card with everything inside: the setup form and the
+  // connection picture used to blend into one surface.
+  return '<div id="sc-chain" class="scc-stack"><div id="scc-body">' + _sccBodyHtml(data) + '</div></div>';
 }
 
 function _sccBodyHtml(data) {
@@ -9920,10 +10310,22 @@ function _sccBodyHtml(data) {
   var sig = _sccSignals(data);
   var breaks = _sccBreaks(data, sig, parts);
   _scc.sig = JSON.stringify([sig.sc3, sig.usb, sig.flow, sig.stopped, sig.drops >= 2, (sig.serial || {}).state, !!(sig.serial || {}).configProblem, sig.wrongFormat, _scc.symptom, _scc.panel]);
-  return _sccStatusHtml(data, sig, breaks) +
-    '<div class="scc-track" role="list" aria-label="Scoreboard connection, from the VPU to the console">' + _sccTrackHtml(data, sig, parts, breaks) + '</div>' +
-    _sccAskHtml(data) +
-    '<div id="scc-panel" class="scc-panel">' + _sccPanelHtml(data, parts) + _sccSymptomHtml(data, parts) + '</div>';
+  // Change setup lives in this card's header, so it is redrawn with the card
+  // and aria-expanded follows the panel.
+  var head = '<div class="scc-head"><h2 class="scc-title" id="scc-title">Scoreboard connection</h2>' +
+    (data.reachable ? '<button type="button" class="btn-outline btn-ol-blue" onclick="sccTogglePanel(\'setup\')" aria-controls="scc-panel" aria-expanded="' + (_scc.panel === "setup") + '">' + svgIcon("settings", 14) + ' Change setup</button>' : "") +
+    '</div>';
+  var chain = '<section class="card scc scc-rail" aria-labelledby="scc-title">' + head + _sccStatusHtml(data, sig, breaks) +
+    '<div class="scc-track" role="list" aria-label="Scoreboard connection, from the VPU to the console">' + _sccTrackHtml(data, sig, parts, breaks) + '</div></section>';
+  var ask = _sccAskHtml(data) + _sccSymptomHtml(data, parts);
+  var panel = _sccPanelHtml(data, parts);
+  // Reading order is: where it is broken (the picture), the panel that
+  // Change setup or a part opened (right under what opened it), then what to
+  // ask the school. #scc-panel is always present (the parts' aria-controls
+  // points at it) and takes no room while empty.
+  return chain +
+    '<div id="scc-panel" class="scc-panel-slot">' + (panel ? '<section class="card scc-card scc-card-panel">' + panel + '</section>' : "") + '</div>' +
+    (ask ? '<section class="card scc-card scc-card-ask">' + ask + '</section>' : "");
 }
 
 // Redraw the chain body. `force` for user actions; live ticks redraw only
@@ -9939,7 +10341,9 @@ function _sccRender(force) {
     if (next === _scc.sig) return;
   }
   var focusId = document.activeElement && document.activeElement.id;
+  var before = _sccLinkStates(body);
   body.innerHTML = _sccBodyHtml(d);
+  _sccRingChanged(body, before);
   var top = document.getElementById("scc-findings-wrap");
   if (top) top.innerHTML = _sccFindingsTopHtml(d);
   if (focusId) { var el = document.getElementById(focusId); if (el) el.focus(); }
@@ -10043,14 +10447,15 @@ function _sc3TeamName(name) {
   return /^(home|visitor|guest|away)$/i.test(n) ? "" : n;
 }
 
-// Status dot: green + flashing when active, grey + static when off. Pass an
-// explicit `color` (e.g. amber) to override — used for the out-of-date warning
-// so the dot color matches the message instead of staying green.
+// Status dot: green when active, grey when off, both steady. Pass an explicit
+// `color` (e.g. amber) to override — used for the out-of-date warning so the
+// dot color matches the message instead of staying green. It used to pulse
+// forever; over LogMeIn that repaints the tab for no information (the words
+// beside it say Running / Not responding).
 function _scDot(on, color) {
   var c = color || (on ? "var(--c-accent-green)" : "var(--c-dim)");
-  var anim = on ? "animation:pulse-live 1.4s ease-in-out infinite;" : "";
   return '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;'
-    + 'background:' + c + ';' + anim + 'margin-right:7px;vertical-align:middle"></span>';
+    + 'background:' + c + ';margin-right:7px;vertical-align:middle"></span>';
 }
 
 // ScoreConnect III "Status" row cell. The service is Running unless the live
@@ -10072,15 +10477,17 @@ function _sc3StageBadge(stage, secs) {
   // board in BOTH themes, so a light-theme accent here renders dark-on-black
   // (the old --c-accent-green was 3.7:1 in light mode).
   var map = {
-    live:         { c: "var(--c-board-ok)",     flash: true,  txt: "LIVE" },
-    stale:        { c: "var(--c-board-accent)", flash: true,  txt: "STALE · " + secs + "s" },
-    disconnected: { c: "var(--c-board-bad)",    flash: false, txt: "NO SIGNAL" },
-    offline:      { c: "var(--c-board-muted)",  flash: false, txt: "ScoreConnect III Offline" }
+    live:         { c: "var(--c-board-ok)",     txt: "LIVE" },
+    stale:        { c: "var(--c-board-accent)", txt: "STALE · " + secs + "s" },
+    disconnected: { c: "var(--c-board-bad)",    txt: "NO SIGNAL" },
+    offline:      { c: "var(--c-board-muted)",  txt: "ScoreConnect III Offline" }
   };
   var s = map[stage] || map.offline;
-  var anim = s.flash ? "animation:pulse-live 1.4s ease-in-out infinite;" : "";
+  // A steady dot: the word beside it says LIVE / STALE, and a dot that pulses
+  // forever repaints the board for as long as the tab is open, which over
+  // LogMeIn is bandwidth for no information.
   return '<span style="width:6px;height:6px;border-radius:50%;background:' + s.c + ';'
-    + 'display:inline-block;' + anim + '"></span>' + s.txt;
+    + 'display:inline-block;"></span>' + s.txt;
 }
 // Colour for #sc3-live-badge, which lives on the dark board — board tokens for
 // the same reason as _sc3StageBadge above.
@@ -10095,7 +10502,7 @@ function _sc3DataStatusHtml(stage, secs, statusText) {
     return _scDot(true) + '<span class="status-pass">' + esc(statusText || "Data is present and in the correct format") + '</span>';
   }
   if (stage === "stale") {
-    return '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--c-accent-amber);animation:pulse-live 1.4s ease-in-out infinite;margin-right:7px;vertical-align:middle"></span>'
+    return '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--c-accent-amber);margin-right:7px;vertical-align:middle"></span>'
       + '<span style="color:var(--c-accent-amber)">Data stale, no new packets (disconnecting in ' + secs + 's)</span>';
   }
   if (stage === "offline") {
@@ -10221,6 +10628,7 @@ function _sc3StartLivePoll(vendor, sport, showScoreboard) {
     if (!showScoreboard && st.stage === "live" && live && live.rawData && parseRtdScores(live.rawData, vendor, sport)) {
       var cd = cached("scoreconnect");
       if (cd) { cd.rawData = live.rawData; cd.dataStatus = live.dataStatus; }
+      _sccWakeStage = true;
       renderScoreConnect();
       return;
     }
@@ -10233,8 +10641,8 @@ function _sc3StartLivePoll(vendor, sport, showScoreboard) {
       if (p) {
         _sc3SetText("sc3-clock", p.clock || "--:--");
         _sc3SetText("sc3-period", _sc3PeriodText(p, sport));
-        if (p.guestScore != null) _sc3SetText("sc3-guest", String(p.guestScore));
-        if (p.homeScore != null)  _sc3SetText("sc3-home", String(p.homeScore));
+        if (p.guestScore != null) _sc3SetScore("sc3-guest", String(p.guestScore));
+        if (p.homeScore != null)  _sc3SetScore("sc3-home", String(p.homeScore));
         _sc3SetText("sc3-down", _sc3DownText(p));
         _sc3SetText("sc3-ballon", _sc3BallOnText(p));
         _sc3SetText("sc3-clockstate", _sc3ClockStateText(p));
@@ -10277,9 +10685,82 @@ function _sc3LiveTarget() {
   return document.getElementById("sc3-hero-board") || document.getElementById("sc-chain") || document.getElementById("sc3-details");
 }
 
+// The stage's footer plate: vendor, sport and connection ScoreConnect III is
+// set to read, as the details card lists them. Nothing when none is set.
+function _sc3PlateHtml(config) {
+  var setup = [config.vendor, _sccShortSport(config.vendor, config.sport), config.vendorConfigurationName].filter(Boolean).join(" · ");
+  return setup ? '<div class="sc-plate"><span class="sc-cap">Reading</span><span class="sc-plate-val">' + esc(setup) + '</span></div>' : "";
+}
+
 function _sc3SetText(id, text) {
   var el = document.getElementById(id);
   if (el && el.textContent !== text) el.textContent = text;
+}
+
+// ── Motion on the ScoreConnect tab ───────────────────────────
+// Pulse is mostly used over LogMeIn, which pays for every repainted pixel, so
+// nothing here moves at rest. Three one-shot moments, each fired by a change
+// in the data and each over in under a second: a score rolls when it changes,
+// a link in the connection rings when its status flips, and the stage wakes
+// when the score first arrives (including after Find the code succeeds).
+// All of it is skipped under prefers-reduced-motion.
+var _SCC_EASE_OUT = "cubic-bezier(0.16, 1, 0.3, 1)";
+var _sccWakeStage = false;   // set when a score is about to appear for the first time
+
+function _sccMotionOk() {
+  try { return !window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (e) { return true; }
+}
+
+// A score that changes: the new digits rise into place and settle from the
+// board's accent to their own colour. The first fill from "—" is not a change.
+function _sc3SetScore(id, text) {
+  var el = document.getElementById(id);
+  if (!el || el.textContent === text) return;
+  var had = /\d/.test(el.textContent);
+  el.textContent = text;
+  if (!had || !el.animate || !_sccMotionOk()) return;
+  var rest = getComputedStyle(el).color;
+  el.animate([
+    { transform: "translateY(0.3em)", opacity: 0, color: "var(--c-board-accent)" },
+    { transform: "none", opacity: 1, color: "var(--c-board-accent)", offset: 0.35 },
+    { transform: "none", opacity: 1, color: rest }
+  ], { duration: 900, easing: _SCC_EASE_OUT });
+}
+
+// The score appeared where there was none: the stage comes up once.
+function _sccWakeStageNow() {
+  if (!_sccWakeStage) return;
+  _sccWakeStage = false;
+  var board = document.getElementById("sc3-hero-board");
+  if (!board || !board.animate || !_sccMotionOk()) return;
+  board.animate([
+    { opacity: 0, transform: "translateY(10px) scale(0.985)", filter: "brightness(1.7)" },
+    { opacity: 1, transform: "none", filter: "none" }
+  ], { duration: 700, easing: _SCC_EASE_OUT });
+}
+
+// Which links of the connection are in which state, ignoring the open panel.
+function _sccLinkStates(root) {
+  var out = {};
+  root.querySelectorAll(".scc-node").forEach(function(n) {
+    if (n.id) out[n.id] = n.className.replace(/\bis-open\b/g, "").replace(/\s+/g, " ").trim();
+  });
+  return out;
+}
+
+// A link whose state changed rings once in the colour of its new state.
+function _sccRingChanged(root, before) {
+  if (!_sccMotionOk()) return;
+  var css = getComputedStyle(document.documentElement);
+  var now = _sccLinkStates(root);
+  Object.keys(now).forEach(function(id) {
+    if (before[id] == null || before[id] === now[id]) return;
+    var el = document.getElementById(id);
+    if (!el || !el.animate) return;
+    var c = css.getPropertyValue(/\bis-break\b/.test(now[id]) ? "--c-accent-red" : /\bis-lit\b/.test(now[id]) ? "--c-accent-blue" : "--c-accent-green").trim();
+    if (!c) return;
+    el.animate([{ boxShadow: "0 0 0 4px " + c }, { boxShadow: "0 0 0 0 transparent" }], { duration: 900, easing: _SCC_EASE_OUT });
+  });
 }
 
 // ── ScoreConnect configuration history ───────────────────────
@@ -10439,7 +10920,7 @@ function _scConfigHistoryHtml(entries, current, bare) {
   if (bare) return note + items;
   return '<div class="card mt-4">' +
     sectionTitle("clock", "Previous Configurations") +
-    '<div class="text-pulse-muted" style="font-size:0.75rem;margin:-0.25rem 0 0.6rem;line-height:1.5">' +
+    '<div class="text-pulse-muted" style="font-size:var(--fs-meta);margin:-0.25rem 0 0.6rem;line-height:1.5">' +
       "Recorded automatically each time the scoreboard configuration changes while data is confirmed flowing. " +
       "Bot numbers are best-effort. ScoreConnect III can report a stale number until its service restarts." +
     "</div>" + items + "</div>";
@@ -10500,7 +10981,7 @@ function _fiHistoryHtml(runs) {
       return "<tr><td><strong>" + esc(h.phase || "") + "</strong></td>" +
         '<td class="font-mono">' + esc(h.speed || "") + "</td>" +
         '<td><span class="' + sc + '">' + esc(h.severity || "") + "</span></td>" +
-        '<td class="text-pulse-muted" style="font-size:0.78rem">' + esc(h.verdict || "") + "</td></tr>";
+        '<td class="text-pulse-muted" style="font-size:var(--fs-small)">' + esc(h.verdict || "") + "</td></tr>";
     }).join("");
     return '<details class="fi-hist-run">' +
       '<summary class="fi-hist-summary">' +
@@ -10603,12 +11084,12 @@ function renderFaultIsolator() {
     var rows = _fi.history.map(function(h) {
       var sc = h.severity === "Pass" ? "status-pass" : h.severity === "Fail" ? "status-fail" : "status-info";
       return "<tr>" +
-        '<td class="font-mono" style="font-size:0.7rem;color:var(--c-dim)">' + esc(h.ts) + "</td>" +
+        '<td class="font-mono" style="font-size:var(--fs-micro);color:var(--c-dim)">' + esc(h.ts) + "</td>" +
         '<td><span class="' + sc + '">' + esc(h.severity) + "</span></td>" +
         "<td><strong>" + esc(h.phase) + "</strong></td>" +
-        '<td class="text-pulse-muted" style="font-size:0.78rem">' + esc(h.config) + "</td>" +
-        '<td class="font-mono" style="font-size:0.78rem">' + esc(h.speed) + "</td>" +
-        '<td class="text-pulse-muted" style="font-size:0.78rem">' + esc(h.verdict) + "</td>" +
+        '<td class="text-pulse-muted" style="font-size:var(--fs-small)">' + esc(h.config) + "</td>" +
+        '<td class="font-mono" style="font-size:var(--fs-small)">' + esc(h.speed) + "</td>" +
+        '<td class="text-pulse-muted" style="font-size:var(--fs-small)">' + esc(h.verdict) + "</td>" +
         "</tr>";
     }).join("");
     return '<div class="mt-4">' +
@@ -11505,7 +11986,7 @@ function renderSettings() {
   });
 
   upApplyBtn?.addEventListener("click", async () => {
-    if (!confirm(`Download and install ${upLatest}?\n\nPulse will restart and this page will reload automatically.`)) return;
+    if (!(await confirmAction({ title: `Download and install ${upLatest}?`, body: "Pulse will restart and this page will reload automatically.", confirmLabel: "Download and install" }))) return;
     upApplyBtn.disabled = true;
     upCheckBtn.disabled = true;
     upMsg.textContent = "Starting update…";
@@ -11533,7 +12014,7 @@ function renderSettings() {
   const rebootMsg = document.getElementById("set-reboot-msg");
 
   restartBtn?.addEventListener("click", async () => {
-    if (!confirm("Restart the Pulse app?\n\nPulse closes and relaunches the same build. This page reloads once it's back, usually within a few seconds. The VPU and any recording keep running.")) return;
+    if (!(await confirmAction({ title: "Restart the Pulse app?", body: "Pulse closes and relaunches the same build. This page reloads once it's back, usually within a few seconds. The VPU and any recording keep running.", confirmLabel: "Restart Pulse" }))) return;
     restartBtn.disabled = true;
     rebootBtn.disabled = true;
     restartMsg.textContent = "Restarting…";
@@ -11555,7 +12036,7 @@ function renderSettings() {
   });
 
   rebootBtn?.addEventListener("click", async () => {
-    if (!confirm("Reboot the whole VPU?\n\nThis restarts Windows. Any active recording is interrupted, and the unit is offline for a few minutes. Pulse won't come back on its own. Reopen it from the desktop shortcut once Windows is back.")) return;
+    if (!(await confirmAction({ title: "Reboot the whole VPU?", body: "This restarts Windows. Any active recording is interrupted, and the unit is offline for a few minutes. Pulse won't come back on its own. Reopen it from the desktop shortcut once Windows is back.", confirmLabel: "Reboot the VPU", tone: "danger" }))) return;
     restartBtn.disabled = true;
     rebootBtn.disabled = true;
     rebootMsg.textContent = "Sending reboot…";

@@ -474,6 +474,28 @@ class FindTheCode(unittest.TestCase):
             shutil.rmtree(d, ignore_errors=True)
 
 
+class ScanStart(unittest.TestCase):
+    """Find the code is offered from Change setup whatever the console is
+    doing. A console SC III already reads needs the tech's confirmation
+    (force); every other state starts."""
+
+    def test_what_the_console_is_doing(self):
+        self.assertEqual(c.scan_start_state("correct", True), "reading")
+        # "Correct format" with an empty data field reads nothing.
+        self.assertEqual(c.scan_start_state("correct", False), "none")
+        self.assertEqual(c.scan_start_state("wrong", True), "wrong")
+        for v in ("none", "stopped", None):
+            self.assertEqual(c.scan_start_state(v, False), "none")
+
+    def test_a_console_already_read_is_refused_without_confirmation(self):
+        self.assertIn("already reading", c.scan_start_refusal("reading", False))
+        self.assertIsNone(c.scan_start_refusal("reading", True))
+
+    def test_every_other_state_starts_without_confirmation(self):
+        for state in ("wrong", "none"):
+            self.assertIsNone(c.scan_start_refusal(state, False))
+
+
 class CopyContract(unittest.TestCase):
     """Every break and symptom the page can pick has words in main.py, and
     every placeholder in those words is one the page fills."""
