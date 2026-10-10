@@ -37,15 +37,82 @@ LOG_BUFFER: deque[dict] = deque(maxlen=500)
 RUNNING_TASKS: dict[str, dict] = {}
 
 # Cap concurrent PowerShell processes to avoid CPU-starving VPU hardware.
-# Dashboard scripts get priority; network/heavy tests queue behind them.
-_PS_SEMAPHORE: Optional[asyncio.Semaphore] = None
+#
+# Admission is longest-job-first, not first-come. A first launch fires ~30
+# collectors at once; measured on a real VPU (vpu-home, 2026-10-09) that took
+# ~10 s through 4 slots, with the slow ones (Get-NetworkConfig, Get-PerfSample)
+# often admitted last and finishing alone while three slots sat idle. Starting
+# the slow ones first packs the slots (modelled ~8.6 s, same 4 slots, no extra
+# CPU). Scripts absent from _COST_HINTS (actions, repairs, anything new) rank
+# above every hinted collector, so a click is never queued behind a sweep.
+# A waiting job also gains rank with age, so a short script cannot starve.
+_PS_SLOTS = 4
+
+# Seconds of uncontended run time, from tools/vpu-smoke/sweep.py on vpu-home.
+# Only the ordering matters; refresh the numbers if the relative costs shift.
+_COST_HINTS = {
+    "Get-NetworkConfig.ps1": 3.5, "Get-PerfSample.ps1": 3.5,
+    "Get-Hardware.ps1": 2.4, "Get-RebootHistory.ps1": 2.3,
+    "Get-DiskHealth.ps1": 2.2, "Get-NicAdapters.ps1": 2.0,
+    "Test-LocalNetwork.ps1": 2.0, "Get-PoePower.ps1": 1.5,
+    "Get-EventLogs.ps1": 1.7, "Get-Performance.ps1": 1.5,
+    "Get-WifiAdapters.ps1": 1.1, "Test-NetworkPorts.ps1": 1.0,
+    "Test-TlsInspection.ps1": 0.8, "Get-NtpPeers.ps1": 0.7,
+    "Test-NetworkDomains.ps1": 0.6, "Test-NtpDrift.ps1": 0.6,
+    "Test-DnsResolution.ps1": 0.6, "Get-Services.ps1": 0.5,
+    "Get-InstalledSoftware.ps1": 0.5, "Get-GpuInfo.ps1": 0.5,
+    "Get-AudioDevices.ps1": 0.5, "Get-LmiGatewayLog.ps1": 0.5,
+    "Get-PixellotEvents.ps1": 0.5, "Get-EventWindowSignals.ps1": 0.5,
+    "Get-GraphicsDelivery.ps1": 0.5, "Test-PixellotInstallState.ps1": 0.5,
+    "Get-PixellotConfig.ps1": 0.4, "Get-CameraExpectations.ps1": 0.4,
+    "Get-WindowsUbr.ps1": 0.4, "Get-SystemIdentity.ps1": 0.5,
+}
+_UNHINTED_COST = 100.0   # outranks every collector
+_AGING_PER_SEC = 1.0     # a 4 s wait offsets the gap between slow and fast
 
 
-def _get_semaphore() -> asyncio.Semaphore:
-    global _PS_SEMAPHORE
-    if _PS_SEMAPHORE is None:
-        _PS_SEMAPHORE = asyncio.Semaphore(4)
-    return _PS_SEMAPHORE
+class _SlotGate:
+    """Counting gate with cost-ranked admission (see _COST_HINTS)."""
+
+    def __init__(self, slots: int):
+        self._free = slots
+        self._waiters: list = []   # [cost, enqueued_at, future]
+
+    async def acquire(self, cost: float) -> None:
+        if self._free > 0 and not self._waiters:
+            self._free -= 1
+            return
+        fut = asyncio.get_event_loop().create_future()
+        entry = [cost, time.monotonic(), fut]
+        self._waiters.append(entry)
+        try:
+            await fut
+        except BaseException:
+            if entry in self._waiters:
+                self._waiters.remove(entry)
+            elif fut.done() and not fut.cancelled():
+                self.release()   # admitted at the moment we were cancelled
+            raise
+
+    def release(self) -> None:
+        now = time.monotonic()
+        while self._waiters:
+            best = max(self._waiters, key=lambda w: w[0] + (now - w[1]) * _AGING_PER_SEC)
+            self._waiters.remove(best)
+            if not best[2].done():
+                best[2].set_result(None)
+                return
+        self._free += 1
+
+
+_PS_GATE: Optional[_SlotGate] = None
+
+
+def _get_gate() -> _SlotGate:
+    global _PS_GATE
+    if _PS_GATE is None:
+        _PS_GATE = _SlotGate(_PS_SLOTS)
+    return _PS_GATE
 
 
 def _log(script: str, duration_ms: float, status: str, detail: str = "", size: int = 0):
@@ -74,7 +141,7 @@ def get_running_tasks() -> list[dict]:
     now = time.monotonic()
     return [
         {"id": tid, "script": t["script"], "runningSec": round(now - t["started"], 1),
-         # "queued" until the 4-slot semaphore admits it. The splash feed shows
+         # "queued" until the slot gate admits it. The splash feed shows
          # the difference so a backed-up box reads as waiting, not as slow.
          "state": "running" if t.get("active") else "queued"}
         for tid, t in RUNNING_TASKS.items()
@@ -237,9 +304,13 @@ async def run_ps(
     }
 
     try:
-        async with _get_semaphore():
+        gate = _get_gate()
+        await gate.acquire(_COST_HINTS.get(script_name, _UNHINTED_COST))
+        try:
             RUNNING_TASKS[task_id]["active"] = True
             result = await _run_ps_inner(script_name, args, timeout, task_id, cancel_evt)
+        finally:
+            gate.release()
         # Only cache successful results. Errors should retry on next call.
         if use_cache and isinstance(result, dict) and not result.get("error"):
             _RESULT_CACHE[key] = (time.monotonic(), result)

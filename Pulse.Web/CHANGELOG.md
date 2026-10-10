@@ -23,6 +23,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 
 ## [Unreleased]
 
+### Changed
+- The startup sweep finishes a little sooner (about half a second on a bench unit): the slowest checks now start first instead of last, using the same CPU as before.
+
 ### Added
 - ScoreConnect tab: a **Reinstall ScoreConnect III** button. It stops the service, deletes the whole Sportzcast LLC program folder, and installs a fresh copy, with progress shown in Pulse. Saved settings and logs are kept. Use it when ScoreConnect III won't start or keeps failing.
 
