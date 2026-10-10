@@ -247,11 +247,17 @@ _SC3_INSTALL_TIMELINE = [
     (33, "verifying", 85, "Verifying ScoreConnect III is running.",
      "installer: Install complete and shortcut created."),
 ]
-_sc3_demo_install = {"started": None}
+# A reinstall inserts a removal step after the download.
+_SC3_REINSTALL_REMOVAL = (
+    "removing", 40, "Stopping ScoreConnect III and deleting its program folder.",
+    "Deleted C:\\Program Files (x86)\\Sportzcast LLC",
+)
+_sc3_demo_install = {"started": None, "mode": "Install"}
 
 
-def _demo_sc3_install_start():
+def _demo_sc3_install_start(Mode="Install", **kw):
     _sc3_demo_install["started"] = time.time()
+    _sc3_demo_install["mode"] = Mode
     return {
         "ok": True,
         "message": "Install started. Poll /api/scoreconnect/install-sc3/status for progress.",
@@ -268,7 +274,12 @@ def _demo_sc3_install_status():
     elapsed = time.time() - started
     log = []
     current = None
-    for ends_at, stage, percent, message, log_line in _SC3_INSTALL_TIMELINE:
+    timeline = list(_SC3_INSTALL_TIMELINE)
+    if _sc3_demo_install["mode"] == "Reinstall":
+        # Splice the removal in after "downloading", pushing the rest back 5 s.
+        timeline = timeline[:2] + [(13,) + _SC3_REINSTALL_REMOVAL] + [
+            (t[0] + 5,) + t[1:] for t in timeline[2:]]
+    for ends_at, stage, percent, message, log_line in timeline:
         if log_line and elapsed >= ends_at - 1:
             log.append(log_line)
         if current is None and elapsed < ends_at:
@@ -1164,7 +1175,7 @@ DEMO = {
     "Get-ScoreConnectLive.ps1": lambda **kw: _demo_scoreconnect_live(),
     # Kicking off an install starts a simulated timeline (below) so the
     # install modal can be exercised end-to-end in demo mode.
-    "Install-ScoreConnectIII.ps1": lambda **kw: _demo_sc3_install_start(),
+    "Install-ScoreConnectIII.ps1": lambda **kw: _demo_sc3_install_start(**kw),
     "Get-Sc3InstallStatus.ps1": lambda **kw: _demo_sc3_install_status(),
     # Protected unit: the SCM restart actions a Pulse-driven install applies.
     # Carries a real crash that SCM recovered, so the "it already saved you
