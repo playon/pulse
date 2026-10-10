@@ -8458,6 +8458,7 @@ async function _shareDeleteReport(id) {
 
 var _sc3InstallPoll = null;   // polling interval handle
 var _sc3Installing = false;   // true while an install is in flight (modal locked)
+var _sc3Reinstall = false;    // true when the run in flight is a clean reinstall
 
 function _sc3ModalEl() {
   var el = document.getElementById("sc3-modal");
@@ -8479,6 +8480,59 @@ function closeSc3Modal() {
   var el = document.getElementById("sc3-modal");
   if (el) el.classList.remove("open");
   if (_sc3InstallPoll) { clearInterval(_sc3InstallPoll); _sc3InstallPoll = null; }
+}
+
+// Entry point for the clean reinstall. Same modal and progress poll as the
+// install; the confirm step says what gets deleted and what survives.
+function reinstallSc3() {
+  var el = _sc3ModalEl();
+  el.innerHTML = `
+    <div class="sc3-modal-box">
+      <div class="sc3-modal-header">
+        <span class="sc3-modal-title">${svgIcon("refresh", 16)} Reinstall ScoreConnect III</span>
+        <button class="sc3-modal-close" onclick="closeSc3Modal()" title="Close" aria-label="Close">${svgIcon("x", 16)}</button>
+      </div>
+      <div class="sc3-modal-body">
+        <div class="sc3-warn-box">
+          <div class="font-semibold" style="margin-bottom:0.3rem">${svgIcon("alert", 14)} This deletes ScoreConnect's program folder</div>
+          <div>Pulse stops the ScoreConnect III service, deletes the entire
+          <span class="font-mono">Sportzcast LLC</span> folder under Program Files, and installs a fresh copy.
+          The scoreboard feed and any live score are down until it finishes.</div>
+          <div style="margin-top:0.5rem">Saved settings and logs in
+          <span class="font-mono">C:\\ProgramData\\Sportzcast LLC</span> are kept. If the scoreboard setup
+          is missing afterwards, re-enter it in ScoreConnect III.</div>
+        </div>
+        <div class="text-pulse-muted" style="font-size:var(--fs-small);line-height:1.5;margin-top:0.75rem">
+          Pulse downloads the installer first, so a failed download leaves the current install alone.
+          One Windows administrator prompt appears on the VPU desktop; approve it to continue.
+          Takes about 3&ndash;4 minutes. Don't do this during a live game.
+        </div>
+        <div class="sc3-modal-actions">
+          <button class="btn-outline" onclick="closeSc3Modal()">Cancel</button>
+          <button class="btn-outline btn-ol-red" onclick="_sc3StartInstall(true)">${svgIcon("refresh", 14)} Delete and Reinstall</button>
+        </div>
+      </div>
+    </div>
+  `;
+  el.classList.add("open");
+}
+
+// Card for the ScoreConnect page: the way out when SC III is installed but
+// broken or not answering.
+function _sc3ReinstallCardHtml() {
+  return `
+    <div class="card mt-4">
+      <div class="font-semibold" style="margin-bottom:0.25rem">Reinstall ScoreConnect III</div>
+      <div class="text-pulse-muted" style="font-size:var(--fs-small);line-height:1.5">
+        If ScoreConnect III won't start or keeps failing, delete its program folder and install it fresh.
+        Saved settings are kept.
+      </div>
+      <div style="margin-top:0.75rem">
+        <button class="btn-outline btn-ol-red" id="btn-reinstall-sc3" onclick="reinstallSc3()">
+          ${svgIcon("refresh", 14)} Reinstall ScoreConnect III
+        </button>
+      </div>
+    </div>`;
 }
 
 // Entry point — the Upgrade card button. Opens the confirm step.
@@ -8533,7 +8587,7 @@ function installSc3() {
         </div>
         <div class="sc3-modal-actions">
           <button class="btn-outline" onclick="closeSc3Modal()">Cancel</button>
-          <button class="btn-outline btn-ol-blue" onclick="_sc3StartInstall()">${svgIcon("download", 14)} Start Install</button>
+          <button class="btn-outline btn-ol-blue" onclick="_sc3StartInstall(false)">${svgIcon("download", 14)} Start Install</button>
         </div>
       </div>
     </div>
@@ -8541,12 +8595,15 @@ function installSc3() {
   el.classList.add("open");
 }
 
-async function _sc3StartInstall() {
+async function _sc3StartInstall(reinstall) {
+  // The Retry button calls this with no argument, so it repeats the same kind
+  // of run the tech started.
+  if (reinstall !== undefined) _sc3Reinstall = !!reinstall;
   _sc3Installing = true;
-  _renderSc3Progress({ stage: "starting", percent: 5, message: "Approve the Windows administrator prompt to begin installing ScoreConnect III." });
+  _renderSc3Progress({ stage: "starting", percent: 5, message: "Approve the Windows administrator prompt to begin " + (_sc3Reinstall ? "reinstalling" : "installing") + " ScoreConnect III." });
 
   // Kick off the install — backend returns immediately
-  var result = await apiPost("/api/scoreconnect/install-sc3");
+  var result = await apiPost(_sc3Reinstall ? "/api/scoreconnect/reinstall-sc3" : "/api/scoreconnect/install-sc3");
   if (!result || !result.ok) {
     _sc3Installing = false;
     _renderSc3Progress({
@@ -8604,7 +8661,15 @@ var _SC3_STEPS = [
   { key: "verifying",   label: "Verify it's running" }
 ];
 
+function _sc3Steps() {
+  if (!_sc3Reinstall) return _SC3_STEPS;
+  var steps = _SC3_STEPS.slice();
+  steps.splice(2, 0, { key: "removing", label: "Remove the old install" });
+  return steps;
+}
+
 function _renderSc3Progress(status) {
+  var steps = _sc3Steps();
   var stage = status.stage || "unknown";
   var pct = Math.max(0, Math.min(100, status.percent || 0));
   var msg = status.message || "";
@@ -8618,10 +8683,10 @@ function _renderSc3Progress(status) {
     : "var(--c-accent-blue)";
 
   // Index of the active step; complete = past the end.
-  var activeIdx = complete ? _SC3_STEPS.length
-    : Math.max(0, _SC3_STEPS.findIndex(function(st) { return st.key === stage; }));
+  var activeIdx = complete ? steps.length
+    : Math.max(0, steps.findIndex(function(st) { return st.key === stage; }));
 
-  var stepsHtml = _SC3_STEPS.map(function(st, i) {
+  var stepsHtml = steps.map(function(st, i) {
     var state = complete || i < activeIdx ? "done"
       : i === activeIdx ? (failed ? "failed" : "active")
       : "pending";
@@ -8642,7 +8707,7 @@ function _renderSc3Progress(status) {
   el.innerHTML = `
     <div class="sc3-modal-box">
       <div class="sc3-modal-header">
-        <span class="sc3-modal-title">${svgIcon("download", 16)} Installing ScoreConnect III</span>
+        <span class="sc3-modal-title">${svgIcon(_sc3Reinstall ? "refresh" : "download", 16)} ${_sc3Reinstall ? "Reinstalling" : "Installing"} ScoreConnect III</span>
         ${_sc3Installing ? "" : `<button class="sc3-modal-close" onclick="closeSc3Modal()" title="Close" aria-label="Close">${svgIcon("x", 16)}</button>`}
       </div>
       <div class="sc3-modal-body">
@@ -8660,7 +8725,7 @@ function _renderSc3Progress(status) {
         </details>` : ""}
         ${failed || complete ? `
         <div class="sc3-modal-actions">
-          ${failed ? `<button class="btn-outline btn-ol-blue" onclick="_sc3StartInstall()">${svgIcon("refresh", 14)} Retry Install</button>` : ""}
+          ${failed ? `<button class="btn-outline btn-ol-blue" onclick="_sc3StartInstall()">${svgIcon("refresh", 14)} Retry ${_sc3Reinstall ? "Reinstall" : "Install"}</button>` : ""}
           <button class="btn-outline" onclick="closeSc3Modal(); dataCache.scoreconnect = null; if (window.location.hash === '#scoreconnect') renderScoreConnect();">Close</button>
         </div>` : ""}
       </div>
@@ -9027,6 +9092,7 @@ function renderScoreConnect() {
     $page().innerHTML = '<div id="scc-findings-wrap">' + _sccFindingsTopHtml(data) + '</div>'
       + '<div class="scc-stage-wrap"><div class="scc-stage is-solo">' + scChainHtml(data) + '</div></div>'
       + errorBox(data.message || (typeof data.error === "string" ? data.error : null))
+      + _sc3ReinstallCardHtml()
       + '<div id="sc-config-history-wrap">' + (_scHistCache ? _scConfigHistoryHtml(_scHistCache, null) : "") + "</div>";
     _scLoadConfigHistory(null);
     return;
@@ -9238,7 +9304,8 @@ function renderScoreConnect() {
         <summary>Previous setups on this VPU <span class="scd-count" id="sc-config-history-count">${_scHistCache && _scHistCache.length ? _scHistCache.length : ""}</span></summary>
         <div id="sc-config-history-wrap">${_scHistCache ? _scConfigHistoryHtml(_scHistCache, data, true) : ""}</div>
       </details>
-    </div>` : `
+    </div>
+    ${_sc3ReinstallCardHtml()}` : `
     <div id="sc-config-history-wrap">${_scHistCache ? _scConfigHistoryHtml(_scHistCache, data) : ""}</div>`}
   `;
   _scLoadConfigHistory(data);

@@ -38,12 +38,22 @@
     ANSI code page (CP-1252 on US VPUs), which corrupts non-ASCII glyphs (the
     ellipsis, em/en dashes) at parse time - that is the "background?" mojibake.
     Keep every string literal and comment to plain ASCII.
+.PARAMETER Mode
+    'Install' (default) is the normal flow. 'Reinstall' first stops the
+    ScoreConnectIII service and deletes the whole 'Sportzcast LLC' program
+    folder (under Program Files (x86), and Program Files on a 64-bit
+    layout), then runs the same installer. The installer script is
+    downloaded BEFORE anything is deleted, so a failed download leaves the
+    existing install untouched. C:\ProgramData\Sportzcast LLC (settings
+    and logs) is deliberately NOT touched.
 .PARAMETER ScriptUrl
     Override the Canopy install script URL (for testing).
 #>
 [CmdletBinding()]
 param(
-    [string]$ScriptUrl = 'https://canopy-public-packages.nfhsnetwork.com/SC3/Current/installScript3_current.ps1'
+    [string]$ScriptUrl = 'https://canopy-public-packages.nfhsnetwork.com/SC3/Current/installScript3_current.ps1',
+    [ValidateSet('Install', 'Reinstall')]
+    [string]$Mode = 'Install'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -76,7 +86,9 @@ function Write-Status {
 
 try {
     # Initial status - the bar sits here until the tech consents to UAC.
-    Write-Status -Stage 'starting' -Percent 5 -Message 'Approve the Windows administrator prompt to begin installing ScoreConnect III.'
+    $startMsg = 'Approve the Windows administrator prompt to begin installing ScoreConnect III.'
+    if ($Mode -eq 'Reinstall') { $startMsg = 'Approve the Windows administrator prompt to begin reinstalling ScoreConnect III.' }
+    Write-Status -Stage 'starting' -Percent 5 -Message $startMsg
 
     if (-not (Test-Path $tempDir)) {
         New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
@@ -95,6 +107,7 @@ try {
 `$logPath    = '$logPath'
 `$tempDir    = '$tempDir'
 `$scriptUrl  = '$ScriptUrl'
+`$mode       = '$Mode'
 `$scriptFile = Join-Path `$tempDir 'installScript3_current.ps1'
 `$runFile    = Join-Path `$tempDir 'installScript3_headless.ps1'
 `$outLog     = Join-Path `$tempDir 'sc3-installer-out.log'
@@ -133,6 +146,41 @@ try {
     }
     if (-not (Test-Path `$scriptFile)) { throw 'Installer script did not download.' }
     Write-Log "Downloaded `$((Get-Item `$scriptFile).Length) bytes"
+
+    # Reinstall only: wipe the Sportzcast LLC program folder, then fall through
+    # to the normal installer. Done AFTER the download so a failed download
+    # never leaves the VPU with no ScoreConnect III at all. Paths are fixed
+    # literals, never built from input. ProgramData (settings, logs) is kept.
+    if (`$mode -eq 'Reinstall') {
+        Write-Status -Stage 'removing' -Percent 40 -Message 'Stopping ScoreConnect III and deleting its program folder.'
+        `$svcName = 'ScoreConnectIII'
+        `$svc = Get-Service -Name `$svcName -ErrorAction SilentlyContinue
+        if (`$svc -and `$svc.Status -ne 'Stopped') {
+            Write-Log 'Stopping ScoreConnectIII service'
+            try { Stop-Service -Name `$svcName -Force -ErrorAction Stop; `$svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20)) } catch { Write-Log "Stop-Service: `$(`$_.Exception.Message)" }
+        }
+        # Anything still running out of the folder holds files open.
+        Write-Status -Stage 'removing' -Percent 42 -Message 'Stopping ScoreConnect III and deleting its program folder.'
+        `$null = Get-Process -Name 'ScoreConnectIII*', 'ScoreConnect', 'ScoreConnectII' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+        # Drop the stale service entry so the installer registers it fresh
+        # against the new folder instead of inheriting one pointing at a
+        # path that no longer exists.
+        if (`$svc) {
+            `$null = sc.exe delete `$svcName
+            Write-Log "sc.exe delete `$svcName exited `$LASTEXITCODE"
+        }
+        foreach (`$dir in @('C:\Program Files (x86)\Sportzcast LLC', 'C:\Program Files\Sportzcast LLC')) {
+            if (-not (Test-Path -LiteralPath `$dir)) { continue }
+            Write-Log "Deleting `$dir"
+            for (`$n = 1; `$n -le 5 -and (Test-Path -LiteralPath `$dir); `$n++) {
+                try { Remove-Item -LiteralPath `$dir -Recurse -Force -ErrorAction Stop }
+                catch { Write-Log "Delete attempt `$n failed: `$(`$_.Exception.Message)"; Write-Status -Stage 'removing' -Percent 45 -Message "A file is still in use - retrying (attempt `$n of 5)."; Start-Sleep -Seconds 3 }
+            }
+            if (Test-Path -LiteralPath `$dir) { throw "Could not delete `$dir - a file in it is still in use. Close anything using ScoreConnect and click Retry." }
+            Write-Log "Deleted `$dir"
+        }
+    }
 
     # Sanitize for a hidden run: strip the console-only statements. 'pause'
     # reads CONIN`$ (which no redirected pipe satisfies - that is why the old

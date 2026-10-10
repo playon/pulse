@@ -10,6 +10,7 @@
     Status stages:
       starting       - install just kicked off, awaiting elevation
       downloading    - fetching installer from Canopy CDN
+      removing       - reinstall only: deleting the old program folder
       installing     - running the installer
       verifying      - checking SC III is reachable on :5000
       complete       - install finished successfully

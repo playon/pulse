@@ -5844,6 +5844,18 @@ async def api_install_sc3():
     return await run_ps("Install-ScoreConnectIII.ps1", timeout=30)
 
 
+@app.post("/api/scoreconnect/reinstall-sc3")
+async def api_reinstall_sc3():
+    """Clean reinstall of ScoreConnect III. Same elevated, hidden flow as the
+    install, but after the installer script is downloaded the child stops the
+    service and deletes the whole 'Sportzcast LLC' program folder first.
+    C:\\ProgramData\\Sportzcast LLC (settings, logs) is left alone. Progress
+    comes from the same /api/scoreconnect/install-sc3/status poll. Never
+    cached: a second click must start a real run, not replay the last one."""
+    return await run_ps("Install-ScoreConnectIII.ps1", {"Mode": "Reinstall"},
+                        timeout=30, use_cache=False)
+
+
 @app.get("/api/scoreconnect/service-recovery")
 async def api_sc3_service_recovery():
     """Whether ScoreConnect III is set to restart itself after a crash, plus
