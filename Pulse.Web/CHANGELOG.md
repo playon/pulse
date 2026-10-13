@@ -21,10 +21,7 @@ flow shows testers when a new build is available.
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 `Pulse.Web/VERSION`.
 
-## [Unreleased]
-
-### Added
-- ScoreConnect tab: a **Reinstall ScoreConnect III** button. It stops the service, deletes the whole Sportzcast LLC program folder, and installs a fresh copy, with progress shown in Pulse. Saved settings and logs are kept. Use it when ScoreConnect III won't start or keeps failing.
+## [1.4.1] - 2026-10-13
 
 ### Changed
 - The About page shows whether this VPU's launch check-in reached the Pulse team. If the check-in service is down, Pulse keeps the check-ins and sends them on a later launch, and after a day it shows a short notice. There's nothing for you to do about it.
