@@ -84,14 +84,25 @@ class TestCheckinQueue(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.state_path = os.path.join(self._tmp.name, "pulse-checkin-queue.json")
         self._saved = (main.DEMO_MODE, main._CHECKIN_STATE_PATH, main._build_checkin_entry,
-                       main._checkin_configured, main._checkin_now,
-                       os.environ.get("PULSE_CHECKIN_URL"), os.environ.get("PULSE_CHECKIN_SECRET"))
+                       main._checkin_configured, main._checkin_now, main._post_fallback_sync,
+                       os.environ.get("PULSE_CHECKIN_URL"), os.environ.get("PULSE_CHECKIN_SECRET"),
+                       os.environ.get("PULSE_CHECKIN_FALLBACK_URL"))
         main.DEMO_MODE = False
         main._CHECKIN_STATE_PATH = self.state_path
         # The fake sink is plain http on loopback; production requires https.
         main._checkin_configured = lambda url, secret: True
         os.environ["PULSE_CHECKIN_URL"] = self.url
         os.environ["PULSE_CHECKIN_SECRET"] = "test-secret"
+        # Never reach the real sheet from a test: record what would be sent.
+        os.environ["PULSE_CHECKIN_FALLBACK_URL"] = "https://fallback.test/exec"
+        self.fallback_posts = []
+        self.fallback_mode = "ok"
+
+        def fake_fallback(url, body):
+            self.fallback_posts.append(body)
+            if self.fallback_mode != "ok":
+                raise RuntimeError("fallback did not acknowledge")
+        main._post_fallback_sync = fake_fallback
         self.clock = "2026-09-20T12:00:00Z"
         main._checkin_now = lambda: self.clock
         self.n = 0
@@ -106,8 +117,10 @@ class TestCheckinQueue(unittest.TestCase):
 
     def tearDown(self):
         (main.DEMO_MODE, main._CHECKIN_STATE_PATH, main._build_checkin_entry,
-         main._checkin_configured, main._checkin_now, url, secret) = self._saved
-        for key, val in (("PULSE_CHECKIN_URL", url), ("PULSE_CHECKIN_SECRET", secret)):
+         main._checkin_configured, main._checkin_now, main._post_fallback_sync,
+         url, secret, fallback) = self._saved
+        for key, val in (("PULSE_CHECKIN_URL", url), ("PULSE_CHECKIN_SECRET", secret),
+                         ("PULSE_CHECKIN_FALLBACK_URL", fallback)):
             if val is None:
                 os.environ.pop(key, None)
             else:
@@ -191,6 +204,47 @@ class TestCheckinQueue(unittest.TestCase):
         self.assertNotIn("ancient-0001", ids)
         self.assertEqual(ids[-1], "id-00000001")
 
+    def test_worker_up_never_touches_the_sheet(self):
+        self.launch()
+        self.assertEqual(self.fallback_posts, [])
+
+    def test_worker_down_sends_the_new_checkin_to_the_sheet_and_keeps_it_queued(self):
+        FakeSink.mode = "storage"
+        self.launch()
+        self.assertEqual(len(self.fallback_posts), 1)
+        sent = self.fallback_posts[0]
+        self.assertEqual(sent["checkinId"], "id-00000001")
+        self.assertIn("secret", sent)           # the sheet takes a flat check-in
+        self.assertNotIn("checkins", sent)
+        st = self.state()
+        self.assertEqual([e["checkinId"] for e in st["queue"]], ["id-00000001"])  # D1 still gets it
+        self.assertTrue(st.get("lastFallbackAt"))
+
+    def test_sheet_gets_only_the_newest_checkin_not_the_backlog(self):
+        FakeSink.mode = "storage"
+        for _ in range(3):
+            self.launch()
+        self.assertEqual([b["checkinId"] for b in self.fallback_posts],
+                         ["id-00000001", "id-00000002", "id-00000003"])
+        self.assertEqual(len(self.state()["queue"]), 3)
+
+    def test_failing_sheet_changes_nothing_else(self):
+        FakeSink.mode = "storage"
+        self.fallback_mode = "down"
+        self.launch()
+        st = self.state()
+        self.assertEqual(len(st["queue"]), 1)
+        self.assertTrue(st.get("lastFallbackError"))
+        FakeSink.mode = "ok"
+        self.launch()
+        self.assertEqual(self.state()["queue"], [])
+
+    def test_empty_fallback_url_turns_it_off(self):
+        os.environ["PULSE_CHECKIN_FALLBACK_URL"] = ""
+        FakeSink.mode = "storage"
+        self.launch()
+        self.assertEqual(self.fallback_posts, [])
+
     def test_corrupt_state_file_is_recovered(self):
         with open(self.state_path, "w", encoding="utf-8") as fh:
             fh.write("{not json")
@@ -269,6 +323,25 @@ class TestCheckinStatus(unittest.TestCase):
         self.assertEqual(st["status"], "queued")
         self.assertEqual(st["oldestQueued"], "2026-09-20T09:00:00Z")
         self.assertTrue(st["notice"])
+
+
+
+
+class TestCheckinEntryShape(unittest.TestCase):
+    def test_no_hostname_or_serial(self):
+        # Ian, 2026-10-13: a unit is its venue id and VPU name.
+        powershell_sem_reset()
+        e = asyncio.run(main._build_checkin_entry())
+        self.assertIsNotNone(e)
+        self.assertNotIn("hostname", e)
+        self.assertNotIn("serialNumber", e)
+        for key in ("venueId", "vpuName", "model", "pulseVersion"):
+            self.assertIn(key, e)
+
+
+def powershell_sem_reset():
+    import powershell
+    powershell._PS_SEMAPHORE = None
 
 
 if __name__ == "__main__":

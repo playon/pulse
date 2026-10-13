@@ -26,6 +26,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 ### Added
 - ScoreConnect tab: a **Reinstall ScoreConnect III** button. It stops the service, deletes the whole Sportzcast LLC program folder, and installs a fresh copy, with progress shown in Pulse. Saved settings and logs are kept. Use it when ScoreConnect III won't start or keeps failing.
 
+### Changed
+- The About page shows whether this VPU's launch check-in reached the Pulse team. If the check-in service is down, Pulse keeps the check-ins and sends them on a later launch, and after a day it shows a short notice. There's nothing for you to do about it.
+
 ## [1.4.0] - 2026-10-08
 
 ### Changed
@@ -83,7 +86,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 ### Changed
 - The live scoreboard on the ScoreConnect page now labels every value (Away Score, Home Score, Quarter/Inning/Period, Time, Down & Distance, Ball On, Clock) and the home score lines up under its team name again.
 - The loading screen now shows each check's result as it finishes (Pass, Warning, Critical, or Couldn't check) on a map of the setup: cameras, VPU, venue network, Pixellot cloud and scoreboard. It lists every issue as it's found, shows which scripts are running, and ends on the stream readiness verdict before opening Pulse.
-- The About page shows whether this VPU's launch check-in reached the Pulse team. If the check-in service is down, Pulse keeps the check-ins and sends them on a later launch, and after a day it shows a short notice. There's nothing for you to do about it.
 
 ## [1.3.1] - 2026-09-22
 
