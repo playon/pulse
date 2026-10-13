@@ -1,5 +1,9 @@
-// The write secret ships inside a public repo, so it only keeps out casual noise.
-// Real protection is the shape/size validation and the per-IP rate limit.
+// No write key (Ian, 2026-10-13). Pulse ships from a public repo, so any key in
+// it was readable by anyone and only looked like protection (Snyk flagged it,
+// PR #229). What protects the table is what this file enforces: the per-IP rate
+// limit, the body/batch size caps, and field-by-field validation that drops
+// anything malformed. Older builds still send a "secret" field; it is ignored.
+// Real per-unit auth comes with the Unity/DevOps transport.
 
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_BATCH = 50;
@@ -46,10 +50,6 @@ export async function handleIngest(request, env) {
   if (request.method !== "POST") {
     return Response.json({ ok: false, error: "method" }, { status: 405 });
   }
-  if (!env.CHECKIN_SECRET) {
-    return Response.json({ ok: false, error: "not-configured" }, { status: 503 });
-  }
-
   if (env.INGEST_LIMITER) {
     const key = request.headers.get("CF-Connecting-IP") || "unknown";
     const { success } = await env.INGEST_LIMITER.limit({ key });
@@ -68,9 +68,6 @@ export async function handleIngest(request, env) {
     return badRequest("json");
   }
   if (!body || typeof body !== "object" || Array.isArray(body)) return badRequest("shape");
-  if (!(await secretMatches(body.secret, env.CHECKIN_SECRET))) {
-    return Response.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  }
   if (!Array.isArray(body.checkins) || body.checkins.length === 0) return badRequest("checkins");
   if (body.checkins.length > MAX_BATCH) return badRequest("batch-too-large");
 
@@ -333,20 +330,6 @@ function normalizeTime(v, receivedAt) {
 
 function idOf(item) {
   return item && typeof item.checkinId === "string" ? item.checkinId.slice(0, 64) : null;
-}
-
-async function secretMatches(given, expected) {
-  if (typeof given !== "string" || !given) return false;
-  const enc = new TextEncoder();
-  const [a, b] = await Promise.all([
-    crypto.subtle.digest("SHA-256", enc.encode(given)),
-    crypto.subtle.digest("SHA-256", enc.encode(expected)),
-  ]);
-  const x = new Uint8Array(a);
-  const y = new Uint8Array(b);
-  let diff = 0;
-  for (let i = 0; i < x.length; i++) diff |= x[i] ^ y[i];
-  return diff === 0;
 }
 
 function notFound() {

@@ -85,14 +85,13 @@ class TestCheckinQueue(unittest.TestCase):
         self.state_path = os.path.join(self._tmp.name, "pulse-checkin-queue.json")
         self._saved = (main.DEMO_MODE, main._CHECKIN_STATE_PATH, main._build_checkin_entry,
                        main._checkin_configured, main._checkin_now, main._post_fallback_sync,
-                       os.environ.get("PULSE_CHECKIN_URL"), os.environ.get("PULSE_CHECKIN_SECRET"),
+                       os.environ.get("PULSE_CHECKIN_URL"),
                        os.environ.get("PULSE_CHECKIN_FALLBACK_URL"))
         main.DEMO_MODE = False
         main._CHECKIN_STATE_PATH = self.state_path
         # The fake sink is plain http on loopback; production requires https.
-        main._checkin_configured = lambda url, secret: True
+        main._checkin_configured = lambda url: True
         os.environ["PULSE_CHECKIN_URL"] = self.url
-        os.environ["PULSE_CHECKIN_SECRET"] = "test-secret"
         # Never reach the real sheet from a test: record what would be sent.
         os.environ["PULSE_CHECKIN_FALLBACK_URL"] = "https://fallback.test/exec"
         self.fallback_posts = []
@@ -118,8 +117,8 @@ class TestCheckinQueue(unittest.TestCase):
     def tearDown(self):
         (main.DEMO_MODE, main._CHECKIN_STATE_PATH, main._build_checkin_entry,
          main._checkin_configured, main._checkin_now, main._post_fallback_sync,
-         url, secret, fallback) = self._saved
-        for key, val in (("PULSE_CHECKIN_URL", url), ("PULSE_CHECKIN_SECRET", secret),
+         url, fallback) = self._saved
+        for key, val in (("PULSE_CHECKIN_URL", url),
                          ("PULSE_CHECKIN_FALLBACK_URL", fallback)):
             if val is None:
                 os.environ.pop(key, None)
@@ -139,7 +138,7 @@ class TestCheckinQueue(unittest.TestCase):
         self.assertEqual(self.state()["queue"], [])
         self.assertEqual(self.state()["lastSentAt"], self.clock)
         sent = FakeSink.requests[0]
-        self.assertEqual(sent["secret"], "test-secret")
+        self.assertNotIn("secret", sent)    # the Worker takes no write key
         self.assertEqual(sent["checkins"][0]["checkinId"], "id-00000001")
         self.assertEqual(sent["checkins"][0]["sentAt"], "2026-09-20T12:00:00Z")
 
@@ -259,17 +258,17 @@ class TestCheckinQueue(unittest.TestCase):
         self.assertFalse(os.path.exists(self.state_path))
 
     def test_unconfigured_build_queues_but_does_not_send(self):
-        main._checkin_configured = lambda url, secret: False
+        main._checkin_configured = lambda url: False
         self.launch()
         self.assertEqual(FakeSink.requests, [])
         self.assertEqual(len(self.state()["queue"]), 1)
 
     def test_production_requires_https_and_real_values(self):
         configured = self._saved[3]
-        self.assertFalse(configured("PASTE_WORKER_URL_HERE", "s"))
-        self.assertFalse(configured("http://example.test/checkin", "s"))
-        self.assertFalse(configured("https://w.test/checkin", ""))
-        self.assertTrue(configured("https://w.test/checkin", "s"))
+        self.assertFalse(configured("PASTE_WORKER_URL_HERE"))
+        self.assertFalse(configured("http://example.test/checkin"))
+        self.assertFalse(configured(""))
+        self.assertTrue(configured("https://w.test/checkin"))
 
 
 class TestCheckinStatus(unittest.TestCase):

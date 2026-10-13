@@ -6438,11 +6438,11 @@ async def _remove_splashtop() -> None:
 
 # Fire-and-forget "Pulse ran on this VPU" beacon for fleet tracking. The sink is
 # the pulse-checkin Cloudflare Worker (tools/checkin-worker/), which appends one
-# row per check-in to D1. The URL + secret are embedded on purpose: the secret is
-# a low-value, rotatable, write-only key (the repo is public, so the Worker's
-# validation and rate limit are the real protection), and embedding it means
-# every release checks in with zero per-VPU setup. Env vars PULSE_CHECKIN_URL /
-# PULSE_CHECKIN_SECRET override the defaults.
+# row per check-in to D1. There is no write key: Pulse ships from a public repo,
+# so a key in it was readable by anyone (Snyk flagged it on PR #229). The
+# Worker's rate limit and validation are the protection; real per-unit auth
+# comes with the Unity/DevOps transport. The env var PULSE_CHECKIN_URL
+# overrides the URL.
 #
 # Every check-in is queued on disk first and leaves the queue only when the
 # Worker acknowledges it. The previous sink (an Apps Script sheet) lost four days
@@ -6469,7 +6469,6 @@ async def _remove_splashtop() -> None:
 # never slow or break launch. Stdlib urllib on purpose (no httpx): the beacon has
 # to work on any installed build, even one missing an optional pip dependency.
 _CHECKIN_URL    = "https://pulse-checkin.pulse-checkin-worker.workers.dev/checkin"
-_CHECKIN_SECRET = "d63a83e8a45f8bd71409ac2eef00dec2584a04d70abb962139e5e08f7ee6d93d"
 _CHECKIN_FALLBACK_URL    = "https://script.google.com/macros/s/AKfycbworYEcINtNfd1R6sTvHFDFqOHzYVA1XxHZRStB54T2GcTgQ8JvE0lxnboJ9q_jEFS4/exec"
 _CHECKIN_FALLBACK_SECRET = "7a161bad7765fc5078b8375007999160c5687bf5da52ae1ca717ebbad628e648"
 _CHECKIN_STATE_PATH = _os.path.join(_web_root, "pulse-checkin-queue.json")
@@ -6552,13 +6551,13 @@ def _post_checkin_sync(url: str, body: dict) -> dict:
     return reply
 
 
-async def _flush_checkin_queue(state: dict, url: str, secret: str) -> None:
+async def _flush_checkin_queue(state: dict, url: str) -> None:
     """Send queued check-ins oldest first; drop only what the Worker answered for."""
     while state["queue"]:
         batch = state["queue"][:_CHECKIN_BATCH]
         state["lastAttemptAt"] = _checkin_now()
         try:
-            reply = await asyncio.to_thread(_post_checkin_sync, url, {"secret": secret, "checkins": batch})
+            reply = await asyncio.to_thread(_post_checkin_sync, url, {"checkins": batch})
         except Exception as e:
             state["lastError"] = str(e) or e.__class__.__name__
             return
@@ -6663,16 +6662,14 @@ async def _send_fallback(entry: dict, state: dict) -> None:
         _server_log.info("Fallback check-in failed too (%s)", state["lastFallbackError"])
 
 
-def _checkin_configured(url: str, secret: str) -> bool:
-    return bool(url and secret and url.startswith("https://")
-                and "PASTE_" not in url and "PASTE_" not in secret)
+def _checkin_configured(url: str) -> bool:
+    return bool(url and url.startswith("https://") and "PASTE_" not in url)
 
 
 async def _send_checkin() -> None:
     if DEMO_MODE:
         return  # a dev/demo machine never reports
     url = (_os.environ.get("PULSE_CHECKIN_URL") or _CHECKIN_URL).strip()
-    secret = (_os.environ.get("PULSE_CHECKIN_SECRET") or _CHECKIN_SECRET).strip()
     try:
         async with _checkin_lock:
             entry = await _build_checkin_entry()
@@ -6682,9 +6679,9 @@ async def _send_checkin() -> None:
             state["queue"] = _trim_checkin_queue(state["queue"], _checkin_now())
             # Persist before sending, so a crash mid-POST still leaves it queued.
             _save_checkin_state(state)
-            if not _checkin_configured(url, secret):
+            if not _checkin_configured(url):
                 return
-            await _flush_checkin_queue(state, url, secret)
+            await _flush_checkin_queue(state, url)
             if state.get("lastError") and entry and any(
                     e.get("checkinId") == entry["checkinId"] for e in state["queue"]):
                 await _send_fallback(entry, state)
@@ -6703,13 +6700,12 @@ async def _send_checkin() -> None:
 def _checkin_status() -> dict:
     """What the About page shows. Read-only: never sends, never runs PowerShell."""
     url = (_os.environ.get("PULSE_CHECKIN_URL") or _CHECKIN_URL).strip()
-    secret = (_os.environ.get("PULSE_CHECKIN_SECRET") or _CHECKIN_SECRET).strip()
     state = _load_checkin_state()
     queue = state["queue"]
     oldest = min((e.get("sentAt") for e in queue if e.get("sentAt")), default=None)
     age = _checkin_age_hours(oldest, _checkin_now()) if oldest else None
     # A build with no sink never tried to reach one, so it must not claim it failed to.
-    unconfigured = not DEMO_MODE and not _checkin_configured(url, secret)
+    unconfigured = not DEMO_MODE and not _checkin_configured(url)
     if unconfigured:
         status = "not-configured"
     elif queue:

@@ -29,7 +29,8 @@ simple = { limit = 30, period = 60 }
 [triggers]
 crons = ["0 13 * * *"]
 
-# Secrets (wrangler secret put): CHECKIN_SECRET, SLACK_WEBHOOK_URL
+# Secrets (wrangler secret put): SLACK_WEBHOOK_URL. (CHECKIN_SECRET is no longer
+# used; the ingest takes no write key.)
 
 [env.admin]
 name = "pulse-checkin-admin"

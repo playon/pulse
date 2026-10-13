@@ -57,16 +57,18 @@ test("unknown paths are 404", async () => {
   assert.equal(r.status, 404);
 });
 
-test("missing secret config fails closed", async () => {
+test("no write key is needed", async () => {
   delete env.CHECKIN_SECRET;
-  const r = await post({ secret: SECRET, checkins: [checkin()] });
-  assert.equal(r.status, 503);
+  const r = await post({ checkins: [checkin()] });
+  assert.equal(r.status, 200);
+  assert.equal((await r.json()).results[0].status, "inserted");
 });
 
-test("wrong secret is 401 and stores nothing", async () => {
-  const r = await post({ secret: "nope", checkins: [checkin()] });
-  assert.equal(r.status, 401);
-  assert.equal(env.DB.raw.prepare("SELECT COUNT(*) n FROM checkins").get().n, 0);
+test("an older build's key is accepted, ignored, and never stored", async () => {
+  const r = await post({ secret: "anything-at-all", checkins: [checkin()] });
+  assert.equal(r.status, 200);
+  const row = env.DB.raw.prepare("SELECT raw FROM checkins").get();
+  assert.ok(!row.raw.includes("anything-at-all"));
 });
 
 test("inserts, then a replay of the same id is a duplicate", async () => {

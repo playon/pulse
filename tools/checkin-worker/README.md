@@ -19,10 +19,9 @@ hostname covers the whole hostname, and VPUs have to POST without logging in.
 ```json
 POST /checkin
 {
-  "secret": "<CHECKIN_SECRET>",
   "checkins": [
     { "checkinId": "uuid", "sentAt": "2026-09-23T14:00:00Z",
-      "hostname": "...", "serialNumber": "...", "venueId": "...", "vpuName": "...",
+      "venueId": "...", "vpuName": "...",
       "model": "...", "pulseVersion": "...", "channel": "...",
       "readiness": { "status": "PASS", "policyVersion": "1", "blockers": [], "risks": [] } }
   ]
@@ -47,12 +46,14 @@ fields, stored by migration `0002_monitor.sql`:
 ```
 
 The `transitions` view gives one row per finding opened or resolved, which is
-what the pilot is measured on. The monitor sends 8 check-ins per request, so a
+what the pilot is measured on. The monitor sends 3 check-ins per request, so a
 replayed queue stays under the 64 KB cap.
 
-The secret ships in a public repo, so it only keeps out casual noise. The real
-protection is validation plus the rate limit, and the ingest Worker can't read
-anything back.
+There is no write key. Pulse ships from a public repo, so a key in it was
+readable by anyone and only looked like protection. The protection is the
+per-IP rate limit, the size caps and field-by-field validation, and the ingest
+Worker can't read anything back. Older builds still send a `secret` field; it
+is ignored and never stored. Real per-unit auth comes with the Unity transport.
 
 ## One-time setup
 
@@ -62,12 +63,10 @@ Run everything from this folder.
 2. **Create the database:** `npx wrangler d1 create pulse-checkins`. Paste the
    `database_id` it prints into **both** `database_id` lines in `wrangler.toml`.
 3. **Apply the schema:** `npm run migrate:remote`
-4. **Set the write secret:** `npx wrangler secret put CHECKIN_SECRET`. The value
-   must match `_CHECKIN_SECRET` in `Pulse.Web/app/main.py`.
-5. **Set the Slack webhook.** Create an app at api.slack.com/apps, then Incoming
+4. **Set the Slack webhook.** Create an app at api.slack.com/apps, then Incoming
    Webhooks, then add one to the target channel. Then run
    `npx wrangler secret put SLACK_WEBHOOK_URL`.
-6. **Deploy:** `npm run deploy`. This deploys both Workers.
+5. **Deploy:** `npm run deploy`. This deploys both Workers.
 7. **Put Access in front of the admin Worker.** In the dashboard, open Workers &
    Pages, then `pulse-checkin-admin`, Settings, Domains & Routes, and turn on
    Cloudflare Access for the workers.dev route. In Zero Trust, open Access,
@@ -95,7 +94,6 @@ under the Worker's Cron Triggers tab in the dashboard.
 
 ```bash
 npm install
-printf 'CHECKIN_SECRET=local-secret\n' > .dev.vars
 printf 'DEV_ALLOW_UNAUTHENTICATED=true\n' > .dev.vars.admin   # local only, never in the dashboard
 npm run migrate:local
 npm run dev          # ingest on :8787
