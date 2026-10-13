@@ -1,0 +1,16 @@
+{
+  "name": "pulse-checkin-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "dev:admin": "wrangler dev --local --env admin --port 8788",
+    "migrate:local": "wrangler d1 migrations apply pulse-checkins --local",
+    "migrate:remote": "wrangler d1 migrations apply pulse-checkins --remote",
+    "deploy": "wrangler deploy --env=\"\" && wrangler deploy --env admin",
+    "test": "node --test test/"
+  },
+  "devDependencies": {
+    "wrangler": "^4.137.0"
+  }
+}
