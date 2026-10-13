@@ -7,4 +7,6 @@ pulse-scoreconnect-history.json
 pulse-scoreconnect-chain.json
 pulse-sc3-previous.json
 sc3-backups/
+pulse-checkin-queue.json
+pulse-checkin-queue.json.tmp
 received_reports/
