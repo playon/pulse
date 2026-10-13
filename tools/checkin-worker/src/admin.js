@@ -1,7 +1,7 @@
 import { accessIdentity } from "./access.js";
 
 const UNIT_COLUMNS = [
-  "hostname", "serial_number", "venue_id", "vpu_name", "model", "pulse_version",
+  "venue_id", "vpu_name", "model", "pulse_version",
   "channel", "readiness_status", "readiness_blockers", "readiness_risks",
   "first_seen", "last_seen", "run_count",
 ];
@@ -44,7 +44,7 @@ async function page(env) {
   const iso = (ms) => new Date(now - ms).toISOString();
   const [units, stats] = await Promise.all([
     env.DB.prepare(
-      "SELECT hostname, serial_number, venue_id, vpu_name, pulse_version, channel, readiness_status, first_seen, last_seen, run_count FROM units ORDER BY last_seen DESC",
+      "SELECT venue_id, vpu_name, model, pulse_version, channel, readiness_status, first_seen, last_seen, run_count FROM units ORDER BY last_seen DESC",
     ).all(),
     env.DB.prepare(
       "SELECT (SELECT COUNT(*) FROM checkins WHERE received_at >= ?) AS day, (SELECT COUNT(*) FROM checkins WHERE received_at >= ?) AS week, (SELECT MAX(received_at) FROM checkins) AS last",
@@ -52,7 +52,7 @@ async function page(env) {
   ]);
   const rows = units.results
     .map((u) => `<tr>${[
-      u.hostname, u.vpu_name, u.venue_id, u.serial_number, u.pulse_version, u.channel,
+      u.vpu_name, u.venue_id, u.model, u.pulse_version, u.channel,
       u.readiness_status, short(u.first_seen), short(u.last_seen), u.run_count,
     ].map((v) => `<td>${esc(v)}</td>`).join("")}</tr>`)
     .join("");
@@ -75,7 +75,7 @@ td:last-child,th:last-child{text-align:right}
 <p>${esc(units.results.length)} units &middot; ${esc(stats.day)} check-ins in 24 h &middot; ${esc(stats.week)} in 7 days &middot; last received ${esc(short(stats.last) || "never")}
 &middot; <a href="/units.csv">units.csv</a> &middot; <a href="/checkins.csv?days=30">checkins.csv (30 days)</a></p>
 <div class="wrap"><table><thead><tr>
-<th>Hostname</th><th>VPU name</th><th>Venue</th><th>Serial</th><th>Pulse</th><th>Channel</th><th>Readiness</th><th>First seen</th><th>Last seen</th><th>Runs</th>
+<th>VPU name</th><th>Venue</th><th>Model</th><th>Pulse</th><th>Channel</th><th>Readiness</th><th>First seen</th><th>Last seen</th><th>Runs</th>
 </tr></thead><tbody>${rows}</tbody></table></div>
 </body></html>`;
   return new Response(html, {

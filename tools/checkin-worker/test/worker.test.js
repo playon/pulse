@@ -108,12 +108,13 @@ test("units view rolls up first/last seen and run count per unit", async () => {
       checkin({ checkinId: "id-00000001", sentAt: "2026-09-18T10:00:00Z", pulseVersion: "1.3.1" }),
       checkin({ checkinId: "id-00000002", sentAt: "2026-09-22T10:00:00Z", pulseVersion: "1.4.0-dev" }),
       checkin({ checkinId: "id-00000003", sentAt: "2026-09-20T10:00:00Z", pulseVersion: "1.3.1" }),
-      checkin({ checkinId: "id-00000004", hostname: "OTHER", serialNumber: "SN999" }),
+      checkin({ checkinId: "id-00000004", venueId: "V99", vpuName: "Other Gym" }),
     ],
   });
-  const units = env.DB.raw.prepare("SELECT * FROM units ORDER BY hostname").all();
+  // A unit is its venue id now (check-ins no longer carry hostname or serial).
+  const units = env.DB.raw.prepare("SELECT * FROM units ORDER BY venue_id").all();
   assert.equal(units.length, 2);
-  const main = units.find((u) => u.hostname === "PXLS2_10893");
+  const main = units.find((u) => u.venue_id === "V42");
   assert.equal(main.run_count, 3);
   assert.equal(main.first_seen, "2026-09-18T10:00:00.000Z");
   assert.equal(main.last_seen, "2026-09-22T10:00:00.000Z");
@@ -234,7 +235,7 @@ test("admin accepts a valid Access JWT", async () => {
   await post({ secret: SECRET, checkins: [checkin()] });
   const r = await adminGet("/units.csv", signJwt(goodClaims()));
   assert.equal(r.status, 200);
-  assert.match(await r.text(), /PXLS2_10893/);
+  assert.match(await r.text(), /Main Gym/);
 });
 
 test("admin rejects wrong audience, wrong issuer, expired, and forged tokens", async () => {
@@ -254,7 +255,7 @@ test("CSV neutralises formulas and HTML escapes VPU-supplied text", async () => 
   serveCerts();
   await post({
     secret: SECRET,
-    checkins: [checkin({ hostname: '=HYPERLINK("http://x")', vpuName: "<script>alert(1)</script>" })],
+    checkins: [checkin({ model: '=HYPERLINK("http://x")', vpuName: "<script>alert(1)</script>" })],
   });
   const token = signJwt(goodClaims());
   const csvText = await (await adminGet("/units.csv", token)).text();
@@ -270,4 +271,161 @@ test("checkins.csv honours the days window", async () => {
   env.DB.raw.exec("UPDATE checkins SET received_at = '2020-01-01T00:00:00.000Z' WHERE checkin_id = 'old-00000001'");
   const text = await (await adminGet("/checkins.csv?days=7", signJwt(goodClaims()))).text();
   assert.equal(text.trim().split("\r\n").length, 2);
+});
+
+test("monitor check-in stores reason, delta and pass cost", async () => {
+  const c = checkin({
+    reason: "state-change",
+    osBuild: "17763",
+    ubr: 253,
+    delta: {
+      status: "FAIL",
+      prevStatus: "PASS",
+      opened: [{ code: "stream-blocked", class: "blocker", title: "Streaming is blocked", since: "2026-10-12T20:00:00Z" }],
+      resolved: [],
+      persisting: ["nic-slow"],
+    },
+    monitor: { pass: "full", seconds: 41.5, psRuns: 9, eventLive: false, coreDown: false,
+               cpuSeconds: 8.19, cpuPercent: 6.9, processes: 16 },
+  });
+  const body = await (await post({ secret: SECRET, checkins: [c] })).json();
+  assert.equal(body.results[0].status, "inserted");
+  const row = env.DB.raw.prepare("SELECT * FROM checkins").get();
+  assert.equal(row.reason, "state-change");
+  assert.equal(row.ubr, "253");
+  assert.equal(row.delta_status, "FAIL");
+  assert.equal(row.monitor_pass, "full");
+  assert.equal(row.monitor_seconds, 41.5);
+  assert.equal(row.monitor_ps_runs, 9);
+  assert.equal(row.monitor_cpu_seconds, 8.19);
+  assert.equal(row.monitor_cpu_percent, 6.9);
+  assert.equal(row.monitor_processes, 16);
+  assert.equal(row.event_live, 0);
+  const t = env.DB.raw.prepare("SELECT * FROM transitions").all();
+  assert.equal(t.length, 1);
+  assert.equal(t[0].kind, "opened");
+  assert.equal(t[0].code, "stream-blocked");
+  assert.equal(t[0].class, "blocker");
+});
+
+test("launch check-in leaves monitor columns empty", async () => {
+  await post({ secret: SECRET, checkins: [checkin({ reason: "startup" })] });
+  const row = env.DB.raw.prepare("SELECT * FROM checkins").get();
+  assert.equal(row.reason, "startup");
+  assert.equal(row.delta_opened, null);
+  assert.equal(row.monitor_pass, null);
+  assert.equal(env.DB.raw.prepare("SELECT COUNT(*) n FROM transitions").get().n, 0);
+});
+
+test("junk monitor fields are dropped, not stored", async () => {
+  const c = checkin({
+    reason: "rm -rf",
+    delta: { opened: "nope", resolved: [{ title: "no code" }, null] },
+    monitor: { pass: "huge", seconds: -5, psRuns: 1e9, eventLive: "yes" },
+  });
+  await post({ secret: SECRET, checkins: [c] });
+  const row = env.DB.raw.prepare("SELECT * FROM checkins").get();
+  assert.equal(row.reason, null);
+  assert.equal(row.delta_opened, null);
+  assert.equal(row.delta_resolved, "[]");
+  assert.equal(row.monitor_pass, null);
+  assert.equal(row.monitor_seconds, null);
+  assert.equal(row.monitor_ps_runs, null);
+  assert.equal(row.event_live, null);
+});
+
+function telemetryDoc(overrides = {}) {
+  return {
+    schema: "pulse.telemetry/v1",
+    status: "FAIL",
+    statusSince: "2026-10-13T19:20:00Z",
+    headline: "The venue network is blocking clock sync",
+    blockers: ["The venue network is blocking clock sync"],
+    checkedAt: "2026-10-13T19:34:30Z",
+    pixellotVersion: "5.37.3",
+    network: {
+      internetReachable: true,
+      streamingPath: "rtmp-1935",
+      portsFailed: ["Clock sync (UDP 123)"],
+      internet: { adapter: "Internet", mac: "C8:D9:D2:1C:29:2A", ip: "192.168.111.251",
+                  subnetMask: "255.255.254.0", gateway: "192.168.110.1", dns1: "192.168.110.1",
+                  dns2: null, dhcp: false },
+    },
+    cameras: { systemType: "S2", expected: 2, detected: 1, slow: 1,
+               ports: [{ port: "Port 1", state: "camera", linkMbps: 100, slow: true, cameraMac: "00:D0:89:19:71:57" }] },
+    servicesDown: [],
+    scoreboard: { source: "scoreconnect", ok: true },
+    power: { lastBoot: "2026-10-13T14:48:23", unexpectedShutdowns7d: 4 },
+    ...overrides,
+  };
+}
+
+test("utilitarian telemetry lands as unit_status columns", async () => {
+  await post({ secret: SECRET, checkins: [checkin({ reason: "periodic", telemetry: telemetryDoc() })] });
+  const u = env.DB.raw.prepare("SELECT * FROM unit_status").get();
+  assert.equal(u.vpu_name, "Main Gym");
+  assert.equal(u.model, "S2");
+  assert.equal(u.status, "FAIL");
+  assert.equal(u.headline, "The venue network is blocking clock sync");
+  assert.equal(u.blockers, '["The venue network is blocking clock sync"]');
+  assert.equal(u.internet_reachable, 1);
+  assert.equal(u.streaming_path, "rtmp-1935");
+  assert.equal(u.ports_failed, '["Clock sync (UDP 123)"]');
+  assert.equal(u.ip, "192.168.111.251");
+  assert.equal(u.subnet_mask, "255.255.254.0");
+  assert.equal(u.gateway, "192.168.110.1");
+  assert.equal(u.dns1, "192.168.110.1");
+  assert.equal(u.dns2, null);
+  assert.equal(u.dhcp, 0);
+  assert.equal(u.mac, "C8:D9:D2:1C:29:2A");
+  assert.equal(u.system_type, "S2");
+  assert.equal(u.cameras_detected, 1);
+  assert.equal(u.cameras_expected, 2);
+  assert.equal(u.cameras_slow, 1);
+  assert.equal(u.services_down, "[]");
+  assert.equal(u.scoreboard_source, "scoreconnect");
+  assert.equal(u.scoreboard_ok, 1);
+  assert.equal(u.unexpected_shutdowns_7d, 4);
+  assert.equal(u.pixellot_version, "5.37.3");
+  for (const gone of ["hostname", "serial_number", "camera_macs"]) assert.ok(!(gone in u), gone);
+  const port = env.DB.raw.prepare(
+    "SELECT json_extract(telemetry, '$.cameras.ports[0].cameraMac') m FROM checkins").get();
+  assert.equal(port.m, "00:D0:89:19:71:57");
+});
+
+test("a heartbeat moves last_seen but keeps the last full reading", async () => {
+  const full = checkin({ reason: "state-change", telemetry: telemetryDoc({ status: "PASS", blockers: [] }) });
+  const beat = { checkinId: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", sentAt: "2026-09-20T15:00:00Z",
+                 reason: "heartbeat", venueId: "V42", vpuName: "Main Gym", status: "PASS" };
+  const r = await (await post({ secret: SECRET, checkins: [full, beat] })).json();
+  assert.deepEqual(r.results.map((x) => x.status), ["inserted", "inserted"]);
+  const u = env.DB.raw.prepare("SELECT * FROM unit_status").get();
+  assert.equal(u.last_seen, "2026-09-20T15:00:00.000Z");
+  assert.equal(u.last_full_report, "2026-09-20T14:00:00.000Z");
+  assert.equal(u.last_kind, "heartbeat");
+  assert.equal(u.status, "PASS");
+  const hb = env.DB.raw.prepare("SELECT readiness_status FROM checkins WHERE reason = 'heartbeat'").get();
+  assert.equal(hb.readiness_status, "PASS");
+});
+
+test("unit_status keeps only the newest telemetry per unit", async () => {
+  const a = checkin({ telemetry: telemetryDoc() });
+  const b = checkin({ checkinId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", sentAt: "2026-09-20T15:00:00Z",
+                      telemetry: telemetryDoc({ status: "PASS", blockers: [] }) });
+  const other = checkin({ checkinId: "cccccccc-cccc-cccc-cccc-cccccccccccc", venueId: "V7", vpuName: "Field",
+                          telemetry: telemetryDoc() });
+  await post({ secret: SECRET, checkins: [a, b, other] });
+  const u = env.DB.raw.prepare("SELECT venue_id, status FROM unit_status ORDER BY venue_id").all();
+  assert.deepEqual(u.map((r) => [r.venue_id, r.status]), [["V42", "PASS"], ["V7", "FAIL"]]);
+});
+
+test("wrong-schema or oversized telemetry is dropped, the check-in still lands", async () => {
+  const big = telemetryDoc({ pad: "x".repeat(20000) });
+  const r = await (await post({ secret: SECRET, checkins: [
+    checkin({ telemetry: { schema: "other", status: "FAIL" } }),
+    checkin({ checkinId: "dddddddd-dddd-dddd-dddd-dddddddddddd", telemetry: big }),
+  ] })).json();
+  assert.deepEqual(r.results.map((x) => x.status), ["inserted", "inserted"]);
+  const n = env.DB.raw.prepare("SELECT COUNT(*) n FROM checkins WHERE telemetry IS NOT NULL").get().n;
+  assert.equal(n, 0);
 });

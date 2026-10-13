@@ -34,6 +34,22 @@ A client should drop an entry from its queue on any of those three statuses and
 keep it on anything else: a non-200 response, `ok` not true, or a network error.
 Limits are 50 check-ins or 64 KB per request, and 30 requests per minute per IP.
 
+Check-ins from the fleet monitor (`Pulse.Web/app/monitor_once.py`) add optional
+fields, stored by migration `0002_monitor.sql`:
+
+```json
+{ "reason": "periodic" | "state-change",   // "startup" from an interactive launch
+  "osBuild": "17763", "ubr": 253,
+  "delta": { "status": "FAIL", "prevStatus": "PASS",
+             "opened":   [{ "code": "...", "class": "blocker", "title": "...", "since": "..." }],
+             "resolved": [] },
+  "monitor": { "pass": "full" | "partial", "seconds": 41.5, "psRuns": 9, "eventLive": false } }
+```
+
+The `transitions` view gives one row per finding opened or resolved, which is
+what the pilot is measured on. The monitor sends 8 check-ins per request, so a
+replayed queue stays under the 64 KB cap.
+
 The secret ships in a public repo, so it only keeps out casual noise. The real
 protection is validation plus the rate limit, and the ingest Worker can't read
 anything back.
