@@ -3466,6 +3466,7 @@ button.scc-node:hover { background: var(--c-surface-2); border-color: var(--c-bo
 }
 .about-desc { font-size: var(--fs-body); color: var(--c-text); margin-bottom: 1.25rem; line-height: 1.6; }
 .about-info { margin-bottom: 1.25rem; }
+.about-notice { text-align: left; margin: 0 0 1.25rem; }
 .about-links { display: flex; justify-content: center; gap: 0.75rem; }
 
 /* ── Audio Panel ─────────────────────────────────────────── */

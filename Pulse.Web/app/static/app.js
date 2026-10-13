@@ -12180,6 +12180,7 @@ function renderAbout() {
         <p class="about-tagline">Pixellot Unified Live System Evaluator</p>
         <div class="about-version" id="about-version">${ver ? esc(ver) + " · Web Edition" : "… · Web Edition"}</div>
         <p class="about-desc">A lightweight, self-contained diagnostic tool for Pixellot VPU systems. Collects system identity, hardware, performance metrics, network configuration, camera connectivity, service status, disk health, and event logs.</p>
+        <div id="about-checkin-notice"></div>
         <div class="about-info">
           <div class="kv-grid kv-grid-center">
             ${kvRow("Hostname", id.hostname || "—")}
@@ -12187,6 +12188,7 @@ function renderAbout() {
             ${kvRow("Backend", "Python + FastAPI + Uvicorn")}
             ${kvRow("Frontend", "Vanilla HTML/JS + Tailwind CSS")}
             ${kvRow("Data Collection", "PowerShell + WMI/CIM")}
+            ${kvRowHtml("Fleet Check-in", '<span id="about-checkin">Checking…</span>')}
           </div>
         </div>
         <div class="about-links">
@@ -12206,6 +12208,39 @@ function renderAbout() {
       if (el && d?.version) el.textContent = d.version + " · Web Edition";
     }).catch(() => {});
   }
+  api("/api/checkin-status").then(renderCheckinStatus).catch(() => {
+    const el = document.getElementById("about-checkin");
+    if (el) el.textContent = "Couldn't read check-in status";
+  });
+}
+
+// The launch check-in is for the Pulse team's fleet list, not this VPU's
+// health, so a failure is an informational notice here and nowhere else.
+function renderCheckinStatus(s) {
+  const el = document.getElementById("about-checkin");
+  if (!el || !s) return;
+  const plural = (n) => n + " check-in" + (n === 1 ? "" : "s");
+  const labels = {
+    sent: "Sent " + formatTime(s.lastSentAt),
+    queued: plural(s.queued) + " waiting, retrying next launch",
+    never: "Not sent yet",
+    "not-configured": "Not set up in this build",
+    demo: "Off in demo mode",
+  };
+  el.textContent = labels[s.status] || "—";
+  if (s.status === "queued" && s.lastError) el.title = "Last attempt: " + s.lastError;
+
+  const slot = document.getElementById("about-checkin-notice");
+  if (!slot || !s.notice) return;
+  const reason = s.lastError ? ` (${esc(s.lastError)})` : "";
+  slot.innerHTML = `
+    <div class="dash-info-banner about-notice">
+      <span class="dash-banner-icon">${svgIcon("info", 20)}</span>
+      <div>
+        <div class="font-semibold text-sm">Fleet check-in hasn't gone through</div>
+        <div class="text-xs text-pulse-muted mt-1">Pulse couldn't reach its check-in service${reason}, so the Pulse team's fleet list is missing this VPU's launches since ${esc(formatTime(s.oldestQueued))}. ${esc(plural(s.queued))} saved here will send on a later launch. Nothing on this VPU is affected, and there's nothing to do.</div>
+      </div>
+    </div>`;
 }
 
 // Hidden UBR modal: typing the sequence anywhere on the About tab opens it.
