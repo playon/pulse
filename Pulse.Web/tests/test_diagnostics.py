@@ -1394,6 +1394,46 @@ class TestGraphicsDeliveryFinding(unittest.TestCase):
             self.assertEqual(verdict["status"], "WARN", code)
 
 
+# ── Corvallis MT (2026-10-12): read stream-ready, fixed by recalibrating ──
+# No multisport calibration means split camera views on stream, not a dead
+# stream, so it warns and never fails readiness.
+class TestCalibrationFinding(unittest.TestCase):
+    def _cfg(self, calibrated, sports=None, **extra):
+        cfg = {"cameras": [{"ip": "192.168.0.50"}], "cameraCfgExists": True,
+               "calibration": {"multisport": {"calibrated": calibrated,
+                                              "sports": sports or [], "primary": None}}}
+        cfg.update(extra)
+        return cfg
+
+    def _codes(self, cfg, identity=None):
+        return [f["code"] for f in main._calibration_findings(cfg, identity)]
+
+    def test_uncalibrated_main_camera_warns(self):
+        f = main._calibration_findings(self._cfg(False))
+        self.assertEqual([x["code"] for x in f], ["cal-main-missing"])
+        self.assertEqual(f[0]["severity"], "warning")
+
+    def test_calibrated_is_quiet(self):
+        sports = [{"name": "football", "lastCalibrated": "2026-09-01T00:00:00"}]
+        self.assertEqual(self._codes(self._cfg(True, sports)), [])
+
+    def test_dead_collector_and_non_vpu_are_quiet(self):
+        self.assertEqual(self._codes(None), [])
+        self.assertEqual(self._codes({"error": True, "message": "boom"}), [])
+        self.assertEqual(self._codes(self._cfg(False), {"isNonVpuHost": True}), [])
+        self.assertEqual(self._codes(self._cfg(False, cameras=[], cameraCfgExists=False)), [])
+        self.assertEqual(self._codes({"cameras": [{}], "cameraCfgExists": True}), [])
+
+    def test_warns_not_fails_readiness(self):
+        verdict = main._compute_readiness(main._calibration_findings(self._cfg(False)))
+        self.assertEqual(verdict["status"], "WARN")
+
+    def test_reaches_compute_findings(self):
+        codes = [f["code"] for f in main._compute_findings(
+            {}, {}, {}, {}, pixellot_config=self._cfg(False))]
+        self.assertIn("cal-main-missing", codes)
+
+
 # ── Armstrong IL (2026-09-28): FortiGate blocking LogMeIn's website ──────
 # The FortiGate answered secure.logmein.com with a 2-day cert of its own
 # (issuer FG200FT922937326) to show its FortiGuard "Remote Access" block

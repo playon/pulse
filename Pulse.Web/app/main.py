@@ -2161,6 +2161,45 @@ def _graphics_findings(gd) -> list:
     return out
 
 
+def _calibration_findings(pixellot_config, identity=None) -> list:
+    """Main camera with no saved calibration for any sport.
+
+    Without a multisport calibration the VPU can't stitch the head's sensors
+    into one picture, so the game streams as the separate camera views side
+    by side. It still streams (Ian, 2026-10-14), so this is a warning, never
+    a blocker. Prompted by Corvallis MT, 2026-10-12: read stream-ready and
+    was fixed by repairing in the right mode and recalibrating. Whether it
+    had no calibration at all, or one for the wrong mode, is unconfirmed;
+    this only catches the first.
+
+    Silent when the collector failed or the box shows no Pixellot camera
+    config: an absent multisportcalibration folder on a machine that isn't
+    set up as a VPU isn't a missing calibration.
+    """
+    cfg = pixellot_config if isinstance(pixellot_config, dict) else None
+    if not cfg or cfg.get("error") or (identity or {}).get("isNonVpuHost"):
+        return []
+    if not (cfg.get("cameras") or cfg.get("cameraCfgExists")):
+        return []
+    multi = (cfg.get("calibration") or {}).get("multisport")
+    if not isinstance(multi, dict) or multi.get("calibrated"):
+        return []
+    return [{
+        "code": "cal-main-missing",
+        "severity": "warning",
+        "category": "Pixellot",
+        "title": "The main camera isn't calibrated for any sport, so games stream as split camera views",
+        "recommendation": (
+            "The main camera has no saved calibration, so the stream shows each camera's view "
+            "side by side instead of one joined picture. The game still streams. Support: open "
+            "Head Setup, choose the sport played here, and calibrate it."
+        ),
+        "evidence": (
+            "C:\\Pixellot\\Data\\Configuration\\multisportcalibration has no sport folders."
+        ),
+    }]
+
+
 def _compute_findings(identity, performance, services, nics, hardware=None, installed_sw=None, network_config=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None) -> list:
     findings = []
 
@@ -2813,6 +2852,9 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
     # ── Scorebug never reached the broadcast (on-box, not network) ──
     findings.extend(_graphics_findings(graphics_delivery))
 
+    # ── Main camera never calibrated (streams split, still streams) ──
+    findings.extend(_calibration_findings(pixellot_config, identity))
+
     # ── Missing / under-count main cameras ─────────────────────
     # One helper for the Dashboard, readiness, the ticket and Camera
     # Connectivity; see _camera_count_findings.
@@ -2931,6 +2973,11 @@ _READINESS_POLICY = {
                                          #     scoreboard type is selected. Airs clean
                                          #     of graphics every game until fixed.
                                          #     Field: Merrol Hyde, 2026-08-17.
+    "cal-main-missing":      "risk",     # F43 main camera has no multisport
+                                         #     calibration: the game streams as split
+                                         #     camera views, but it streams (Ian,
+                                         #     2026-10-14). Prompted by Corvallis
+                                         #     MT, 2026-10-12 (read stream-ready).
     # F14 temp≥90, F15b D:>90, F17 CPU sustained, F19 mem sustained are computed
     # below (readiness-specific thresholds the dashboard findings don't surface).
 
