@@ -35,7 +35,7 @@ INSERT INTO checkins (
   tel_unexpected_7d, tel_reboot_pending, tel_poe_draw_w, tel_clock_offset_s,
   tel_mac, tel_camera_macs, tel_internet_reachable,
   monitor_cpu_seconds, monitor_cpu_percent, monitor_processes
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pulse', ?,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -72,7 +72,13 @@ export async function handleIngest(request, env) {
   if (body.checkins.length > MAX_BATCH) return badRequest("batch-too-large");
 
   const receivedAt = new Date().toISOString();
-  const country = (request.cf && request.cf.country) || null;
+  // The Apps Script sheet forwards the check-ins that reached it because a
+  // school filter blocked this Worker. Those arrive from Google, so the
+  // country would be Google's, not the school's: leave it empty. The header
+  // only labels the row; it grants nothing.
+  const relayed = request.headers.get("X-Pulse-Relay") === "sheet";
+  const source = relayed ? "sheet-relay" : "pulse";
+  const country = relayed ? null : (request.cf && request.cf.country) || null;
   const results = [];
   const statements = [];
   const slots = [];
@@ -90,7 +96,7 @@ export async function handleIngest(request, env) {
         row.checkinId, receivedAt, row.sentAt, row.hostname, row.serialNumber,
         row.venueId, row.vpuName, row.model, row.pulseVersion, row.channel,
         row.readinessStatus, row.readinessPolicy, row.blockers, row.risks,
-        country, row.raw,
+        country, source, row.raw,
         row.reason, row.osBuild, row.ubr, row.deltaStatus, row.deltaPrevStatus,
         row.opened, row.resolved, row.monitorPass, row.monitorSeconds,
         row.monitorPsRuns, row.eventLive,

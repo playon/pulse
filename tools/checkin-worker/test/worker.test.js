@@ -475,3 +475,20 @@ test("a check-in with no unit identity never becomes its own unit", async () => 
   await post({ checkins: [checkin({ venueId: null, vpuName: null, hostname: null, serialNumber: null })] });
   assert.equal(env.DB.raw.prepare("SELECT COUNT(*) n FROM units").get().n, 0);
 });
+
+test("a check-in the sheet relays is tagged sheet-relay and still counts as a launch", async () => {
+  const a = checkin();
+  let body = await (await post({ checkins: [a] }, { "X-Pulse-Relay": "sheet" })).json();
+  assert.equal(body.results[0].status, "inserted");
+  // The VPU's own retry later gets through: a duplicate, and the tag stays.
+  body = await (await post({ checkins: [a] })).json();
+  assert.equal(body.results[0].status, "duplicate");
+  const row = env.DB.raw.prepare("SELECT source, country FROM checkins").get();
+  assert.equal(row.source, "sheet-relay");
+  assert.equal(row.country, null);                     // Google's country, not the school's
+  assert.equal(env.DB.raw.prepare("SELECT run_count FROM units").get().run_count, 1);
+
+  await post({ checkins: [checkin({ checkinId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" })] });
+  assert.equal(env.DB.raw.prepare(
+    "SELECT source FROM checkins WHERE checkin_id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'").get().source, "pulse");
+});
