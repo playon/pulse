@@ -60,6 +60,11 @@ The `transitions` view gives one row per finding opened or resolved, which is
 what the pilot is measured on. The monitor sends 3 check-ins per request, so a
 replayed queue stays under the 64 KB cap.
 
+Times are stored in UTC. Every view also has an Eastern-time copy of each
+timestamp, named with `_et` (`last_seen_et`, `status_since_et`, and so on),
+reading like `2026-10-14 10:33:34 EDT`. The `checkins_et` view is the raw table
+with `received_at_et` and `sent_at_et` added. The admin page shows Eastern time.
+
 There is no write key. Pulse ships from a public repo, so a key in it was
 readable by anyone and only looked like protection. The protection is the
 per-IP rate limit, the size caps and field-by-field validation, and the ingest

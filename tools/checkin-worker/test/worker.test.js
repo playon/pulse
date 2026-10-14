@@ -492,3 +492,27 @@ test("a check-in the sheet relays is tagged sheet-relay and still counts as a la
   assert.equal(env.DB.raw.prepare(
     "SELECT source FROM checkins WHERE checkin_id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'").get().source, "pulse");
 });
+
+test("views carry Eastern-time copies of their timestamps, EDT/EST by the US rules", async () => {
+  const at = (iso) => env.DB.raw.prepare(
+    "SELECT received_at_et AS et FROM checkins_et WHERE checkin_id = ?").get(iso).et;
+  const edges = {
+    "2026-10-14T14:33:34.000Z": "2026-10-14 10:33:34 EDT",
+    "2026-11-01T05:59:59.000Z": "2026-11-01 01:59:59 EDT",   // last second of EDT
+    "2026-11-01T06:00:00.000Z": "2026-11-01 01:00:00 EST",   // clocks fall back
+    "2026-03-08T06:59:59.000Z": "2026-03-08 01:59:59 EST",
+    "2026-03-08T07:00:00.000Z": "2026-03-08 03:00:00 EDT",   // clocks spring forward
+    "2026-01-15T12:00:00.000Z": "2026-01-15 07:00:00 EST",
+  };
+  for (const iso of Object.keys(edges)) {
+    env.DB.raw.prepare(
+      "INSERT INTO checkins (checkin_id, received_at, venue_id, raw) VALUES (?, ?, 'V-ET', '{}')").run(iso, iso);
+  }
+  for (const [iso, want] of Object.entries(edges)) assert.equal(at(iso), want);
+
+  await post({ checkins: [checkin({ sentAt: "2026-09-20T14:00:00Z" })] });
+  const u = env.DB.raw.prepare("SELECT * FROM units WHERE venue_id = 'V42'").get();
+  assert.equal(u.first_seen, "2026-09-20T14:00:00.000Z");     // UTC kept as is
+  assert.equal(u.first_seen_et, "2026-09-20 10:00:00 EDT");
+  assert.equal(u.last_launch_et, "2026-09-20 10:00:00 EDT");
+});
