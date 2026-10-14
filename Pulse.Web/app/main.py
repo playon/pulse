@@ -3254,7 +3254,7 @@ READINESS_POLICY_VERSION = "v1"
 
 _READINESS_POLICY = {
     # ── BLOCKERS → FAIL (don't expect a clean broadcast tonight) ──
-    "stream-log-failing":    "blocker",  # F40 VPU.exe's log: the live stream has
+    "stream-log-failing":    "blocker",  # F42 VPU.exe's log: the live stream has
                                          #     failed every connection for 2+ min
                                          #     and is still failing -- the game is
                                          #     not reaching viewers right now.
@@ -3308,16 +3308,16 @@ _READINESS_POLICY = {
                                          #     still air, so readiness is WARN not FAIL.
     "stream-resiliency-reduced": "risk", # F8  stream healthy on Zixi but part of the
                                          #     failover chain blocked (was stream-443-blocked)
-    # F40 family: VPU.exe's own log of the live stream. The port rows above
+    # F42 family: VPU.exe's own log of the live stream. The port rows above
     # probe Pixellot's echo server; these read the event's real streaming
     # server, so a destination filter or a dead server can't hide behind a
     # green port test (Red Lodge MT, 2026-09-26, read PASS).
-    "stream-log-last-failed": "risk",    # F40b last stream never connected -- the
+    "stream-log-last-failed": "risk",    # F42b last stream never connected -- the
                                          #      game is over, the next one will
                                          #      likely fail the same way
-    "stream-log-rtmp":       "risk",     # F40c on the last-resort path, proven by
+    "stream-log-rtmp":       "risk",     # F42c on the last-resort path, proven by
                                          #      the log (matches stream-degraded-rtmp)
-    "stream-log-backup":     "risk",     # F40d on the backup path (matches
+    "stream-log-backup":     "risk",     # F42d on the backup path (matches
                                          #      stream-resiliency-reduced)
     "watchdog-down":         "risk",     # F9  KeepAgentUp down — no self-heal
     "pixellot-over-cap":     "risk",     # F10 build newer than GPU/OS supports
@@ -3369,7 +3369,7 @@ _READINESS_POLICY = {
     "sw-game-platform":      "info",     # F34
     "sw-consumer-sync":      "info",     # F35
     "uptime-high":           "info",     # F36
-    "stream-log-recovered":  "info",     # F40e connected on the main path after
+    "stream-log-recovered":  "info",     # F42e connected on the main path after
                                          #      failed attempts (a link drop at
                                          #      start, a slow server)
     "tls-filtered-support":  "info",     # F38b only support-plane hosts filtered
