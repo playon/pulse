@@ -3,10 +3,11 @@ import { accessIdentity } from "./access.js";
 const UNIT_COLUMNS = [
   "venue_id", "vpu_name", "model", "pulse_version",
   "channel", "readiness_status", "readiness_blockers", "readiness_risks",
-  "first_seen", "last_seen", "run_count", "monitor_posts", "last_launch",
+  "first_seen", "first_seen_et", "last_seen", "last_seen_et", "run_count",
+  "monitor_posts", "last_launch", "last_launch_et",
 ];
 const CHECKIN_COLUMNS = [
-  "received_at", "sent_at", "hostname", "serial_number", "venue_id", "vpu_name",
+  "received_at", "received_at_et", "sent_at", "sent_at_et", "hostname", "serial_number", "venue_id", "vpu_name",
   "model", "pulse_version", "channel", "readiness_status", "readiness_policy",
   "readiness_blockers", "readiness_risks", "country", "source", "checkin_id",
 ];
@@ -30,7 +31,7 @@ export async function handleAdmin(request, env) {
       const days = clamp(Number.parseInt(url.searchParams.get("days"), 10) || 30, 1, 3650);
       const since = new Date(Date.now() - days * 86400 * 1000).toISOString();
       const { results } = await env.DB.prepare(
-        `SELECT ${CHECKIN_COLUMNS.join(", ")} FROM checkins WHERE received_at >= ? ORDER BY received_at DESC`,
+        `SELECT ${CHECKIN_COLUMNS.join(", ")} FROM checkins_et WHERE received_at >= ? ORDER BY received_at DESC`,
       ).bind(since).all();
       return csv(`pulse-checkins-${days}d.csv`, CHECKIN_COLUMNS, results);
     }
@@ -53,7 +54,7 @@ async function page(env) {
   const rows = units.results
     .map((u) => `<tr>${[
       u.vpu_name, u.venue_id, u.model, u.pulse_version, u.channel,
-      u.readiness_status, short(u.first_seen), short(u.last_seen), u.run_count,
+      u.readiness_status, eastern(u.first_seen), eastern(u.last_seen), u.run_count,
     ].map((v) => `<td>${esc(v)}</td>`).join("")}</tr>`)
     .join("");
 
@@ -72,7 +73,7 @@ th{background:var(--head);position:sticky;top:0;font-weight:600}
 td:last-child,th:last-child{text-align:right}
 </style></head><body>
 <h1>Pulse check-ins</h1>
-<p>${esc(units.results.length)} units &middot; ${esc(stats.day)} check-ins in 24 h &middot; ${esc(stats.week)} in 7 days &middot; last received ${esc(short(stats.last) || "never")}
+<p>${esc(units.results.length)} units &middot; ${esc(stats.day)} check-ins in 24 h &middot; ${esc(stats.week)} in 7 days &middot; last received ${esc(eastern(stats.last) || "never")}
 &middot; <a href="/units.csv">units.csv</a> &middot; <a href="/checkins.csv?days=30">checkins.csv (30 days)</a></p>
 <div class="wrap"><table><thead><tr>
 <th>VPU name</th><th>Venue</th><th>Model</th><th>Pulse</th><th>Channel</th><th>Readiness</th><th>First seen</th><th>Last seen</th><th>Runs</th>
@@ -112,8 +113,16 @@ function esc(v) {
   return String(v).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 
-function short(iso) {
-  return iso ? String(iso).slice(0, 16).replace("T", " ") : "";
+// Eastern time, the zone the team works in: "2026-10-14 10:33 EDT".
+const EASTERN = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZoneName: "short",
+});
+function eastern(iso) {
+  const d = iso ? new Date(iso) : null;
+  if (!d || Number.isNaN(d.getTime())) return "";
+  const p = Object.fromEntries(EASTERN.formatToParts(d).map((x) => [x.type, x.value]));
+  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute} ${p.timeZoneName}`;
 }
 
 function clamp(n, lo, hi) {
