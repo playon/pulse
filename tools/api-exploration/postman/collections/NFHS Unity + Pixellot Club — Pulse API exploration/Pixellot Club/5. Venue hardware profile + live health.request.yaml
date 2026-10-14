@@ -1,0 +1,19 @@
+$kind: http-request
+description: Full venue hardware profile + metrics.values live health indicators (each with value + Ok/Warning/Error severity). pixellot_id is captured by request 1, or set it manually. Test script logs every non-Ok metric to the Postman console — that list is the raw material for the "because of X issue" verdict.
+url: "{{club_base}}/api/v3/venues/{{pixellot_id}}"
+method: GET
+headers:
+  Authorization: "{{club_auth}}"
+  Accept: application/json
+scripts:
+  - type: afterResponse
+    code: |-
+      pm.test('200 OK', () => pm.response.to.have.status(200));
+      let j; try { j = pm.response.json(); } catch (e) { return; }
+      const d = j.data || j;
+      const m = (d.metrics && d.metrics.values) || {};
+      const bad = Object.entries(m).filter(([k, v]) => v && v.severity && v.severity !== 'Ok');
+      console.log('venue:', d.name || d.venueName, '| non-Ok metrics:', bad.length);
+      bad.forEach(([k, v]) => console.log('  ' + k + ':', JSON.stringify(v)));
+    language: text/javascript
+order: 1000

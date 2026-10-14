@@ -1,0 +1,118 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20260827215445
+Username: VPU\Pixellot
+RunAs User: VPU\Pixellot
+Configuration Name: 
+Machine: VPU (Microsoft Windows NT 10.0.17763.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+Process ID: 16120
+PSVersion: 5.1.17763.134
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.17763.134
+BuildVersion: 10.0.17763.134
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+NVIDIA GPU triage v1.0
+host: VPU   date: 2026-08-27T21:54:45.1187203-04:00   admin: True
+
+=== 1. HOST / FLEET CORRELATION FACTS ===
+model       : HP HP Z1 Entry Tower G6
+os          : Microsoft Windows 10 Enterprise LTSC 10.0.17763
+build lab   : 17763.1.amd64fre.rs5_release.180914-1434
+bios        : S01 Ver. 02.01.00 (07/22/2020 20:00:00)
+uptime      : 3d 13h 33m
+-- last 6 installed hotfixes (correlate with failure onset) --
+
+HotFixID  Description     InstalledOn          
+--------  -----------     -----------          
+KB4486153 Update          8/21/2023 12:00:00 AM
+KB4480116 Security Update 1/14/2019 12:00:00 AM
+KB4470788 Security Update 1/8/2019 12:00:00 AM 
+KB4480056 Update          1/8/2019 12:00:00 AM 
+KB4480979 Security Update 1/8/2019 12:00:00 AM
+
+=== 2. IS THE GPU ON THE PCI BUS AT ALL? ===
+  Display  [PCI\VEN_10DE&DEV_1F0A&SUBSYS_145C10DE&REV_A1\4&47552C1&0&0008]  status=OK cmErr=0
+  High Definition Audio Controller  [PCI\VEN_10DE&DEV_10F9&SUBSYS_145C10DE&REV_A1\4&47552C1&0&0108]  status=OK cmErr=0
+-- all display adapters (Win32_VideoController) --
+  Intel(R) UHD Graphics 630  drv=27.20.100.8190  date=05/04/2020 20:00:00  status=OK  cmErr=0
+-- non-OK / previously-seen NVIDIA PnP entries --
+  Unknown  High Definition Audio Controller  PCI\VEN_10DE&DEV_10FA&SUBSYS_132010DE&REV_A1\4&16ABE3EC&0&0108
+  Unknown  High Definition Audio Controller  PCI\VEN_10DE&DEV_0FB9&SUBSYS_11BF196E&REV_A1\4&2C31427B&0&0108
+  Unknown  High Definition Audio Controller  PCI\VEN_10DE&DEV_10FA&SUBSYS_132010DE&REV_A1\4&2C31427B&0&0108
+  Unknown  High Definition Audio Controller  PCI\VEN_10DE&DEV_0FB9&SUBSYS_11BF10DE&REV_A1\4&2C31427B&0&0108
+
+=== 3. PNP / DRIVER STATE ===
+  Display -> CM_PROB_NONE : OK
+  High Definition Audio Controller -> CM_PROB_NONE : OK
+-- PCIe link state --
+  DEVPKEY_Device_LocationInfo = PCI bus 1, device 0, function 0
+  DEVPKEY_PciDevice_CurrentLinkSpeed = 1
+  DEVPKEY_PciDevice_CurrentLinkWidth = 16
+  DEVPKEY_PciDevice_MaxLinkSpeed = 3
+  DEVPKEY_PciDevice_MaxLinkWidth = 16
+  DEVPKEY_Device_LocationInfo = PCI bus 1, device 0, function 1
+  DEVPKEY_PciDevice_CurrentLinkSpeed = 1
+  DEVPKEY_PciDevice_CurrentLinkWidth = 16
+  DEVPKEY_PciDevice_MaxLinkSpeed = 3
+  DEVPKEY_PciDevice_MaxLinkWidth = 16
+-- signed driver package --
+  (no NVIDIA driver package registered)
+-- nvlddmkm kernel driver file --
+  nvlddmkm.sys NOT present
+
+=== 4. NVIDIA-SMI / NVML ===
+  using C:\Windows\System32\nvidia-smi.exe
+NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver. Make sure that the latest NVIDIA driver is installed and running. This can also be happening if non-NVIDIA GPU is running as primary display, and NVIDIA GPU is in WDDM mode.
+
+Failed to properly shut down NVML: Driver Not Loaded
+
+=== 5. EVENT LOG HISTORY (last 21 days) ===
+PS>TerminatingError(Get-WinEvent): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: There is not an event provider on the localhost computer that matches "nvsvc"."
+PS>TerminatingError(Get-WinEvent): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: No events were found that match the specified selection criteria."
+  nvlddmkm/Display events: 0
+  WHEA events: 0
+
+=== 6. FUNCTIONAL NVENC / CUDA TEST - THE ACTUAL PROOF ===
+  (skipped)
+
+=== 7. PIXELLOT HWDETECTOR LOG EVIDENCE ===
+  scanning 15 log files in C:\Pixellot\Data\Log
+  matching failure lines: 62
+   Coordinator_vpu_20260827_000003.log: Info	| 2026-08-27 02:44:10.947 |unknownThread 33         	|GRPC2ProtobufConverter.cs(6801)	|RunVenueSelfTest	|System Test error results: gpu type is: N/A, intelGpu: UHD Graphics 630; Camera direct communication: rtsp://169.254.16.51/h264. Failed to create video decoder, cannot continue. CMS failure reason: Camera direct communication failed
+   Coordinator_vpu_20260827_000003.log: Info	| 2026-08-27 02:44:10.947 |unknownThread 33         	|GRPC2ProtobufConverter.cs(7006)	|WriteResultsToSystemTestsDB	|Adding entry to SystemTests DB: manual=False, testSuccess=False, errDescription=gpu type is: N/A, intelGpu: UHD Graphics 630; Camera direct communication: rtsp://169.254.16.51/h264. Failed to create video decoder, cannot continue, isAdvanced=False, cameraOnly=False
+   Coordinator_vpu_20260827_000003.log: Info	| 2026-08-27 03:44:22.561 |unknownThread 11         	|GRPC2ProtobufConverter.cs(6801)	|RunVenueSelfTest	|System Test error results: gpu type is: N/A, intelGpu: UHD Graphics 630; Camera direct communication: rtsp://169.254.16.51/h264. Failed to create video decoder, cannot continue. CMS failure reason: Camera direct communication failed
+   Coordinator_vpu_20260827_000003.log: Info	| 2026-08-27 03:44:22.561 |unknownThread 11         	|GRPC2ProtobufConverter.cs(7006)	|WriteResultsToSystemTestsDB	|Adding entry to SystemTests DB: manual=False, testSuccess=False, errDescription=gpu type is: N/A, intelGpu: UHD Graphics 630; Camera direct communication: rtsp://169.254.16.51/h264. Failed to create video decoder, cannot continue, isAdvanced=False, cameraOnly=False
+   Coordinator_vpu_20260827_000003.log: Info	| 2026-08-27 04:44:22.544 |unknownThread 32         	|GRPC2ProtobufConverter.cs(6801)	|RunVenueSelfTest	|System Test error results: gpu type is: N/A, intelGpu: UHD Graphics 630; Camera direct communication: rtsp://169.254.16.51/h264. Failed to create video decoder, cannot continue. CMS failure reason: Camera direct communication failed
+   Coordinator_vpu_20260827_000003.log: Info	| 2026-08-27 04:44:22.544 |unknownThread 32         	|GRPC2ProtobufConverter.cs(7006)	|WriteResultsToSystemTestsDB	|Adding entry to SystemTests DB: manual=False, testSuccess=False, errDescription=gpu type is: N/A, intelGpu: UHD Graphics 630; Camera direct communication: rtsp://169.254.16.51/h264. Failed to create video decoder, cannot continue, isAdvanced=False, cameraOnly=False
+  earliest log carrying the error: CamerasTester_vpu_20260827_024359.log (08/27/2026 05:50:12)
+
+=== 8. INTEL QSV PATH (the other half of the HwDetector message) ===
+  Intel(R) UHD Graphics 630  drv=27.20.100.8190  cmErr=0
+
+=== VERDICT ===
+SOFTWARE_FAULT
+
+Software/config evidence:
+  [SW] GPU is on the PCI bus but Windows exposes no NVIDIA display adapter - the display driver is not installed or not loading
+  [SW] nvlddmkm.sys missing - the NVIDIA kernel driver is not installed
+  [SW] nvidia-smi cannot communicate with the driver - driver not loaded or not installed
+
+Notes:
+  [--] NVIDIA PCI device present: 10DE:1F0A
+  [--] PnP reports the NVIDIA device as working (code 0)
+  [--] PnP reports the NVIDIA device as working (code 0)
+  [--] HwDetector failure present in logs back to at least 08/27/2026 05:50:12 - compare against driver/update dates in section 1
+
+The GPU is present but the driver stack is broken. Fix in place; DO NOT RMA until it is repaired and retested.
+
+JSON summary : .\gpu-triage-VPU-20260827-215444.json
+Full log     : .\gpu-triage-VPU-20260827-215444.log
+**********************
+Windows PowerShell transcript end
+End time: 20260827215500
+**********************

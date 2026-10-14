@@ -1,0 +1,115 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20260827204450
+Username: VPU\Pixellot
+RunAs User: VPU\Pixellot
+Configuration Name: 
+Machine: VPU (Microsoft Windows NT 10.0.17763.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+Process ID: 15240
+PSVersion: 5.1.17763.134
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.17763.134
+BuildVersion: 10.0.17763.134
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+NVIDIA GPU triage v1.0
+host: VPU   date: 2026-08-27T20:44:50.9038517-06:00   admin: True
+
+=== 1. HOST / FLEET CORRELATION FACTS ===
+model       : HP HP Z1 Entry Tower G5
+os          : Microsoft Windows 10 Enterprise LTSC 10.0.17763
+build lab   : 17763.1.amd64fre.rs5_release.180914-1434
+bios        : R01 Ver. 02.03.02 (11/04/2019 17:00:00)
+uptime      : 1d 17h 6m
+-- last 6 installed hotfixes (correlate with failure onset) --
+
+HotFixID  Description     InstalledOn          
+--------  -----------     -----------          
+KB4486153 Update          6/27/2023 12:00:00 AM
+KB4480116 Security Update 1/14/2019 12:00:00 AM
+KB4470788 Security Update 1/8/2019 12:00:00 AM 
+KB4480056 Update          1/8/2019 12:00:00 AM 
+KB4480979 Security Update 1/8/2019 12:00:00 AM
+
+=== 2. IS THE GPU ON THE PCI BUS AT ALL? ===
+  High Definition Audio Controller  [PCI\VEN_10DE&DEV_10FA&SUBSYS_132010DE&REV_A1\4&16ABE3EC&0&0108]  status=OK cmErr=0
+  Display  [PCI\VEN_10DE&DEV_1F82&SUBSYS_132010DE&REV_A1\4&16ABE3EC&0&0008]  status=OK cmErr=0
+-- all display adapters (Win32_VideoController) --
+  Intel(R) UHD Graphics 630  drv=24.20.100.6136  date=05/23/2018 18:00:00  status=OK  cmErr=0
+-- non-OK / previously-seen NVIDIA PnP entries --
+  Unknown  High Definition Audio Controller  PCI\VEN_10DE&DEV_0FB9&SUBSYS_11BF196E&REV_A1\4&2C31427B&0&0108
+  Unknown  High Definition Audio Controller  PCI\VEN_10DE&DEV_10FA&SUBSYS_132010DE&REV_A1\4&2C31427B&0&0108
+  Unknown  High Definition Audio Controller  PCI\VEN_10DE&DEV_0FB9&SUBSYS_11BF10DE&REV_A1\4&2C31427B&0&0108
+
+=== 3. PNP / DRIVER STATE ===
+  High Definition Audio Controller -> CM_PROB_NONE : OK
+  Display -> CM_PROB_NONE : OK
+-- PCIe link state --
+  DEVPKEY_Device_LocationInfo = PCI bus 1, device 0, function 1
+  DEVPKEY_PciDevice_CurrentLinkSpeed = 1
+  DEVPKEY_PciDevice_CurrentLinkWidth = 16
+  DEVPKEY_PciDevice_MaxLinkSpeed = 3
+  DEVPKEY_PciDevice_MaxLinkWidth = 16
+  DEVPKEY_Device_LocationInfo = PCI bus 1, device 0, function 0
+  DEVPKEY_PciDevice_CurrentLinkSpeed = 1
+  DEVPKEY_PciDevice_CurrentLinkWidth = 16
+  DEVPKEY_PciDevice_MaxLinkSpeed = 3
+  DEVPKEY_PciDevice_MaxLinkWidth = 16
+-- signed driver package --
+  (no NVIDIA driver package registered)
+-- nvlddmkm kernel driver file --
+  nvlddmkm.sys NOT present
+
+=== 4. NVIDIA-SMI / NVML ===
+  nvidia-smi.exe not found
+
+=== 5. EVENT LOG HISTORY (last 21 days) ===
+PS>TerminatingError(Get-WinEvent): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: There is not an event provider on the localhost computer that matches "nvsvc"."
+PS>TerminatingError(Get-WinEvent): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: No events were found that match the specified selection criteria."
+PS>TerminatingError(Get-WinEvent): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: No events were found that match the specified selection criteria."
+  nvlddmkm/Display events: 0
+  WHEA events: 0
+
+=== 6. FUNCTIONAL NVENC / CUDA TEST - THE ACTUAL PROOF ===
+  (skipped)
+
+=== 7. PIXELLOT HWDETECTOR LOG EVIDENCE ===
+  scanning 14 log files in C:\Pixellot\Data\Log
+  matching failure lines: 10
+   Coordinator_vpu_20260827_000001.log: Info	| 2026-08-27 00:15:56.385 |unknownThread 93         	|GRPC2ProtobufConverter.cs(6801)	|RunVenueSelfTest	|System Test error results: Network test failed, blocked ports:, 443 UDP; gpu type is: N/A, intelGpu: UHD Graphics 630; Camera direct communication: rtsp://169.254.16.51/h264. Error loading CameraDYNACOLOR.dll: 126; OCR Camera failure: Camera #0: Failed to initialize: Error loading CameraDYNACOLOR.dll: 126. CMS failure reason: Camera direct communication failed
+   Coordinator_vpu_20260827_000001.log: Info	| 2026-08-27 00:15:56.386 |unknownThread 93         	|GRPC2ProtobufConverter.cs(7006)	|WriteResultsToSystemTestsDB	|Adding entry to SystemTests DB: manual=False, testSuccess=False, errDescription=Network test failed, blocked ports:, 443 UDP; gpu type is: N/A, intelGpu: UHD Graphics 630; Camera direct communication: rtsp://169.254.16.51/h264. Error loading CameraDYNACOLOR.dll: 126; OCR Camera failure: Camera #0: Failed to initialize: Error loading CameraDYNACOLOR.dll: 126, isAdvanced=False, cameraOnly=False
+   Coordinator_vpu_20260827_000001.log: Info	| 2026-08-27 01:16:52.804 |unknownThread 47         	|GRPC2ProtobufConverter.cs(6801)	|RunVenueSelfTest	|System Test error results: Network test failed, blocked ports:, 443 UDP; gpu type is: N/A, intelGpu: UHD Graphics 630; Camera direct communication: rtsp://169.254.16.51/h264. Error loading CameraDYNACOLOR.dll: 126; OCR Camera failure: Camera #0: Failed to initialize: Error loading CameraDYNACOLOR.dll: 126. CMS failure reason: Camera direct communication failed
+   Coordinator_vpu_20260827_000001.log: Info	| 2026-08-27 01:16:52.804 |unknownThread 47         	|GRPC2ProtobufConverter.cs(7006)	|WriteResultsToSystemTestsDB	|Adding entry to SystemTests DB: manual=False, testSuccess=False, errDescription=Network test failed, blocked ports:, 443 UDP; gpu type is: N/A, intelGpu: UHD Graphics 630; Camera direct communication: rtsp://169.254.16.51/h264. Error loading CameraDYNACOLOR.dll: 126; OCR Camera failure: Camera #0: Failed to initialize: Error loading CameraDYNACOLOR.dll: 126, isAdvanced=False, cameraOnly=False
+   Coordinator_vpu_20260827_000001.log: Info	| 2026-08-27 02:16:52.813 |unknownThread 20         	|GRPC2ProtobufConverter.cs(6801)	|RunVenueSelfTest	|System Test error results: Network test failed, blocked ports:, 443 UDP; gpu type is: N/A, intelGpu: UHD Graphics 630; Camera direct communication: rtsp://169.254.16.51/h264. Error loading CameraDYNACOLOR.dll: 126; OCR Camera failure: Camera #0: Failed to initialize: Error loading CameraDYNACOLOR.dll: 126. CMS failure reason: Camera direct communication failed
+   Coordinator_vpu_20260827_000001.log: Info	| 2026-08-27 02:16:52.813 |unknownThread 20         	|GRPC2ProtobufConverter.cs(7006)	|WriteResultsToSystemTestsDB	|Adding entry to SystemTests DB: manual=False, testSuccess=False, errDescription=Network test failed, blocked ports:, 443 UDP; gpu type is: N/A, intelGpu: UHD Graphics 630; Camera direct communication: rtsp://169.254.16.51/h264. Error loading CameraDYNACOLOR.dll: 126; OCR Camera failure: Camera #0: Failed to initialize: Error loading CameraDYNACOLOR.dll: 126, isAdvanced=False, cameraOnly=False
+  earliest log carrying the error: Coordinator_vpu_20260827_000001.log (08/27/2026 20:41:42)
+
+=== 8. INTEL QSV PATH (the other half of the HwDetector message) ===
+  Intel(R) UHD Graphics 630  drv=24.20.100.6136  cmErr=0
+
+=== VERDICT ===
+SOFTWARE_FAULT
+
+Software/config evidence:
+  [SW] GPU is on the PCI bus but Windows exposes no NVIDIA display adapter - the display driver is not installed or not loading
+  [SW] nvlddmkm.sys missing - the NVIDIA kernel driver is not installed
+  [SW] nvidia-smi.exe not present - the NVIDIA driver package is incomplete; the GPU cannot be judged in this state
+
+Notes:
+  [--] NVIDIA PCI device present: 10DE:10FA
+  [--] PnP reports the NVIDIA device as working (code 0)
+  [--] PnP reports the NVIDIA device as working (code 0)
+  [--] HwDetector failure present in logs back to at least 08/27/2026 20:41:42 - compare against driver/update dates in section 1
+
+The GPU is present but the driver stack is broken. Fix in place; DO NOT RMA until it is repaired and retested.
+
+JSON summary : .\gpu-triage-VPU-20260827-204450.json
+Full log     : .\gpu-triage-VPU-20260827-204450.log
+**********************
+Windows PowerShell transcript end
+End time: 20260827204504
+**********************

@@ -9,7 +9,11 @@
       "Bash(mv /c/Code/pixellot-vpu-tools/VpuMonitorAgent.ps1 /c/Code/Pixellot-Influx/)",
       "Bash(mv /c/Code/pixellot-vpu-tools/Install-VpuMonitorAgent.ps1 /c/Code/Pixellot-Influx/)",
       "Bash(grep -n 'Add-Summary\\\\|SummaryQueue\\\\|if \\($VpuModel\\)\\\\|Gateway\\\\|Set-Card\\\\|detectedNics\\\\|portCard\\\\|lblHwHdr\\\\|hwRows\\\\|sep6\\\\|sep5\\\\|pnlSummaryCard\\\\|rtbLog\\\\|lblLogHdr\\\\|lblStatus' TestCameraConnectivity.ps1)",
-      "Bash(grep -n \"# ---- \\\\|function \\\\|^\\\\$\" /c/Code/pixellot-vpu-tools/TestCameraConnectivity.ps1)"
+      "Bash(grep -n \"# ---- \\\\|function \\\\|^\\\\$\" /c/Code/pixellot-vpu-tools/TestCameraConnectivity.ps1)",
+      "Bash(git fetch *)",
+      "Bash(git ls-tree *)",
+      "Read(//Users/ian.moore/Downloads/**)",
+      "Bash(head -c 3000 \"/Users/ian.moore/Downloads/fortianalyzer-traffic-forward-2026-08-26_12-20-2026-08-26_13-00.log\")"
     ]
   }
 }

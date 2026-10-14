@@ -76,11 +76,27 @@ try {
     # Disk drives (WMI). Physical-disk health/SMART lives in Get-DiskHealth.ps1
     # (Get-PhysicalDisk + Get-StorageReliabilityCounter); monitor count comes from
     # Get-Peripherals.ps1. Both were collected here but never consumed -- dropped.
+    # Win32_DiskDrive.InterfaceType has no SATA value: a SATA drive reads "IDE"
+    # (field case: Toshiba DT01ACA100). Get-PhysicalDisk's BusType is accurate,
+    # keyed by DeviceId == Win32_DiskDrive.Index; WMI's value is the fallback.
+    $busNames = @{ 1 = 'SCSI'; 2 = 'ATAPI'; 3 = 'ATA'; 7 = 'USB'; 8 = 'RAID'; 10 = 'SAS'; 11 = 'SATA'; 12 = 'SD'; 17 = 'NVMe' }
+    $busByIndex = @{}
+    try {
+        foreach ($pd in @(Get-PhysicalDisk -ErrorAction Stop)) {
+            $bus = $pd.BusType
+            if ($bus -is [ValueType] -and $busNames.ContainsKey([int]$bus)) { $bus = $busNames[[int]$bus] }
+            if ($bus) { $busByIndex["$($pd.DeviceId)"] = "$bus" }
+        }
+    }
+    catch { }
+
     $disks = Get-CimInstance Win32_DiskDrive | ForEach-Object {
+        $iface = $busByIndex["$($_.Index)"]
+        if (-not $iface) { $iface = $_.InterfaceType }
         [ordered]@{
             index            = $_.Index
             sizeGB           = [math]::Round($_.Size / 1GB, 2)
-            interfaceType    = $_.InterfaceType
+            interfaceType    = $iface
             model            = $_.Model
             serialNumber     = if ($_.SerialNumber) { $_.SerialNumber.Trim() } else { $null }
             firmwareRevision = $_.FirmwareRevision

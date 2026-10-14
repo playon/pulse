@@ -1,0 +1,106 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20260827220022
+Username: VPU\Pixellot
+RunAs User: VPU\Pixellot
+Configuration Name: 
+Machine: VPU (Microsoft Windows NT 10.0.19044.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -ExecutionPolicy Bypass -File .\Get-GpuTriage.ps1
+Process ID: 7236
+PSVersion: 5.1.19041.2364
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.19041.2364
+BuildVersion: 10.0.19041.2364
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+NVIDIA GPU triage v1.0
+host: VPU   date: 2026-08-27T22:00:22.2744668-04:00   admin: True
+
+=== 1. HOST / FLEET CORRELATION FACTS ===
+model       : HP HP Z2 Tower G9 Workstation Desktop PC
+os          : Microsoft Windows 10 IoT Enterprise LTSC 10.0.19044
+build lab   : 19041.1.amd64fre.vb_release.191206-1406
+bios        : U50 Ver. 03.04.08 (06/22/2025 20:00:00)
+uptime      : 0d 11h 38m
+-- last 6 installed hotfixes (correlate with failure onset) --
+
+HotFixID  Description     InstalledOn          
+--------  -----------     -----------          
+KB5022834 Security Update 3/3/2023 12:00:00 AM 
+KB5020372 Update          3/3/2023 12:00:00 AM 
+KB5012170 Security Update 3/3/2023 12:00:00 AM 
+KB5022502 Update          3/3/2023 12:00:00 AM 
+KB5005699 Security Update 10/6/2021 12:00:00 AM
+KB5003791 Update          10/6/2021 12:00:00 AM
+
+=== 2. IS THE GPU ON THE PCI BUS AT ALL? ===
+  NO NVIDIA (VEN_10DE) DEVICE FOUND ON THE PCI BUS (24 other PCI devices enumerated fine).
+-- all display adapters (Win32_VideoController) --
+  Intel(R) UHD Graphics 770  drv=30.0.101.1273  date=01/13/2022 19:00:00  status=OK  cmErr=0
+-- non-OK / previously-seen NVIDIA PnP entries --
+  Unknown  NVIDIA T1000  PCI\VEN_10DE&DEV_1FB0&SUBSYS_12DB103C&REV_A1\4&FE3D589&0&0008
+  Unknown  High Definition Audio Controller  PCI\VEN_10DE&DEV_10FA&SUBSYS_12DB103C&REV_A1\4&FE3D589&0&0108
+  Unknown  NVIDIA High Definition Audio  HDAUDIO\FUNC_01&VEN_10DE&DEV_0094&SUBSYS_103C12DB&REV_1001\5&F280DDD&0&0001
+
+=== 3. PNP / DRIVER STATE ===
+-- PCIe link state --
+-- signed driver package --
+  (no NVIDIA driver package registered)
+-- nvlddmkm kernel driver file --
+  nvlddmkm.sys NOT present
+
+=== 4. NVIDIA-SMI / NVML ===
+  using C:\Windows\System32\nvidia-smi.exe
+NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver. Make sure that the latest NVIDIA driver is installed and running. This can also be happening if non-NVIDIA GPU is running as primary display, and NVIDIA GPU is in WDDM mode.
+
+=== 5. EVENT LOG HISTORY (last 21 days) ===
+PS>TerminatingError(Get-WinEvent): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: There is not an event provider on the localhost computer that matches "nvsvc"."
+PS>TerminatingError(Get-WinEvent): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: No events were found that match the specified selection criteria."
+PS>TerminatingError(Get-WinEvent): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: No events were found that match the specified selection criteria."
+  nvlddmkm/Display events: 0
+  WHEA events: 0
+
+=== 6. FUNCTIONAL NVENC / CUDA TEST - THE ACTUAL PROOF ===
+  (skipped)
+
+=== 7. PIXELLOT HWDETECTOR LOG EVIDENCE ===
+  scanning 19 log files in C:\Pixellot\Data\Log
+  matching failure lines: 20
+   Coordinator_vpu_20260827_000000.log: Info	| 2026-08-27 01:23:17.727 |unknownThread 90         	|GRPC2ProtobufConverter.cs(6801)	|RunVenueSelfTest	|System Test error results: gpu type is: N/A, intelGpu: UHD Graphics 770; Camera direct communication: U500997. Can't open camera, no cameras are connected.. CMS failure reason: Camera direct communication failed
+   Coordinator_vpu_20260827_000000.log: Info	| 2026-08-27 01:23:17.727 |unknownThread 90         	|GRPC2ProtobufConverter.cs(7006)	|WriteResultsToSystemTestsDB	|Adding entry to SystemTests DB: manual=False, testSuccess=False, errDescription=gpu type is: N/A, intelGpu: UHD Graphics 770; Camera direct communication: U500997. Can't open camera, no cameras are connected., isAdvanced=False, cameraOnly=False
+   Coordinator_vpu_20260827_000000.log: Error	| 2026-08-27 01:23:17.732 |unknownThread 90         	|SystemTestsDB.cs(245)	|executeNonQuerySqliteCommand	|Failed to execute sqlite query: INSERT INTO systemTests_db (TimeStamp,TestResult,ErrorDescription,ManualRun,TestName) VALUES(1787808197,1,'gpu type is: N/A, intelGpu: UHD Graphics 770; Camera direct communication: U500997. Can't open camera, no cameras are connected.',0,0). Exception SQL logic error or missing database
+   Coordinator_vpu_20260827_000000.log: Info	| 2026-08-27 02:23:36.304 |unknownThread 92         	|GRPC2ProtobufConverter.cs(6801)	|RunVenueSelfTest	|System Test error results: gpu type is: N/A, intelGpu: UHD Graphics 770; Camera direct communication: U500997. Can't open camera, no cameras are connected.. CMS failure reason: Camera direct communication failed
+   Coordinator_vpu_20260827_000000.log: Info	| 2026-08-27 02:23:36.304 |unknownThread 92         	|GRPC2ProtobufConverter.cs(7006)	|WriteResultsToSystemTestsDB	|Adding entry to SystemTests DB: manual=False, testSuccess=False, errDescription=gpu type is: N/A, intelGpu: UHD Graphics 770; Camera direct communication: U500997. Can't open camera, no cameras are connected., isAdvanced=False, cameraOnly=False
+   Coordinator_vpu_20260827_000000.log: Error	| 2026-08-27 02:23:36.304 |unknownThread 92         	|SystemTestsDB.cs(245)	|executeNonQuerySqliteCommand	|Failed to execute sqlite query: INSERT INTO systemTests_db (TimeStamp,TestResult,ErrorDescription,ManualRun,TestName) VALUES(1787811816,1,'gpu type is: N/A, intelGpu: UHD Graphics 770; Camera direct communication: U500997. Can't open camera, no cameras are connected.',0,0). Exception SQL logic error or missing database
+  earliest log carrying the error: Coordinator_vpu_20260827_000000.log (08/27/2026 21:59:27)
+
+=== 8. INTEL QSV PATH (the other half of the HwDetector message) ===
+  Intel(R) UHD Graphics 770  drv=30.0.101.1273  cmErr=0
+
+=== VERDICT ===
+HARDWARE_SUSPECT
+
+Hardware evidence:
+  [HW] No NVIDIA device enumerated on the PCI bus - card absent, unseated, disabled in BIOS, or dead
+  [HW] Windows has a record of an NVIDIA device that is no longer present - the card dropped off the bus
+
+Software/config evidence:
+  [SW] nvlddmkm.sys missing - the NVIDIA kernel driver is not installed
+  [SW] nvidia-smi cannot communicate with the driver - driver not loaded or not installed
+
+Notes:
+  [--] Confirm the chassis actually contains a discrete GPU, and that BIOS primary display / Above 4G Decoding were not changed
+  [--] HwDetector failure present in logs back to at least 08/27/2026 21:59:27 - compare against driver/update dates in section 1
+  [--] Only the Intel iGPU is present - this matches the "gpu type is: N/A, intelGpu: ..." message exactly
+
+Physical-layer evidence found. Reseat the card and retest FIRST - reseating clears most of these. RMA only if it survives a reseat.
+
+JSON summary : .\gpu-triage-VPU-20260827-220022.json
+Full log     : .\gpu-triage-VPU-20260827-220022.log
+**********************
+Windows PowerShell transcript end
+End time: 20260827220024
+**********************

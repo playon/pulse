@@ -1,0 +1,42 @@
+# One check that always reports, so a branch rule can require it.
+#
+# Pulse's guards (python-tests, ui-contract, ui-render-sweep,
+# ui-honest-states, ps-ascii-check, launcher-sync, batch-files) are
+# path-filtered: a docs-only PR starts none of them. A required check that
+# never starts leaves the PR waiting forever, so none of them can be required
+# directly. This workflow runs on every pull request, waits for whichever of
+# them did start, and passes or fails with them. Require "CI gate" in the
+# repository ruleset, and only "CI gate".
+#
+# It has no path filter on purpose. Do not add one.
+#
+# It waits a grace period for the other workflows to appear, then polls until
+# they have all completed. See tools/ci-gate/ci_gate.py for the details and
+# a local self-test.
+
+name: CI gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  checks: read
+
+jobs:
+  gate:
+    name: CI gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Self-test the gate logic
+        run: python3 tools/ci-gate/ci_gate.py --self-test
+      - name: Wait for the other checks on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          python3 tools/ci-gate/ci_gate.py
+          --repo "${{ github.repository }}"
+          --sha "${{ github.event.pull_request.head.sha }}"

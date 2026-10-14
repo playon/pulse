@@ -123,6 +123,7 @@ Pulse.Web uses semver (`MAJOR.MINOR.PATCH`) with a two-channel pipeline. Dev sta
 
 1. **Validate on dev.** The dev launcher tracks the branch tip, so exercise the change on a real VPU from `dev` before promoting. This is the step the beta cycle used to be.
 2. **Dev → Main:** Update the version source on `dev` to a clean semver (e.g. `0.2.0`), merge `dev` into `main`, and push the production tag.
+   If the promotion changes `runners/run_pulse.bat`, add the **outgoing** production launcher's SHA-256 to `_SUPERSEDED_PROD_LAUNCHERS` in `Pulse.Web/app/main.py` first, so the app can replace old copies left on VPU desktops. Forgetting it only means that generation is not refreshed.
 3. **Bump dev:** After promoting, set the version source on `dev` to the next version with the `-dev` suffix (e.g. `0.3.0-dev`). Subsequent dev pushes auto-tag with commit SHA.
 
 #### Rules
@@ -139,6 +140,7 @@ Pulse.Web uses semver (`MAJOR.MINOR.PATCH`) with a two-channel pipeline. Dev sta
 
 - `.github/workflows/web-build.yml` — Zips `Pulse.Web/`, triggers on web tags
 - `.github/workflows/web-auto-tag.yml` — auto-tags `dev` pushes
+- `.github/workflows/ci-gate.yml` — the one check that always runs on a PR (`CI gate`). The other guards are path-filtered, so they cannot be required directly; `CI gate` waits for whichever started and mirrors their result. Require **only** `CI gate` in the repo ruleset. Never add a path filter to it. If a guard fails and you re-run it, re-run `CI gate` too. Logic and self-test: `tools/ci-gate/ci_gate.py`.
 
 They publish releases directly to `playon/pulse` using the workflow's built-in `GITHUB_TOKEN` — no separate PAT or mirror step required. (The old `wpf-pilot-build.yml` was removed with the WPF deprecation.)
 

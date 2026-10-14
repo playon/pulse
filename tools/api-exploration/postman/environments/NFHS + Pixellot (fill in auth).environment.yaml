@@ -1,0 +1,22 @@
+name: NFHS + Pixellot (fill in auth)
+values:
+  - key: unity_base
+    value: 'https://unity.nfhsnetwork.com'
+  - key: club_base
+    value: 'https://abe.pixellot.tv'
+  - key: nfhs_auth
+    value: ''
+  - key: club_auth
+    value: ''
+  - key: event_id
+    value: ''
+  - key: broadcast_key
+    value: ''
+  - key: game_key
+    value: ''
+  - key: vod_key
+    value: ''
+  - key: pixellot_id
+    value: ''
+  - key: pixellot_key
+    value: ''

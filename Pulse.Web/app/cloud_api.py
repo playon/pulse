@@ -345,6 +345,49 @@ def _verdict_for(entry, eqs, now):
     return "unknown", []
 
 
+# Event Success Rate over the venue's last N public events whose outcome is
+# known. Success = the event went on air (a quality miss or early end still
+# counts); a never-aired event is the failure. Live, upcoming, in-window and
+# unknown events are not counted. Unlisted and test events stay out, matching
+# how ops treats ESR (unlisting a doomed event keeps it off the number). This
+# is Pulse's own count from the public API, not the Sigma dashboard figure.
+ESR_WINDOW = 10
+_ESR_JUDGED = ("streamed", "quality", "partial", "failed")
+
+
+def esr_summary(entries, window=ESR_WINDOW):
+    judged = [
+        e for e in entries
+        if not e.get("unlisted") and e.get("verdict") in _ESR_JUDGED
+    ]
+    judged.sort(key=lambda e: e.get("startTime") or "", reverse=True)
+    recent = judged[:window]
+    ok = sum(1 for e in recent if e["verdict"] != "failed")
+    return {
+        "window": window,
+        "counted": len(recent),
+        "succeeded": ok,
+        "rate": ok / len(recent) if recent else None,
+    }
+
+
+def _esr_from_listed(listed_items, eqs, now):
+    """ESR over the full listed history (not just the timeline's 14 days)."""
+    entries = []
+    for item in listed_items:
+        if item.get("is_testing") or item.get("is_deleted"):
+            continue
+        entry = {
+            "gameKey": item.get("key"),
+            "startTime": item.get("start_time"),
+            "status": item.get("status"),
+            "durationHours": None,
+        }
+        entry["verdict"], _ = _verdict_for(entry, eqs, now)
+        entries.append(entry)
+    return esr_summary(entries)
+
+
 def _merge_timeline(listed_items, box_broadcasts, local_events, eqs, now, signals=None):
     """Combine listed schedule + box-driven broadcasts into one timeline."""
     local_by_id = {e.get("eventId"): e for e in local_events if e.get("eventId")}
@@ -627,6 +670,8 @@ def fetch_cloud(venue_id, local_events, signals=None):
         "producer": producer,
         "metrics": metrics,
         "eqsAvgScore": eqs.get("avgScore"),
+        # None when the events lookup failed, so the UI can say so.
+        "esr": _esr_from_listed(listed, eqs, now) if listed is not None else None,
         "events": timeline,
         "venueRecord": venue_record,
         "causeHints": hints,

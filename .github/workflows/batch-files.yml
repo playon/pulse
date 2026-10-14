@@ -1,0 +1,120 @@
+# Guard: every shipped Windows batch file is CRLF, and every goto/call target
+# exists as a label in the same file.
+#
+# cmd.exe cannot reliably find a label in an LF-only batch file. `call :x` or
+# `goto :x` fails with "The system cannot find the batch label specified" when
+# the label line straddles a 512-byte block boundary counted from where cmd
+# started scanning -- so whether a label is found depends on the label's byte
+# offset AND on where the jump sits. Any edit above a label can move it onto a
+# bad offset, and the jumps that only run on failure (:netdiag, :fatal) break
+# silently until a VPU in the field needs them. Measured on a fleet-image VPU
+# (Win10 LTSC 1809), 1,101 label positions per case:
+#
+#                     forward goto  forward call  backward goto  after long line
+#   LF line endings        12            12            22              18
+#   CRLF line endings       0             0             0               0
+#
+# Found while testing PR #206: a sandbox copy of run_pulse.bat with two extra
+# lines failed on `call :netdiag`. The launchers and run.bat shipped LF-only
+# until then. .gitattributes marks *.bat -text so git never re-normalizes them
+# (raw.githubusercontent.com and the release zip serve the stored bytes).
+#
+# The label check catches a typo'd or renamed label before it ships. It skips
+# `goto :eof`, dynamic targets (%var% / !var!), comments and echo lines.
+#
+# The frozen beta-channel launchers are excluded: dev's copies are never
+# served, and the beta branch stays byte-frozen (CLAUDE.md, "Branches &
+# Releases").
+
+name: Batch file check
+
+on:
+  pull_request:
+    paths:
+      - "**.bat"
+      - "**.cmd"
+      - ".gitattributes"
+      - ".github/workflows/batch-files.yml"
+  push:
+    branches: [dev, main]
+    paths:
+      - "**.bat"
+      - "**.cmd"
+      - ".gitattributes"
+      - ".github/workflows/batch-files.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  batch:
+    name: Batch files are CRLF and every label target exists
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Check line endings and label targets
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+
+          # Frozen beta-channel files (see CLAUDE.md "Branches & Releases"): dev's
+          # copies are never served, and the beta branch stays byte-frozen.
+          FROZEN = {'runners/run_pulse_beta.bat', 'runners/Pulse-Beta.bat'}
+
+          LABEL = re.compile(r'^[ \t]*:([^:\s][^\s]*)')
+          # goto <label> / goto :<label>, and call :<label> (call without a colon runs
+          # a program or another batch file, not a label).
+          GOTO = re.compile(r'(?i)(?:^|[\s(&|])goto[ \t]+:?([^\s()&|]+)')
+          CALL = re.compile(r'(?i)(?:^|[\s(&|])call[ \t]+:([^\s()&|]+)')
+
+          def check(path):
+              raw = path.read_bytes()
+              errors = []
+              bare = [i for i in range(len(raw)) if raw[i] == 10 and (i == 0 or raw[i - 1] != 13)]
+              if bare:
+                  line = raw.count(b'\n', 0, bare[0]) + 1
+                  errors.append((line, '%d line(s) end in a bare LF (first at line %d). cmd.exe can '
+                                 'fail to find a label in LF-only batch files ("The system cannot find '
+                                 'the batch label specified"). Save the file with CRLF line endings.'
+                                 % (len(bare), line)))
+              if raw.count(b'\r') != raw.count(b'\r\n'):
+                  errors.append((1, 'stray CR not followed by LF'))
+              text = raw.decode('ascii', errors='replace')
+              lines = text.split('\r\n') if not bare else text.splitlines()
+              labels = set()
+              for ln in lines:
+                  m = LABEL.match(ln)
+                  if m:
+                      labels.add(m.group(1).lower())
+              for n, ln in enumerate(lines, 1):
+                  s = ln.strip()
+                  if s.startswith('::') or s.lower().startswith('rem ') or s.lower().startswith('echo'):
+                      continue
+                  for rx in (GOTO, CALL):
+                      for m in rx.finditer(ln):
+                          t = m.group(1)
+                          if '%' in t or '!' in t or t.lower() == 'eof':
+                              continue
+                          if t.lower() not in labels:
+                              errors.append((n, 'jumps to :%s, but no such label exists in this file' % t))
+              return errors
+
+          root = pathlib.Path('.')
+          files = sorted(p for p in root.rglob('*') if p.suffix.lower() in ('.bat', '.cmd')
+                         and '.git' not in p.parts and p.as_posix() not in FROZEN)
+          bad = 0
+          for p in files:
+              for line, msg in check(p):
+                  bad += 1
+                  print('%s:%d: %s' % (p.as_posix(), line, msg))
+                  print('::error file=%s,line=%d::%s' % (p.as_posix(), line, msg))
+          if bad:
+              print('')
+              print('FAIL: %d problem(s) in %d batch file(s).' % (bad, len(files)))
+              sys.exit(1)
+          print('OK: %d batch file(s) are CRLF and every goto/call target exists: %s'
+                % (len(files), ', '.join(p.as_posix() for p in files)))
+          PY

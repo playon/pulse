@@ -9,13 +9,14 @@ flow shows testers when a new build is available.
   **Added**, **Changed**, or **Fixed**. Write it for a field tech, not a
   developer — "Fixed false low-speed warning on OCR camera ports", not the
   commit subject.
-- At a beta/main promotion, rename `[Unreleased]` to the released version
-  (e.g. `## [0.2.0] — 2026-06-15`) and start a fresh empty `[Unreleased]`.
-  That version's section becomes the GitHub release notes the update flow
-  displays.
-- Dev auto-tags don't use this file — they get notes generated from commit
-  messages automatically. Curate here for the builds testers and the fleet
-  actually read (beta / main).
+- At a promotion to main, rename `[Unreleased]` to the released version
+  (e.g. `## [1.4.0] - 2026-10-08`) on the release branch. **Main carries no
+  `[Unreleased]` heading**: the release workflow publishes the TOP section as
+  the release notes, so an empty `[Unreleased]` above the version ships blank
+  notes (web-v1.2.2). Dev starts a fresh `[Unreleased]` when it is bumped to
+  the next `-dev` version.
+- Dev builds publish the current `[Unreleased]` list as their notes, so
+  there is no per-push curation.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 `Pulse.Web/VERSION`.
@@ -24,17 +25,64 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 
 ### Added
 - Pulse now reads the VPU's own streaming log and checks what the live stream actually did. The port tests only reach Pixellot's test server, so a VPU could pass every one while its stream couldn't connect to the event's real streaming server. A stream that can't connect now fails the readiness check. A stream running on its backup or last-resort path shows as a warning, with the server it tried and when. The Network page shows a one-line "Live stream (VPU log)" result under the port tiles.
+- ScoreConnect tab: a **Reinstall ScoreConnect III** button. It stops the service, deletes the whole Sportzcast LLC program folder, and installs a fresh copy, with progress shown in Pulse. Saved settings and logs are kept. Use it when ScoreConnect III won't start or keeps failing.
+
+## [1.4.1] - 2026-10-13
+
 ### Changed
+- The About page shows whether this VPU's launch check-in reached the Pulse team. If the check-in service is down, Pulse keeps the check-ins and sends them on a later launch, and after a day it shows a short notice. There's nothing for you to do about it.
+
+## [1.4.0] - 2026-10-08
+
+### Changed
+- ScoreConnect tab: the live score is now the star of the page. It sits large at the top, with the scoreboard connection as a compact column beside it (below it on a narrow window) and a line under the score naming the vendor, sport and connection ScoreConnect is reading. Change setup, Find the code and "What is the school seeing?" open full width underneath. When there is no readable score yet, the connection takes the full width as before.
+- ScoreConnect tab: motion only when something changes. A score rolls into place when it changes, a part of the connection rings once when its status changes, and the score comes up once when it first arrives (for example right after Find the code succeeds). The pulsing green dots and the pulsing LIVE dot are now steady, so the tab no longer keeps repainting over LogMeIn.
+- ScoreConnect tab: the scoreboard connection, the setup or code search you opened, and "What is the school seeing?" are now separate cards with even spacing, instead of one card where they ran together. The live scoreboard and the details card sit the same distance apart as the rest.
+- Camera Connectivity: when a port has a problem (running slow, or fewer cameras than expected) the port cards now sit above the diagrams, so you reach the broken port without scrolling. A single problem on any tab opens by default so its fix is already showing. The verdict line under the page title now scrolls away with the page instead of following you, its "Open Dashboard" is a plain link, and a screen reader is told when the verdict changes. The port numbers in the VPU diagrams are larger.
+- One scale for "is tonight at risk": the warning triangles in the left menu, the badge at the top of the Network Test tab, the verdict line under each title and the search results now all use the Dashboard's words and rules (Stops tonight's game, Risk tonight, Fix soon). Before, the menu could show a red triangle and the Network tab "Fail" while the Dashboard said "Risk tonight". The verdict line also says how many of the unit's problems are on the tab you're viewing.
+- Confirmation questions (restart Pulse, reboot the VPU, delete old recordings, run a repair, install an update, and the ScoreConnect ones) now appear in Pulse itself instead of a plain browser pop-up. The button says exactly what it will do, such as "Reboot the VPU", and for risky actions Cancel is selected first so a stray Enter key can't confirm it.
+- Small buttons are a little taller and easier to click over remote desktop: the ping-count buttons, Flip layout, Copy for ticket, Hardware details and Extension?. Page headings now follow a proper order for screen readers, and a few odd corner radii match the rest of the app.
+- Plain words instead of hover-only hints: "ESR" now reads "Event success rate", software warnings (like unsupported antivirus) show their reason on the page, and Camera Connectivity says why Get Camera Frames is switched off while the Pixellot video software is running. "Admin CGI" is now "each camera's admin page", and the disk columns read "Wear used" and "Hours on".
+- Small text is easier to read over remote desktop. Nothing in Pulse is smaller than 11 pixels any more, and the many near-identical text sizes are now five consistent ones.
+- If you start Pulse from a `run_pulse.bat` saved on the VPU's desktop or in Downloads, Pulse now updates that file to the current launcher by itself, so it gets the latest fixes. It only changes files that exactly match an older Pulse launcher; anything else is left alone.
+- The launch window is easier to follow: one short list under **Updating Pulse** and **Starting Pulse**, one line per step, with retries tidied away. If something fails, the box at the bottom says what went wrong and what to do next. The launcher no longer reinstalls Chrome when it is already installed for just one Windows user.
 - Findings on the Dashboard, Network Test and Camera Connectivity are now one short list: one line per finding, most urgent first, with the fix a click away. A summary at the top says how many stop tonight's game, how many are risks tonight, how many to fix soon, and how many are just worth knowing. "Fix soon" is new: a real problem that won't affect tonight's game, such as a web filter blocking LogMeIn, used to be labelled "Risk tonight". The worth-knowing notes fold into one line, and every tab uses the same words for how serious a finding is.
+- Restart Agent + Coordinator now starts the KeepAgentUp scheduled task instead of launching the watchdog program directly, because the task is what gives the Coordinator the administrator rights it needs to come up. It also tells you the truth about what happened: if the watchdog was already running but the Coordinator is still down, that is now reported as a failure with the command that fixes it, instead of the old "watchdog already running" note that read like everything was fine. If nothing actually needed restarting, it says so rather than claiming a restart. The alarming red memory error the watchdog always prints as it exits is now labelled as harmless. It works even when Pulse was opened without administrator rights, and if the task is disabled it says so and gives the command to re-enable it instead of starting the watchdog in a way that would break the Coordinator.
+- Power Events moved out of Pixellot Configuration into the main diagnostics group, alongside Camera Connectivity, ScoreConnect, Audio and Service Status.
+- Network Test: the port number on each port tile (for example "UDP 2088") is now larger and easier to read, so you can read it back to the school's IT.
 
 ### Added
+- ScoreConnect tab: **Find the code** is now also in Change setup, and works whether or not ScoreConnect is getting data. If ScoreConnect already reads the console, Pulse asks you to confirm before trying other codes; if it isn't, the search starts straight away.
+- Search from anywhere: press / (or Ctrl+K) or click "Search tabs and findings" at the top of the left menu to jump to any tab or any current finding by typing a few letters. "Next problem" at the top of the list takes you straight to the worst flagged tab. Use the arrow keys and Enter, and Esc to close.
+- A line under the page title on every tab (except the Dashboard) shows the unit's stream-readiness verdict, for example "Nothing is stopping tonight's game, 2 risks tonight", with a button back to the Dashboard. If the Dashboard check hasn't run, failed, or is more than 15 minutes old, the line says so instead of showing a stale verdict.
+- Event Streaming: the top banner now shows **ESR**, the share of this school's last 10 public events that went on air (hover for details). Unlisted and test events are left out. Pulse counts it from the NFHS events list, so it can differ slightly from the Sigma ESR dashboard. The Unity key is now labelled and easier to read.
+- Power Events: a new **After power loss** card shows whether the VPU turns back on by itself after a power cut. If the BIOS is set to stay off, it tells you where to change it. Pulse can read this on HP VPUs; on other models it says it can't check rather than showing a pass.
+- ScoreConnect: when the console's data doesn't match ScoreConnect's setup, **Find the code** tries each of the brand's codes for the sport the school names (about 11 seconds a code), stops at the one that reads, and puts the old setup back if none does.
+- ScoreConnect tab: a picture of the scoreboard connection (VPU, ScoreLink, cable, extension, console) that shows which link is broken, what to tell the school, and a "What is the school seeing?" checklist. What the school confirms (cable, extension, console) is remembered on the VPU for the next call.
+- ScoreConnect tab: change ScoreConnect III's vendor, sport, connection type and ScoreLink from Pulse, with a review before saving and one-click undo. The bot number is shown but never changed.
+- The Service Status page now explains why a VPU shows offline in the cloud while the Agent looks fine. If Coordinator can't claim its websocket port, Pulse says so, names the cause (the watchdog is running without administrator rights) and gives you the one command that fixes it. It also flags the underlying problem — a KeepAgentUp scheduled task that is missing, disabled, or not set to run as administrator — which is what puts a unit into this state in the first place. Pulse checks twice a few seconds apart, so a Coordinator that is restarting in a loop no longer reports as healthy.
 - Pulse now checks the last week of games for missing graphics. It flags a VPU where the Pixellot software never passed the scorebug to the video (the "missing graphics" bug: the scoreboard and network are fine, but games stream with no graphics), and a VPU with no scoreboard type selected, which turns graphics off for every game.
 
 ### Fixed
+- Search results now say "Fix soon" for a problem the Dashboard calls Fix soon (they said "Worth knowing"), and the "Open ..." links inside a finding are a little taller to click.
+- The selected item in the left menu and the blue "info" labels are easier to read in light mode (a slightly deeper blue).
+- Pulse now updates on school networks that block GitHub's file-download site. When the release file can't be downloaded, the launcher gets the same version from GitHub's source download instead, rather than quietly staying on the old build.
+- The launcher no longer skips updates on a VPU where looking up a website's address is slow. It used to give up after 3 seconds and report "could not reach github.com" even though the internet was fine, so the VPU stayed on an old version. If the launcher's network check runs, a slow lookup now shows as **DNS SLOW** on that site's line instead of a false "no connection on port 443".
+- ScoreConnect tab: a VPU that VPU Manager has set to take the score from ScoreConnect no longer shows "Pixellot's scoreboard source is set to WEB". WEB is how Pixellot stores the ScoreConnect setting, so the tab now shows it as ScoreConnect.
+- Hardware tab: SATA drives no longer show as "IDE" under Storage. Windows' older drive list calls most SATA drives IDE; Pulse now reads the drive's real connection type.
+- ScoreConnect crash auto-restart now stays on after a ScoreConnect update. Sportzcast's installer replaces the ScoreConnect III service and drops the setting; Pulse now also sets up a small Windows task that puts it back within about 15 seconds of an install, at startup, and after a crash Windows didn't restart. The ScoreConnect tab says "kept after ScoreConnect updates" when it is in place.
+- ScoreConnect tab: on a VPU where the OCR camera reads the score, a ScoreConnect problem (such as no data from a console) is now a "worth knowing" note that says the stream isn't affected, instead of a "risk tonight" under a card that says ScoreConnect isn't needed.
+- ScoreConnect no longer reads as "not answering" on VPUs where looking up `localhost` is slow: Pulse now reaches ScoreConnect III at 127.0.0.1. On a bench VPU the first lookup took up to 40 seconds, long past Pulse's 2-second check, so a working ScoreConnect showed as down.
+- ScoreConnect III now gets crash auto-restart every time Pulse starts, not only when Pulse installed it, so its known crash no longer leaves the scoreboard down. The ScoreConnect tab also has Start ScoreConnect III and Turn on crash auto-restart buttons.
 - ScoreConnect not running is no longer a warning on a VPU whose OCR camera is connected and reading the score. Pulse now checks whichever score source the VPU uses: the OCR camera if it has one, otherwise ScoreConnect.
 - A web filter blocking LogMeIn's website is no longer reported as SSL inspection or as a Stream Readiness failure. Pulse now says it's a category block. When LogMeIn is connected it's shown as a note, not a warning, because remote support still works.
 - Pulse now warns when the VPU is on Wi-Fi even if a cable is plugged into the main network port, and no longer tells you to fix the switch's duplex setting for a Wi-Fi connection.
 - Pulse no longer says the venue is blocking LogMeIn when LogMeIn is connected. It was reading an old block in LogMeIn's log as a current one, even while a tech was on the unit through LogMeIn.
+
+## [1.3.3] - 2026-10-02
+
+### Fixed
+- Pulse no longer fails to start with "Dependencies could not be installed" / "No module named pip" on a VPU where an earlier first-time setup was cut short. The launcher now notices the unfinished setup and repairs it by itself on the next launch. No need to delete C:\Pulse\app\python by hand any more.
 
 ## [1.3.2] - 2026-09-25
 

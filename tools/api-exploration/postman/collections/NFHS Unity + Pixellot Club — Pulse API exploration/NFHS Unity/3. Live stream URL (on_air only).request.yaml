@@ -1,0 +1,14 @@
+$kind: http-request
+description: Signed CloudFront .m3u8 HLS URL for a live event. Expect an error/empty result when the broadcast is not on_air.
+url: "{{unity_base}}/v2/broadcasts/{{broadcast_key}}/url"
+method: GET
+headers:
+  Authorization: "{{nfhs_auth}}"
+  Accept: application/json
+scripts:
+  - type: afterResponse
+    code: |-
+      pm.test('200 OK', () => pm.response.to.have.status(200));
+      try { console.log('live m3u8:', JSON.stringify(pm.response.json())); } catch (e) {}
+    language: text/javascript
+order: 3000

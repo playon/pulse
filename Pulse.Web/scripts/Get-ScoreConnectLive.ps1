@@ -17,13 +17,16 @@
     Pixellot's agent relies on. Each request is independent: a single
     HTTP GET to localhost:5000, connect -> respond -> close.
 .PARAMETER BaseUrl
-    SC III base URL. Defaults to http://localhost:5000.
+    SC III base URL. Defaults to http://127.0.0.1:5000.
 #>
 [CmdletBinding()]
-param([string]$BaseUrl = 'http://localhost:5000')
+param([string]$BaseUrl = 'http://127.0.0.1:5000')
 
 $ErrorActionPreference = 'Stop'
 $BaseUrl = $BaseUrl.TrimEnd('/')
+# 'localhost' can take 12-40s to resolve in a fresh process (VPU2,
+# 2026-09-29); 127.0.0.1 answers at once. SC III listens on IPv4 and IPv6.
+$BaseUrl = $BaseUrl -replace '^(https?://)localhost(?=[:/]|$)', '${1}127.0.0.1'
 
 $result = @{
     reachable  = $false

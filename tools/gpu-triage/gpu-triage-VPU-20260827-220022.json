@@ -1,0 +1,36 @@
+{
+    "schema":  "gpu-triage/1",
+    "host":  "VPU",
+    "timestamp":  "2026-08-27T22:00:24.3994305-04:00",
+    "platform":  "windows",
+    "model":  "HP HP Z2 Tower G9 Workstation Desktop PC",
+    "os":  "Microsoft Windows 10 IoT Enterprise LTSC 10.0.19044",
+    "buildLab":  "19041.1.amd64fre.vb_release.191206-1406",
+    "bios":  "U50 Ver. 03.04.08",
+    "gpuName":  "",
+    "pciPresent":  false,
+    "pciId":  "",
+    "driverVersion":  "",
+    "enumerationOk":  true,
+    "nvidiaSmiOk":  false,
+    "nvencTest":  "skipped",
+    "nvdecTest":  "skipped",
+    "hwDetectorLogHits":  20,
+    "hwDetectorFirstSeen":  "2026-08-27T21:59:27.5906152-04:00",
+    "tdrCount":  0,
+    "wheaCount":  0,
+    "verdict":  "HARDWARE_SUSPECT",
+    "hardwareEvidence":  [
+                             "No NVIDIA device enumerated on the PCI bus - card absent, unseated, disabled in BIOS, or dead",
+                             "Windows has a record of an NVIDIA device that is no longer present - the card dropped off the bus"
+                         ],
+    "softwareEvidence":  [
+                             "nvlddmkm.sys missing - the NVIDIA kernel driver is not installed",
+                             "nvidia-smi cannot communicate with the driver - driver not loaded or not installed"
+                         ],
+    "notes":  [
+                  "Confirm the chassis actually contains a discrete GPU, and that BIOS primary display / Above 4G Decoding were not changed",
+                  "HwDetector failure present in logs back to at least 08/27/2026 21:59:27 - compare against driver/update dates in section 1",
+                  "Only the Intel iGPU is present - this matches the \"gpu type is: N/A, intelGpu: ...\" message exactly"
+              ]
+}
