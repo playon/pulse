@@ -1,5 +1,9 @@
 # Pulse telemetry v1 — data contract
 
+> **The canonical contract is `docs/contract.md` in `playon/pulse-vitals`.**
+> This page is the summary for DevOps and the NFHS Console team. Where they
+> differ, the Vitals contract and the ingest Worker win.
+
 **Status:** draft for DevOps and the NFHS Console (Oracle) team. Proof of
 concept running on one bench VPU since 2026-10-12.
 **Owner:** Ian Moore (Pulse). **Schema id:** `pulse.telemetry/v1`.
