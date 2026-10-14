@@ -6473,6 +6473,11 @@ _CHECKIN_FALLBACK_URL    = "https://script.google.com/macros/s/AKfycbworYEcINtNf
 _CHECKIN_FALLBACK_SECRET = "7a161bad7765fc5078b8375007999160c5687bf5da52ae1ca717ebbad628e648"
 _CHECKIN_STATE_PATH = _os.path.join(_web_root, "pulse-checkin-queue.json")
 _CHECKIN_BATCH = 50
+# The Worker refuses a body over 64 KB with a 413 for the whole batch, so a
+# batch is cut by size as well as count. Launch check-ins (~0.5 KB) fit 50 at a
+# time; the fleet monitor's full reports (~2 KB) don't, and without this cut the
+# same oversized batch went back on every flush and the queue never drained.
+_CHECKIN_MAX_BODY_BYTES = 64 * 1024
 _CHECKIN_MAX_QUEUED = 200
 _CHECKIN_MAX_AGE_DAYS = 30
 # A failure younger than this is a blip; older is worth a notice on the About page.
@@ -6525,6 +6530,23 @@ def _trim_checkin_queue(queue: list, now: str) -> list:
     return keep[-_CHECKIN_MAX_QUEUED:]
 
 
+def _checkin_body_bytes(batch: list) -> int:
+    # Exactly the bytes _post_checkin_sync sends.
+    return len(json.dumps({"checkins": batch}).encode("utf-8"))
+
+
+def _next_checkin_batch(queue: list) -> list:
+    """The oldest check-ins that fit one request: at most _CHECKIN_BATCH, and
+    under the Worker's body cap. Always at least one, so the caller can see
+    an entry too big to send at all."""
+    batch = []
+    for entry in queue[:_CHECKIN_BATCH]:
+        if batch and _checkin_body_bytes(batch + [entry]) > _CHECKIN_MAX_BODY_BYTES:
+            break
+        batch.append(entry)
+    return batch
+
+
 def _post_checkin_sync(url: str, body: dict) -> dict:
     """POST one batch; return the Worker's JSON reply or raise."""
     data = json.dumps(body).encode("utf-8")
@@ -6554,7 +6576,14 @@ def _post_checkin_sync(url: str, body: dict) -> dict:
 async def _flush_checkin_queue(state: dict, url: str) -> None:
     """Send queued check-ins oldest first; drop only what the Worker answered for."""
     while state["queue"]:
-        batch = state["queue"][:_CHECKIN_BATCH]
+        batch = _next_checkin_batch(state["queue"])
+        if _checkin_body_bytes(batch) > _CHECKIN_MAX_BODY_BYTES:
+            # One check-in the Worker can never accept. Drop it, like an
+            # "invalid" reply, rather than let it block everything behind it.
+            _server_log.warning("Check-in %s dropped: %d bytes is over the sink's limit",
+                                batch[0].get("checkinId"), _checkin_body_bytes(batch))
+            state["queue"] = state["queue"][1:]
+            continue
         state["lastAttemptAt"] = _checkin_now()
         try:
             reply = await asyncio.to_thread(_post_checkin_sync, url, {"checkins": batch})
