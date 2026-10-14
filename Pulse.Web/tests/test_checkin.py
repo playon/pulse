@@ -42,6 +42,10 @@ class FakeSink(BaseHTTPRequestHandler):
         elif FakeSink.mode == "ok":
             self._reply(200, {"ok": True, "results": [
                 {"checkinId": c["checkinId"], "status": "inserted"} for c in body["checkins"]]})
+        elif FakeSink.mode == "control-off":
+            self._reply(200, {"ok": True, "control": {"mode": "off", "skip": ["Get-S1Cameras.ps1"]},
+                              "results": [{"checkinId": c["checkinId"], "status": "inserted"}
+                                          for c in body["checkins"]]})
         elif FakeSink.mode == "invalid":
             self._reply(200, {"ok": True, "results": [
                 {"checkinId": c["checkinId"], "status": "invalid"} for c in body["checkins"]]})
@@ -260,6 +264,18 @@ class TestCheckinQueue(unittest.TestCase):
         FakeSink.mode = "ok"
         self.launch()
         self.assertEqual(self.state()["queue"], [])
+
+    def test_fleet_control_in_the_reply_is_kept(self):
+        FakeSink.mode = "control-off"
+        self.launch()
+        ctl = self.state()["control"]
+        self.assertEqual(ctl["mode"], "off")
+        self.assertEqual(ctl["skip"], ["Get-S1Cameras.ps1"])
+        # A later reply without control (an older Worker, or a failed lookup)
+        # leaves the last instruction in force.
+        FakeSink.mode = "ok"
+        self.launch()
+        self.assertEqual(self.state()["control"]["mode"], "off")
 
     def test_monitor_posts_never_go_to_the_sheet(self):
         # The sheet is one row per unit with a run count; a monitor post every

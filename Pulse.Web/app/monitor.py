@@ -415,6 +415,36 @@ def plan_tick(state: dict, wall_now: float, event_live: bool) -> Optional[str]:
     return "full" if since >= interval - TICK_SLACK_SECONDS else None
 
 
+def read_control(queue_state) -> dict:
+    """The fleet control the Worker last sent (main._flush_checkin_queue keeps
+    it in the monitor's queue file): {"mode": "on" | "off", "skip": [script]}.
+
+    The remote off switch from the Leaf lessons (#leaf-deploy-coordination):
+    finding Leaf's memory leak took four months of editing cron jobs by hand,
+    so here one D1 row can stop the monitor, or one collector, on a unit or
+    the whole fleet. Anything unreadable means "on, skip nothing": a garbled
+    reply must not silence the fleet, and the last good one stays in force
+    while the Worker is unreachable."""
+    ctl = (queue_state or {}).get("control") if isinstance(queue_state, dict) else None
+    if not isinstance(ctl, dict):
+        return {"mode": "on", "skip": []}
+    mode = "off" if ctl.get("mode") == "off" else "on"
+    skip = ctl.get("skip")
+    skip = [str(x) for x in skip if isinstance(x, str) and x][:50] if isinstance(skip, list) else []
+    return {"mode": mode, "skip": skip}
+
+
+def plan_paused(posts: dict, wall_now: float, event_live: bool) -> bool:
+    """While switched off: send the hourly "paused" line (identity only), or
+    not. It's what lets a paused unit hear that it's back on, and it shows
+    the unit is still reachable. Nothing during an event."""
+    if event_live:
+        return False
+    last = posts.get("lastPausedAt")
+    age = wall_now - last if isinstance(last, (int, float)) and wall_now >= last else float("inf")
+    return age >= HEARTBEAT_SECONDS - TICK_SLACK_SECONDS
+
+
 def plan_post(posts: dict, fingerprint: str, status: Optional[str], wall_now: float) -> Optional[str]:
     """After a pass: post "full", post the one-line "heartbeat", or nothing.
 

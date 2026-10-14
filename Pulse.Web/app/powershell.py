@@ -43,6 +43,7 @@ _PS_SEMAPHORE: Optional[asyncio.Semaphore] = None
 _PS_CONCURRENCY = 4
 _PS_LOW_PRIORITY = False
 _PS_BATCH = False
+_PS_SKIP: set = set()   # collectors switched off by fleet control
 
 
 def _get_semaphore() -> asyncio.Semaphore:
@@ -55,21 +56,25 @@ def _get_semaphore() -> asyncio.Semaphore:
 def configure_background(concurrency: int = 1, low_priority: bool = True,
                          disk_cache_path: Optional[str] = None,
                          disk_cache_ttls: Optional[dict] = None,
-                         batch: bool = True) -> None:
+                         batch: bool = True, skip_scripts=None) -> None:
     """Unattended mode (monitor_once.py): one PowerShell at a time, each at
     below-normal priority, and slow-changing collectors served from a disk
     cache between scheduled runs. Four parallel PowerShell startups measured
     85-93% CPU on an idle VPU2; one at a time below normal can't compete with
     anything the VPU is doing. `batch` runs collectors requested together in
     one powershell.exe (_Run-Batch.ps1), since process start-up is most of a
-    collector's cost. Call before the first run_ps."""
+    collector's cost. `skip_scripts` names collectors the fleet control has
+    switched off (see monitor.read_control): they never start, and their part
+    of the report comes back as unknown. Call before the first run_ps."""
     global _PS_CONCURRENCY, _PS_LOW_PRIORITY, _PS_SEMAPHORE, _DISK_CACHE_PATH, _DISK_CACHE_TTLS, _PS_BATCH
+    global _PS_SKIP
     _PS_CONCURRENCY = max(1, int(concurrency))
     _PS_LOW_PRIORITY = bool(low_priority)
     _PS_SEMAPHORE = None
     _DISK_CACHE_PATH = disk_cache_path
     _DISK_CACHE_TTLS = dict(disk_cache_ttls or {})
     _PS_BATCH = bool(batch)
+    _PS_SKIP = {str(n).lower() for n in (skip_scripts or ()) if n}
 
 
 def _log(script: str, duration_ms: float, status: str, detail: str = "", size: int = 0):
@@ -276,6 +281,10 @@ async def run_ps(
     the default 25s window. They share the key but never serve each other
     stale data, because freshness is judged at read time, per caller.
     """
+    if _PS_SKIP and script_name.lower() in _PS_SKIP:
+        _log(script_name, 0, "skipped", "switched off by fleet control")
+        return {"error": "Switched off by fleet control", "skipped": True}
+
     key = _cache_key(script_name, args, timeout)
 
     if use_cache:

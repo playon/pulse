@@ -133,10 +133,41 @@ class _CpuMeter:
                 self.job, 1, ctypes.byref(info), ctypes.sizeof(info), None)  # 1 = basic accounting
             if not ok:
                 return None
-            return {"cpuSeconds": round((info.TotalUserTime + info.TotalKernelTime) / 1e7, 2),
-                    "processes": int(info.TotalProcesses)}
+            out = {"cpuSeconds": round((info.TotalUserTime + info.TotalKernelTime) / 1e7, 2),
+                   "processes": int(info.TotalProcesses)}
+            peak = self._peak_memory_mb()
+            if peak is not None:
+                out["memoryPeakMb"] = peak
+            return out
         except Exception:
             return None
+
+    def _peak_memory_mb(self):
+        """Peak memory committed by the whole job at once (this tick and its
+        PowerShell children), in MB. Canopy's Leaf agent leaked memory on
+        VPUs for months before anyone noticed (#leaf-deploy-coordination,
+        2025-09 to 2026-01), so every pass reports what it held, not just
+        its CPU. A tick is a fresh process each time, so a leak can't build
+        up across ticks; a rising peak here would mean one pass got heavier."""
+        import ctypes
+
+        class _Basic(ctypes.Structure):
+            _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                        ("LimitFlags", ctypes.c_uint32), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                        ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", ctypes.c_uint32),
+                        ("Affinity", ctypes.c_size_t), ("PriorityClass", ctypes.c_uint32),
+                        ("SchedulingClass", ctypes.c_uint32)]
+
+        class _Extended(ctypes.Structure):
+            _fields_ = [("BasicLimitInformation", _Basic), ("IoInfo", ctypes.c_uint64 * 6),
+                        ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                        ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+        info = _Extended()
+        ok = self.k32.QueryInformationJobObject(
+            self.job, 9, ctypes.byref(info), ctypes.sizeof(info), None)  # 9 = extended limit info
+        if not ok:
+            return None
+        return round(info.PeakJobMemoryUsed / (1024 * 1024), 1)
 
 
 _CPU = None
@@ -169,6 +200,15 @@ def _rotate(path: str) -> None:
         pass
 
 
+def _cost_note() -> str:
+    """'cpu=4.4s mem=61MB ' for the tick log, or '' where it can't be measured."""
+    cost = _CPU.read() if _CPU else None
+    if not cost:
+        return ""
+    mem = f" mem={cost['memoryPeakMb']:.0f}MB" if cost.get("memoryPeakMb") is not None else ""
+    return f"cpu={cost['cpuSeconds']:.1f}s{mem} "
+
+
 def _record_tick(started: float, plan, event_live: bool,
                  images, state: dict, outcome: str) -> None:
     """One line per tick, so the cadence and the cost of an idle tick are
@@ -178,7 +218,8 @@ def _record_tick(started: float, plan, event_live: bool,
     line = (f"{time.strftime('%Y-%m-%d %H:%M:%S')} plan={plan or 'none'} "
             f"eventLive={int(event_live)} "
             f"procs={len(images) if images else 0} sinceFull={age}s "
-            f"open={len(state.get('open') or {})} took={time.monotonic() - started:.2f}s {outcome}\n")
+            f"open={len(state.get('open') or {})} took={time.monotonic() - started:.2f}s "
+            f"{_cost_note()}{outcome}\n")
     try:
         _rotate(TICKS_PATH)
         with open(TICKS_PATH, "a", encoding="utf-8") as fh:
@@ -187,7 +228,38 @@ def _record_tick(started: float, plan, event_live: bool,
         pass
 
 
-async def _pass(plan: str, dry_run: bool, force: bool, tick_wall: float) -> str:
+def _read_control() -> dict:
+    """Fleet control from the monitor's queue file, read without importing
+    main (so a paused unit's idle tick stays as cheap as any other)."""
+    try:
+        with open(QUEUE_PATH, "r", encoding="utf-8") as fh:
+            return monitor.read_control(json.load(fh))
+    except (OSError, ValueError):
+        return monitor.read_control(None)
+
+
+async def _paused_post(tick_wall: float) -> str:
+    """The hourly identity-only line while fleet control has the monitor off.
+    Its reply carries the control, so this is how a unit learns it's back on."""
+    os.environ["PULSE_SERVER_LOG_NAME"] = LOG_NAME
+    os.environ["PULSE_SERVER_LOG_APPEND"] = "1"
+    _rotate(os.path.join(_web_root, LOG_NAME))
+    import main
+    main._CHECKIN_STATE_PATH = QUEUE_PATH
+    posts = monitor.load_posts(POSTS_PATH)
+    known = dict(posts.get("identity") or {})
+    if not (known.get("venueId") or known.get("vpuName")):
+        # Never posted, so it can't have been told to pause; nothing to name it by.
+        return "none"
+    main._CHECKIN_IDENTITY_FALLBACK = known
+    await main._send_checkin(reason="paused", paused=True)
+    posts["lastPausedAt"] = tick_wall
+    monitor.save_posts(POSTS_PATH, posts)
+    return "paused"
+
+
+async def _pass(plan: str, dry_run: bool, force: bool, tick_wall: float,
+                skip=()) -> str:
     """Run one pass; return what was posted (full / heartbeat / none)."""
     os.environ["PULSE_SERVER_LOG_NAME"] = LOG_NAME
     os.environ["PULSE_SERVER_LOG_APPEND"] = "1"
@@ -196,7 +268,8 @@ async def _pass(plan: str, dry_run: bool, force: bool, tick_wall: float) -> str:
     import powershell
     powershell.configure_background(concurrency=1, low_priority=True,
                                     disk_cache_path=CACHE_PATH,
-                                    disk_cache_ttls=SLOW_COLLECTOR_TTLS)
+                                    disk_cache_ttls=SLOW_COLLECTOR_TTLS,
+                                    skip_scripts=skip)
     import main
     main._CHECKIN_STATE_PATH = QUEUE_PATH
     # No batch override: the client cuts each request at the Worker's 64 KB
@@ -218,6 +291,8 @@ async def _pass(plan: str, dry_run: bool, force: bool, tick_wall: float) -> str:
             cores = os.cpu_count() or 1
             stats.update(cpuSeconds=cpu["cpuSeconds"], processes=cpu["processes"],
                          cpuPercent=round(100 * cpu["cpuSeconds"] / max(wall, 0.1) / cores, 1))
+            if cpu.get("memoryPeakMb") is not None:
+                stats["memoryPeakMb"] = cpu["memoryPeakMb"]
         st = monitor.load_state(state_path)
         status = (delta or {}).get("status")
         open_codes = [c for c, f in (st.get("open") or {}).items()
@@ -306,12 +381,25 @@ def main_entry(argv) -> int:
 
     state = monitor.load_state(STATE_PATH)
     tick_wall = time.time()
+    control = _read_control()
+    if control["mode"] == "off" and not force:
+        # Switched off by fleet control: no checks, only the hourly line.
+        if dry_run or not monitor.plan_paused(monitor.load_posts(POSTS_PATH), tick_wall, event_live):
+            _record_tick(started, None, event_live, images, state, "paused")
+            return 0
+        try:
+            posted = asyncio.run(_paused_post(tick_wall))
+        except BaseException as e:
+            _record_tick(started, "paused", event_live, images, state, f"failed: {type(e).__name__}: {e}")
+            raise
+        _record_tick(started, "paused", event_live, images, state, f"posted={posted}")
+        return 0
     plan = "full" if force else monitor.plan_tick(state, tick_wall, event_live)
     if not plan:
         _record_tick(started, None, event_live, images, state, "ok")
         return 0
     try:
-        posted = asyncio.run(_pass(plan, dry_run, force, tick_wall))
+        posted = asyncio.run(_pass(plan, dry_run, force, tick_wall, skip=control["skip"]))
     except BaseException as e:
         _record_tick(started, plan, event_live, images, state, f"failed: {type(e).__name__}: {e}")
         raise

@@ -399,3 +399,38 @@ class TestRunOnce(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFleetControl(unittest.TestCase):
+    """The remote off switch (Leaf lesson: one row in D1 stops a bad monitor)."""
+
+    def test_missing_or_garbled_control_means_on(self):
+        for qs in (None, {}, {"control": "off"}, {"control": {"mode": "maybe"}}, []):
+            self.assertEqual(monitor.read_control(qs), {"mode": "on", "skip": []})
+
+    def test_off_and_skip_are_read(self):
+        ctl = monitor.read_control({"control": {"mode": "off", "skip": ["Get-S1Cameras.ps1", 7, ""]}})
+        self.assertEqual(ctl, {"mode": "off", "skip": ["Get-S1Cameras.ps1"]})
+
+    def test_paused_line_is_hourly_and_never_during_an_event(self):
+        now = 100_000.0
+        self.assertTrue(monitor.plan_paused({}, now, event_live=False))
+        self.assertFalse(monitor.plan_paused({}, now, event_live=True))
+        self.assertFalse(monitor.plan_paused({"lastPausedAt": now - 600}, now, False))
+        self.assertTrue(monitor.plan_paused({"lastPausedAt": now - 3600}, now, False))
+
+
+class TestSkippedCollector(unittest.IsolatedAsyncioTestCase):
+    async def test_a_skipped_collector_never_starts(self):
+        import powershell
+        names = ("_PS_CONCURRENCY", "_PS_LOW_PRIORITY", "_PS_SEMAPHORE", "_DISK_CACHE_PATH",
+                 "_DISK_CACHE_TTLS", "_PS_BATCH", "_PS_SKIP")
+        saved = {n: getattr(powershell, n) for n in names}
+        try:
+            powershell.configure_background(skip_scripts=["Get-S1Cameras.ps1"])
+            result = await powershell.run_ps("Get-S1Cameras.ps1")
+            self.assertTrue(result.get("skipped"))
+            self.assertIn("error", result)    # its part of the report reads as unknown
+        finally:
+            for n, v in saved.items():
+                setattr(powershell, n, v)

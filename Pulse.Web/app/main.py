@@ -6626,6 +6626,11 @@ async def _flush_checkin_queue(state: dict, url: str) -> None:
         state["queue"] = [e for e in state["queue"] if e["checkinId"] not in answered]
         state["lastSentAt"] = state["lastAttemptAt"]
         state.pop("lastError", None)
+        # Fleet control for the scheduled monitor (monitor.read_control):
+        # whether it runs and which collectors it skips. Kept until the Worker
+        # says otherwise, so an unreachable Worker never turns it back on.
+        if isinstance(reply.get("control"), dict):
+            state["control"] = dict(reply["control"], receivedAt=state["lastAttemptAt"])
 
 
 # The last venue id / VPU name this unit reported, set by the scheduled monitor
@@ -6640,7 +6645,7 @@ async def _build_checkin_entry(dashboard: Optional[dict] = None, reason: str = "
                                delta: Optional[dict] = None,
                                monitor: Optional[dict] = None,
                                telemetry: Optional[dict] = None,
-                               heartbeat: bool = False) -> Optional[dict]:
+                               heartbeat: bool = False, paused: bool = False) -> Optional[dict]:
     """One check-in. `reason` is startup (an interactive launch) or, from the
     scheduled monitor, periodic / state-change, which also carry the finding
     transitions (`delta`) and the pass's own cost (`monitor`). `dashboard`
@@ -6651,6 +6656,13 @@ async def _build_checkin_entry(dashboard: Optional[dict] = None, reason: str = "
     No hostname or BIOS serial (Ian, 2026-10-13): units are identified by
     their Pixellot venue id and VPU name."""
     import uuid
+    if paused:
+        # Fleet control has the monitor switched off: identity only, hourly,
+        # so the unit still shows as reachable and hears when it's back on.
+        known = _CHECKIN_IDENTITY_FALLBACK
+        return {"checkinId": str(uuid.uuid4()), "sentAt": _checkin_now(), "reason": "paused",
+                "venueId": known.get("venueId"), "vpuName": known.get("vpuName"),
+                "pulseVersion": APP_VERSION}
     if heartbeat:
         ident = (dashboard or {}).get("identity") or {}
         return {"checkinId": str(uuid.uuid4()), "sentAt": _checkin_now(), "reason": "heartbeat",
@@ -7036,13 +7048,15 @@ def _checkin_configured(url: str) -> bool:
 
 async def _send_checkin(dashboard: Optional[dict] = None, delta: Optional[dict] = None,
                         reason: str = "startup", monitor: Optional[dict] = None,
-                        telemetry: Optional[dict] = None, heartbeat: bool = False) -> None:
+                        telemetry: Optional[dict] = None, heartbeat: bool = False,
+                        paused: bool = False) -> None:
     if DEMO_MODE:
         return  # a dev/demo machine never reports
     url = (_os.environ.get("PULSE_CHECKIN_URL") or _CHECKIN_URL).strip()
     try:
         async with _checkin_lock:
-            entry = await _build_checkin_entry(dashboard, reason, delta, monitor, telemetry, heartbeat)
+            entry = await _build_checkin_entry(dashboard, reason, delta, monitor, telemetry,
+                                               heartbeat, paused)
             state = _load_checkin_state()
             if entry:
                 state["queue"].append(entry)
