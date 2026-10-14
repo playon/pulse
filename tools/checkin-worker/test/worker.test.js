@@ -431,3 +431,47 @@ test("wrong-schema or oversized telemetry is dropped, the check-in still lands",
   const n = env.DB.raw.prepare("SELECT COUNT(*) n FROM checkins WHERE telemetry IS NOT NULL").get().n;
   assert.equal(n, 0);
 });
+
+
+test("run_count counts launches, not the monitor's posts", async () => {
+  const launch = (id, at) => checkin({ checkinId: id, sentAt: at });
+  const report = (id, at, reason, extra = {}) => checkin({ checkinId: id, sentAt: at, reason,
+    readiness: undefined, telemetry: { schema: "pulse.telemetry/v1", status: "PASS" }, ...extra });
+  const beat = { checkinId: "beat-0000-0000-0000-000000000009", sentAt: "2026-09-21T09:00:00Z",
+                 reason: "heartbeat", venueId: "V42", vpuName: "Main Gym", status: "PASS" };
+  await post({ checkins: [
+    launch("aaaaaaaa-0000-0000-0000-000000000001", "2026-09-20T10:00:00Z"),
+    launch("aaaaaaaa-0000-0000-0000-000000000002", "2026-09-20T12:00:00Z"),
+    report("aaaaaaaa-0000-0000-0000-000000000003", "2026-09-20T13:00:00Z", "state-change"),
+    report("aaaaaaaa-0000-0000-0000-000000000004", "2026-09-20T14:00:00Z", "periodic"),
+    beat,
+  ] });
+  const u = env.DB.raw.prepare("SELECT * FROM units").all();
+  assert.equal(u.length, 1);
+  assert.equal(u[0].run_count, 2);
+  assert.equal(u[0].monitor_posts, 3);
+  assert.equal(u[0].last_launch, "2026-09-20T12:00:00.000Z");
+  assert.equal(u[0].last_seen, "2026-09-21T09:00:00.000Z");
+  assert.equal(u[0].pulse_version, "1.4.0-dev");       // the heartbeat carries no version
+  assert.equal(u[0].readiness_status, "PASS");
+});
+
+test("an imported sheet unit keeps the sheet's run count and first seen", async () => {
+  env.DB.raw.prepare(
+    `INSERT INTO checkins (checkin_id, received_at, sent_at, venue_id, vpu_name, pulse_version, channel, source, raw)
+     VALUES ('sheet-import-SN1', '2026-10-13T20:56:55Z', '2026-09-01T10:00:00.000Z', 'V42', 'Main Gym',
+             'web-v1.3.1', 'production', 'sheet-import',
+             '{"imported":"Runs.csv","sheetKey":"SN1","firstSeen":"2026-06-01T09:00:00.000Z","runCount":40}')`,
+  ).run();
+  await post({ checkins: [checkin({ sentAt: "2026-10-14T10:00:00Z" })] });
+  const u = env.DB.raw.prepare("SELECT * FROM units").get();
+  assert.equal(u.run_count, 41);                      // 40 from the sheet + this launch
+  assert.equal(u.first_seen, "2026-06-01T09:00:00.000Z");
+  assert.equal(u.pulse_version, "1.4.0-dev");          // the newest check-in, not the import
+});
+
+test("a check-in with no unit identity never becomes its own unit", async () => {
+  // No venue id or name, and (like every current build) no hostname or serial.
+  await post({ checkins: [checkin({ venueId: null, vpuName: null, hostname: null, serialNumber: null })] });
+  assert.equal(env.DB.raw.prepare("SELECT COUNT(*) n FROM units").get().n, 0);
+});
