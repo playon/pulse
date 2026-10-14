@@ -24,6 +24,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 ## [Unreleased]
 
 ### Added
+- Pulse now reads the VPU's own streaming log and checks what the live stream actually did. The port tests only reach Pixellot's test server, so a VPU could pass every one while its stream couldn't connect to the event's real streaming server. A stream that can't connect now fails the readiness check. A stream running on its backup or last-resort path shows as a warning, with the server it tried and when. The Network page shows a one-line "Live stream (VPU log)" result under the port tiles.
 - ScoreConnect tab: a **Reinstall ScoreConnect III** button. It stops the service, deletes the whole Sportzcast LLC program folder, and installs a fresh copy, with progress shown in Pulse. Saved settings and logs are kept. Use it when ScoreConnect III won't start or keeps failing.
 
 ## [1.4.1] - 2026-10-13
