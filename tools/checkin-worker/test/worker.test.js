@@ -31,6 +31,10 @@ function post(body, headers = {}) {
   );
 }
 
+function receivedAt(checkinId) {
+  return env.DB.raw.prepare("SELECT received_at FROM checkins WHERE checkin_id = ?").get(checkinId).received_at;
+}
+
 function checkin(overrides = {}) {
   return {
     checkinId: "11111111-2222-3333-4444-555555555555",
@@ -119,7 +123,7 @@ test("units view rolls up first/last seen and run count per unit", async () => {
   const main = units.find((u) => u.venue_id === "V42");
   assert.equal(main.run_count, 3);
   assert.equal(main.first_seen, "2026-09-18T10:00:00.000Z");
-  assert.equal(main.last_seen, "2026-09-22T10:00:00.000Z");
+  assert.equal(main.last_seen, receivedAt("id-00000002"));   // when the Worker heard it
   assert.equal(main.pulse_version, "1.4.0-dev");
 });
 
@@ -399,10 +403,12 @@ test("a heartbeat moves last_seen but keeps the last full reading", async () => 
   const full = checkin({ reason: "state-change", telemetry: telemetryDoc({ status: "PASS", blockers: [] }) });
   const beat = { checkinId: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", sentAt: "2026-09-20T15:00:00Z",
                  reason: "heartbeat", venueId: "V42", vpuName: "Main Gym", status: "PASS" };
-  const r = await (await post({ secret: SECRET, checkins: [full, beat] })).json();
-  assert.deepEqual(r.results.map((x) => x.status), ["inserted", "inserted"]);
+  await post({ secret: SECRET, checkins: [full] });
+  await new Promise((r) => setTimeout(r, 5));
+  const r = await (await post({ secret: SECRET, checkins: [beat] })).json();
+  assert.deepEqual(r.results.map((x) => x.status), ["inserted"]);
   const u = env.DB.raw.prepare("SELECT * FROM unit_status").get();
-  assert.equal(u.last_seen, "2026-09-20T15:00:00.000Z");
+  assert.equal(u.last_seen, receivedAt(beat.checkinId));
   assert.equal(u.last_full_report, "2026-09-20T14:00:00.000Z");
   assert.equal(u.last_kind, "heartbeat");
   assert.equal(u.status, "PASS");
@@ -451,7 +457,7 @@ test("run_count counts launches, not the monitor's posts", async () => {
   assert.equal(u[0].run_count, 2);
   assert.equal(u[0].monitor_posts, 3);
   assert.equal(u[0].last_launch, "2026-09-20T12:00:00.000Z");
-  assert.equal(u[0].last_seen, "2026-09-21T09:00:00.000Z");
+  assert.equal(u[0].last_seen, receivedAt("beat-0000-0000-0000-000000000009"));
   assert.equal(u[0].pulse_version, "1.4.0-dev");       // the heartbeat carries no version
   assert.equal(u[0].readiness_status, "PASS");
 });
@@ -463,6 +469,8 @@ test("an imported sheet unit keeps the sheet's run count and first seen", async 
              'web-v1.3.1', 'production', 'sheet-import',
              '{"imported":"Runs.csv","sheetKey":"SN1","firstSeen":"2026-06-01T09:00:00.000Z","runCount":40}')`,
   ).run();
+  // Its received_at is the import date, so last_seen keeps the sheet's own time.
+  assert.equal(env.DB.raw.prepare("SELECT last_seen FROM units").get().last_seen, "2026-09-01T10:00:00.000Z");
   await post({ checkins: [checkin({ sentAt: "2026-10-14T10:00:00Z" })] });
   const u = env.DB.raw.prepare("SELECT * FROM units").get();
   assert.equal(u.run_count, 41);                      // 40 from the sheet + this launch
@@ -515,4 +523,22 @@ test("views carry Eastern-time copies of their timestamps, EDT/EST by the US rul
   assert.equal(u.first_seen, "2026-09-20T14:00:00.000Z");     // UTC kept as is
   assert.equal(u.first_seen_et, "2026-09-20 10:00:00 EDT");
   assert.equal(u.last_launch_et, "2026-09-20 10:00:00 EDT");
+});
+
+test("a unit whose clock runs slow still reads as seen now", async () => {
+  // NTP blocked at the venue: the VPU thinks it is three weeks ago.
+  const slow = { reason: "heartbeat", venueId: "V42", vpuName: "Main Gym", status: "PASS" };
+  await post({ checkins: [
+    checkin({ checkinId: "slow-0000-0000-0000-000000000001", sentAt: "2026-09-01T10:00:00Z",
+              telemetry: { schema: "pulse.telemetry/v1", status: "PASS" }, reason: "state-change" }),
+    { ...slow, checkinId: "slow-0000-0000-0000-000000000002", sentAt: "2026-09-01T11:00:00Z" },
+  ] });
+  const heard = receivedAt("slow-0000-0000-0000-000000000002");
+  const u = env.DB.raw.prepare("SELECT * FROM units").get();
+  assert.equal(u.last_seen, heard);
+  assert.equal(u.first_seen, "2026-09-01T10:00:00.000Z");     // event times stay the VPU's
+  const s = env.DB.raw.prepare("SELECT * FROM unit_status").get();
+  assert.equal(s.last_seen, heard);
+  assert.equal(s.last_kind, "heartbeat");                       // ordering still follows sent_at
+  assert.equal(s.last_full_report, "2026-09-01T10:00:00.000Z");
 });

@@ -34,9 +34,12 @@ class FakeSink(BaseHTTPRequestHandler):
     requests = []
 
     def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        length = int(self.headers["Content-Length"])
+        body = json.loads(self.rfile.read(length))
         FakeSink.requests.append(body)
-        if FakeSink.mode == "ok":
+        if length > 64 * 1024:              # the Worker's body cap
+            self._reply(413, {"ok": False, "error": "too-large"})
+        elif FakeSink.mode == "ok":
             self._reply(200, {"ok": True, "results": [
                 {"checkinId": c["checkinId"], "status": "inserted"} for c in body["checkins"]]})
         elif FakeSink.mode == "invalid":
@@ -185,6 +188,26 @@ class TestCheckinQueue(unittest.TestCase):
         main._save_checkin_state({"queue": queue})
         self.launch()
         self.assertEqual([len(r["checkins"]) for r in FakeSink.requests], [50, 50, 21])
+        self.assertEqual(self.state()["queue"], [])
+
+    def test_batches_are_cut_by_size_not_just_count(self):
+        # 60 full monitor reports at ~2 KB: 50 of them would be a 413 every time.
+        queue = [{"checkinId": f"full-{i:08d}", "sentAt": self.clock, "telemetry": {"pad": "x" * 2000}}
+                 for i in range(60)]
+        main._save_checkin_state({"queue": queue})
+        self.launch()
+        sizes = [len(json.dumps(r).encode()) for r in FakeSink.requests]
+        self.assertTrue(all(n <= 64 * 1024 for n in sizes), sizes)
+        self.assertEqual(sum(len(r["checkins"]) for r in FakeSink.requests), 61)
+        self.assertEqual(self.state()["queue"], [])
+        self.assertNotIn("lastError", self.state())
+
+    def test_a_checkin_too_big_to_send_is_dropped_not_blocking(self):
+        huge = {"checkinId": "huge-00000001", "sentAt": self.clock, "telemetry": {"pad": "x" * 70000}}
+        main._save_checkin_state({"queue": [huge]})
+        self.launch()
+        sent = [c["checkinId"] for r in FakeSink.requests for c in r["checkins"]]
+        self.assertEqual(sent, ["id-00000001"])
         self.assertEqual(self.state()["queue"], [])
 
     def test_invalid_entries_are_dropped_not_retried_forever(self):
