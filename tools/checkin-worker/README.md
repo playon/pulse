@@ -14,6 +14,17 @@ on the ian.moore@playonsports.com Cloudflare account:
 They are separate Workers because Cloudflare Access on a `workers.dev`
 hostname covers the whole hostname, and VPUs have to POST without logging in.
 
+### Sheet relay
+
+When a VPU can't reach this Worker (usually a school filter blocking
+`workers.dev`), Pulse posts the check-in to the old Apps Script sheet instead.
+That script (in Ian's Google account, not in this repo) writes its row, then
+forwards the check-in here with the sheet's key removed and the header
+`X-Pulse-Relay: sheet`. Those rows get `source = 'sheet-relay'` and an empty
+`country`, because the request comes from Google, not from the school. The VPU
+keeps the check-in queued and retries later; that copy lands as a duplicate,
+because the checkinId matches. The header is only a label and grants nothing.
+
 ## Ingest contract
 
 ```json

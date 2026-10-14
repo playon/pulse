@@ -3,7 +3,7 @@ import { accessIdentity } from "./access.js";
 const UNIT_COLUMNS = [
   "venue_id", "vpu_name", "model", "pulse_version",
   "channel", "readiness_status", "readiness_blockers", "readiness_risks",
-  "first_seen", "last_seen", "run_count",
+  "first_seen", "last_seen", "run_count", "monitor_posts", "last_launch",
 ];
 const CHECKIN_COLUMNS = [
   "received_at", "sent_at", "hostname", "serial_number", "venue_id", "vpu_name",
