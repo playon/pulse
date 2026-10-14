@@ -28,7 +28,15 @@
     Pulse install root. Default C:\Pulse (what the launchers use).
 
 .PARAMETER Uninstall
-    Remove the task. The state, queue, cache and log files are left in place.
+    Remove the task. The state, queue, cache and log files are left in place
+    unless -Purge is given too.
+
+.PARAMETER Purge
+    With -Uninstall: also delete the monitor's state, queue, cache and log
+    files, leaving no trace of it on the unit.
+
+.PARAMETER Force
+    Register the task again even if the same definition is already installed.
 
 .PARAMETER Status
     Report whether the task is installed, when it last ran and its result.
@@ -44,11 +52,26 @@ param(
     [string]$InstallDir = 'C:\Pulse',
     [switch]$Uninstall,
     [switch]$Status,
-    [switch]$RunNow
+    [switch]$RunNow,
+    [switch]$Purge,
+    [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
 $TaskName = 'Pulse Fleet Monitor'
+# Bump when the task definition below changes. An install that finds this
+# version already registered, enabled and pointing at the same files does
+# nothing: Canopy Leaf's rollout reinstalled itself on units that already had
+# it, batch after batch, and nobody could tell which units had it
+# (#leaf-deploy-coordination, 2023-05). Which units run the monitor is read
+# from the check-in data, not from installs.
+$TaskVersion = '2'
+$MonitorFiles = @('pulse-monitor-state.json', 'pulse-monitor-state.json.tmp',
+                  'pulse-monitor-checkin-queue.json', 'pulse-monitor-checkin-queue.json.tmp',
+                  'pulse-monitor-posts.json', 'pulse-monitor-posts.json.tmp',
+                  'pulse-monitor-cache.json', 'pulse-monitor-cache.json.tmp',
+                  'pulse-monitor.log', 'pulse-monitor.log.1',
+                  'pulse-monitor-ticks.log', 'pulse-monitor-ticks.log.1')
 
 function Info($msg) { Write-Host "  $msg" }
 function Fail($msg) { Write-Host "  [ERROR] $msg" -ForegroundColor Red; exit 1 }
@@ -92,6 +115,14 @@ if ($Uninstall) {
     } else {
         Info "$TaskName was not installed."
     }
+    if ($Purge) {
+        $removed = 0
+        foreach ($f in $MonitorFiles) {
+            $p = Join-Path $InstallDir $f
+            if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force; $removed++ }
+        }
+        Info "Deleted $removed monitor file(s) from $InstallDir."
+    }
     exit 0
 }
 
@@ -114,6 +145,7 @@ $xml = @"
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Author>Pulse</Author>
+    <Version>$TaskVersion</Version>
     <Description>Pulse fleet monitor. Every 5 minutes checks whether this VPU is ready to stream and reports to the Pulse check-in service. Waits while an event is live. Remove with Install-PulseMonitor.ps1 -Uninstall.</Description>
   </RegistrationInfo>
   <Triggers>
@@ -157,6 +189,22 @@ $xml = @"
   </Actions>
 </Task>
 "@
+
+$existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+if ($existing -and -not $Force) {
+    $sameVersion = ($existing.Version -eq $TaskVersion)
+    $action = @($existing.Actions)[0]
+    $sameFiles = $action -and ($action.Execute -eq $pyExe) -and ($action.Arguments -eq ('"' + $tick + '"'))
+    if ($sameVersion -and $sameFiles -and $existing.State -ne 'Disabled') {
+        Info "$TaskName is already installed and current (definition $TaskVersion). Nothing to do."
+        if ($RunNow) {
+            $null = Start-ScheduledTask -TaskName $TaskName
+            Info "Started one tick now."
+        }
+        Show-Status
+        exit 0
+    }
+}
 
 $null = Register-ScheduledTask -TaskName $TaskName -Xml $xml -Force
 $t = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue

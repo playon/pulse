@@ -20,3 +20,5 @@ pulse-monitor.log
 pulse-monitor.log.1
 pulse-monitor-ticks.log
 pulse-monitor-ticks.log.1
+pulse-monitor-posts.json
+pulse-monitor-posts.json.tmp
