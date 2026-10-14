@@ -151,6 +151,25 @@ They publish releases directly to `playon/pulse` using the workflow's built-in `
 - `Pulse.Web/app/` — FastAPI backend (`main.py`, `powershell.py`) + SPA frontend (`static/`)
 - `Pulse.WPF/` — deprecated gen-2 desktop app, kept for reference only (not built/shipped)
 
+## Check-in contract (Pulse Vitals depends on it)
+
+The fleet dashboard Pulse Vitals (`playon/pulse-vitals`, private) is built on what the files below produce. A change here can break Vitals without failing anything in this repo.
+
+| What | Where |
+|---|---|
+| Check-in envelope and client queue | `Pulse.Web/app/main.py` (`_build_checkin_entry`, `_flush_checkin_queue`) |
+| Telemetry document `pulse.telemetry/v1` | `_build_telemetry` in `Pulse.Web/app/main.py` (on `fleet-monitor` until it merges) |
+| When the monitor posts | `Pulse.Web/app/monitor.py` (`plan_tick`, `plan_post`) |
+| Ingest validation and storage | `tools/checkin-worker/src/ingest.js` |
+| Schema and the views Vitals reads | `tools/checkin-worker/migrations/` |
+
+When you change any of them:
+
+1. **Update the contract in the same piece of work.** The contract is `docs/contract.md` in `playon/pulse-vitals`. Open that PR alongside this one and link the two.
+2. **Additive only within v1.** Only new optional fields. Put a new field inside `telemetry`, because the Worker doesn't store unknown envelope fields. A rename, a removal or a change of meaning needs `pulse.telemetry/v2`.
+3. **Migrations keep the views' existing columns.** Vitals reads `units`, `unit_status` and `transitions`. It also keeps a copy of the migrations, and its CI fails daily until that copy is synced (`npm run sync-schema` in pulse-vitals).
+4. **Track it in Jira project PV** (Pulse - Vitals), linked to the PULSEDEV ticket if there is one.
+
 ## MCP Tools
 
 Claude in Chrome is **not enabled** for this org. Do not attempt to use browser automation MCP tools (`mcp__Claude_in_Chrome__*`). Use `mcp__Claude_Preview__*` for UI previewing instead. Preferably ask the user if they are running local dev server first, then proceed with running local servier if they are not running it already.
