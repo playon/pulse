@@ -542,3 +542,45 @@ test("a unit whose clock runs slow still reads as seen now", async () => {
   assert.equal(s.last_kind, "heartbeat");                       // ordering still follows sent_at
   assert.equal(s.last_full_report, "2026-09-01T10:00:00.000Z");
 });
+
+test("every reply carries fleet control, on by default", async () => {
+  const body = await (await post({ checkins: [checkin()] })).json();
+  assert.deepEqual(body.control, { mode: "on", skip: [] });
+});
+
+test("fleet control: a unit's row decides its mode, skip lists add up", async () => {
+  env.DB.raw.exec(`UPDATE monitor_control SET skip = '["Get-S1Cameras.ps1"]' WHERE scope = 'fleet'`);
+  env.DB.raw.exec(`INSERT INTO monitor_control (scope, mode, skip) VALUES ('V42', 'off', '["Get-PoePower.ps1"]')`);
+  let body = await (await post({ checkins: [checkin()] })).json();           // venueId V42
+  assert.equal(body.control.mode, "off");
+  assert.deepEqual(body.control.skip.sort(), ["Get-PoePower.ps1", "Get-S1Cameras.ps1"]);
+
+  body = await (await post({ checkins: [checkin({ checkinId: "aaaaaaaa-0000-0000-0000-00000000000b",
+                                                  venueId: "V99" })] })).json();
+  assert.equal(body.control.mode, "on");                                   // only the fleet row applies
+  assert.deepEqual(body.control.skip, ["Get-S1Cameras.ps1"]);
+
+  env.DB.raw.exec(`UPDATE monitor_control SET mode = 'off' WHERE scope = 'fleet'`);
+  body = await (await post({ checkins: [checkin({ checkinId: "aaaaaaaa-0000-0000-0000-00000000000c",
+                                                  venueId: "V99" })] })).json();
+  assert.equal(body.control.mode, "off");
+});
+
+test("a failed control lookup leaves control out and still stores the check-in", async () => {
+  env.DB.raw.exec("DROP TABLE monitor_control");
+  const body = await (await post({ checkins: [checkin()] })).json();
+  assert.equal(body.ok, true);
+  assert.equal(body.results[0].status, "inserted");
+  assert.equal(body.control, undefined);
+});
+
+test("the monitor's peak memory is stored, and a paused line is accepted", async () => {
+  await post({ checkins: [checkin({ reason: "periodic", monitor: { pass: "full", cpuSeconds: 4.4, memoryPeakMb: 61.5 } })] });
+  assert.equal(env.DB.raw.prepare("SELECT monitor_memory_peak_mb m FROM checkins").get().m, 61.5);
+  await post({ checkins: [{ checkinId: "aaaaaaaa-0000-0000-0000-00000000000d", sentAt: "2026-09-20T14:00:00Z",
+                            reason: "paused", venueId: "V42", vpuName: "Main Gym", pulseVersion: "1.5.0" }] });
+  const row = env.DB.raw.prepare("SELECT reason FROM checkins WHERE checkin_id = 'aaaaaaaa-0000-0000-0000-00000000000d'").get();
+  assert.equal(row.reason, "paused");
+  const u = env.DB.raw.prepare("SELECT run_count, monitor_posts FROM units WHERE venue_id = 'V42'").get();
+  assert.equal(u.run_count, 0);           // neither a launch nor a monitor report
+});

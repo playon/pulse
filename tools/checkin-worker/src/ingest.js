@@ -12,7 +12,9 @@ const MAX_CODES = 50;
 const FUTURE_SKEW_MS = 10 * 60 * 1000;
 const CHECKIN_ID_RE = /^[A-Za-z0-9-]{8,64}$/;
 const MAX_EVENTS = 25;
-const REASONS = new Set(["startup", "periodic", "state-change", "heartbeat"]);
+// "paused": the hourly identity-only line from a monitor that fleet control
+// has switched off (monitor_control below).
+const REASONS = new Set(["startup", "periodic", "state-change", "heartbeat", "paused"]);
 const PASSES = new Set(["full", "partial"]);
 const STATUSES = new Set(["PASS", "WARN", "FAIL"]);
 const PATHS = new Set(["zixi-2088", "zixi-443", "rtmp-1935", "blocked"]);
@@ -34,11 +36,11 @@ INSERT INTO checkins (
   tel_subnet_mask, tel_gateway, tel_dns1, tel_dns2, tel_dhcp, tel_last_boot,
   tel_unexpected_7d, tel_reboot_pending, tel_poe_draw_w, tel_clock_offset_s,
   tel_mac, tel_camera_macs, tel_internet_reachable,
-  monitor_cpu_seconds, monitor_cpu_percent, monitor_processes
+  monitor_cpu_seconds, monitor_cpu_percent, monitor_processes, monitor_memory_peak_mb
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (checkin_id) DO NOTHING`;
 
 export async function handleIngest(request, env) {
@@ -82,6 +84,7 @@ export async function handleIngest(request, env) {
   const results = [];
   const statements = [];
   const slots = [];
+  let unit = null;
 
   for (const item of body.checkins) {
     const row = normalize(item, receivedAt);
@@ -89,6 +92,7 @@ export async function handleIngest(request, env) {
       results.push({ checkinId: idOf(item), status: "invalid" });
       continue;
     }
+    unit = unit || row.venueId || row.vpuName;
     slots.push(results.length);
     results.push({ checkinId: row.checkinId, status: null });
     statements.push(
@@ -109,7 +113,7 @@ export async function handleIngest(request, env) {
         row.tel.dns1, row.tel.dns2, row.tel.dhcp, row.tel.lastBoot,
         row.tel.unexpected7d, row.tel.rebootPending, row.tel.poeDrawW,
         row.tel.clockOffsetS, row.tel.mac, row.tel.cameraMacs, row.tel.internetReachable,
-        row.monitorCpuSeconds, row.monitorCpuPercent, row.monitorProcesses,
+        row.monitorCpuSeconds, row.monitorCpuPercent, row.monitorProcesses, row.monitorMemoryPeakMb,
       ),
     );
   }
@@ -128,7 +132,39 @@ export async function handleIngest(request, env) {
     });
   }
 
-  return Response.json({ ok: true, results });
+  const control = await controlFor(env, unit);
+  return Response.json(control ? { ok: true, results, control } : { ok: true, results });
+}
+
+// Fleet control for the scheduled monitor: the remote off switch, from
+// Canopy Leaf's rollout (#leaf-deploy-coordination). Its memory leak took four
+// months of hand-edited cron jobs to find; here one row stops the monitor, or
+// one collector, on a unit or the whole fleet. A unit's own row decides its
+// mode; skip lists add up. Any failure leaves control out of the reply, and
+// Pulse then keeps the last instruction it had.
+async function controlFor(env, unit) {
+  try {
+    const { results } = await env.DB.prepare(
+      "SELECT scope, mode, skip FROM monitor_control WHERE scope = 'fleet' OR scope = ?",
+    ).bind(unit || "").all();
+    if (!results || !results.length) return { mode: "on", skip: [] };
+    const fleet = results.find((r) => r.scope === "fleet");
+    const own = results.find((r) => r.scope !== "fleet");
+    const mode = (own || fleet).mode === "off" ? "off" : "on";
+    const skip = new Set();
+    for (const r of [fleet, own]) {
+      if (!r) continue;
+      try {
+        for (const name of JSON.parse(r.skip || "[]")) if (typeof name === "string" && name) skip.add(name);
+      } catch {
+        // a malformed skip list in one row never blocks the reply
+      }
+    }
+    return { mode, skip: [...skip].slice(0, 50) };
+  } catch (e) {
+    console.error("control lookup failed", e && e.message);
+    return null;
+  }
 }
 
 function normalize(item, receivedAt) {
@@ -168,6 +204,7 @@ function normalize(item, receivedAt) {
     monitorCpuSeconds: mon ? num(mon.cpuSeconds, 0, 3600) : null,
     monitorCpuPercent: mon ? num(mon.cpuPercent, 0, 100) : null,
     monitorProcesses: mon ? int(mon.processes, 0, 100000) : null,
+    monitorMemoryPeakMb: mon ? num(mon.memoryPeakMb, 0, 65536) : null,
     eventLive: mon && typeof mon.eventLive === "boolean" ? (mon.eventLive ? 1 : 0) : null,
     tel: telemetry(item.telemetry),
   };
@@ -204,6 +241,7 @@ function normalize(item, receivedAt) {
       cpuSeconds: clean.monitorCpuSeconds,
       cpuPercent: clean.monitorCpuPercent,
       processes: clean.monitorProcesses,
+      memoryPeakMb: clean.monitorMemoryPeakMb,
       eventLive: clean.eventLive === null ? null : clean.eventLive === 1,
     },
   });
