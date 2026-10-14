@@ -25,6 +25,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 
 ### Added
 - ScoreConnect tab: a **Reinstall ScoreConnect III** button. It stops the service, deletes the whole Sportzcast LLC program folder, and installs a fresh copy, with progress shown in Pulse. Saved settings and logs are kept. Use it when ScoreConnect III won't start or keeps failing.
+- Pulse now warns when the main camera isn't calibrated for any sport. The game still streams, but it shows each camera's view side by side instead of one joined picture. Before, this read as stream-ready.
 
 ## [1.4.1] - 2026-10-13
 
