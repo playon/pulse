@@ -10,3 +10,13 @@ sc3-backups/
 pulse-checkin-queue.json
 pulse-checkin-queue.json.tmp
 received_reports/
+pulse-monitor-state.json
+pulse-monitor-state.json.tmp
+pulse-monitor-checkin-queue.json
+pulse-monitor-checkin-queue.json.tmp
+pulse-monitor-cache.json
+pulse-monitor-cache.json.tmp
+pulse-monitor.log
+pulse-monitor.log.1
+pulse-monitor-ticks.log
+pulse-monitor-ticks.log.1
