@@ -1,0 +1,90 @@
+# Publish a fleet agent release (PV-49) when an agent-v* tag is pushed.
+#
+# The agent (the scheduled monitor, its check-in and telemetry) versions on
+# its own: Pulse.Web/app/pulse_agent/VERSION. To release it, bump that file
+# and the agent CHANGELOG, merge, then tag the commit:
+#
+#     git tag agent-v0.2.0 <commit> && git push origin agent-v0.2.0
+#
+# This builds pulse-agent-<version>.zip (tools/agent-release/build_agent_zip.py,
+# reproducible) and publishes it with its SHA-256. Publishing moves no unit:
+# a unit downloads it only when fleet control pins that version and hash
+# (tools/checkin-worker/README.md). The agent builds the download URL from the
+# version itself, so the asset name and tag pattern here are part of the
+# contract with its runner (Pulse.Web/app/pulse_agent/runner.py, PV-49 slice 4).
+#
+# Agent releases are never deleted (unlike web-* channels): pins and
+# rollbacks need older ones. They're never marked latest, and the web
+# launchers and Check for Update only look at web-* tags.
+
+name: Agent release
+
+on:
+  push:
+    tags: [ "agent-v*" ]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: Pulse.Web/app/requirements.txt
+
+      - name: Refuse to replace a published agent release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::$TAG is already published. A released agent never changes: its hash may be pinned. Tag a new version."
+            exit 1
+          fi
+
+      - name: Unit tests (the build ships what they test)
+        working-directory: Pulse.Web
+        run: |
+          python -m pip install --quiet -r app/requirements.txt
+          python -m unittest discover -s tests
+          python -m unittest discover -s ../tools/agent-release
+
+      - name: Build the agent zip
+        id: build
+        run: |
+          VERSION="${TAG#agent-v}"
+          python tools/agent-release/build_agent_zip.py "$VERSION" dist
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha=$(cut -d' ' -f1 dist/pulse-agent-$VERSION.zip.sha256)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.build.outputs.version }}
+        run: |
+          gh release create "$TAG" \
+            "dist/pulse-agent-$VERSION.zip" "dist/pulse-agent-$VERSION.zip.sha256" \
+            --title "Fleet agent $VERSION" \
+            --notes-file dist/RELEASE_NOTES.md \
+            --latest=false \
+            --verify-tag
+
+      - name: Check the published zip is the one built
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.build.outputs.version }}
+          SHA: ${{ steps.build.outputs.sha }}
+        run: |
+          # The exact URL the agent's runner builds.
+          curl -fsSL -o published.zip \
+            "https://github.com/${{ github.repository }}/releases/download/$TAG/pulse-agent-$VERSION.zip"
+          echo "$SHA  published.zip" | sha256sum -c -
+          echo "### Fleet agent $VERSION published" >> "$GITHUB_STEP_SUMMARY"
+          echo "SHA-256: \`$SHA\`" >> "$GITHUB_STEP_SUMMARY"
