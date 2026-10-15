@@ -34,20 +34,26 @@ import time
 
 _app_dir = os.path.dirname(os.path.abspath(__file__))
 _web_root = os.path.dirname(_app_dir)
+# Where the monitor keeps its state, queue, cache and logs. The agent's runner
+# (pulse_agent/runner.py) runs this file from a slot it replaces on an update,
+# so it passes the folder that outlives the slots. Without it (the older
+# install, or a hand run), they live beside the code, as before.
+_data_root = os.environ.get("PULSE_MONITOR_DATA") or _web_root
 if _app_dir not in sys.path:
     sys.path.insert(0, _app_dir)
 
-from pulse_agent import AGENT_VERSION  # noqa: E402  (light: stdlib only)
+from pulse_agent import AGENT_VERSION, UPDATE_FILE, last_update  # noqa: E402  (light: stdlib only)
 from pulse_agent import monitor, event_watch, checkin_lite  # noqa: E402  (light: stdlib only)
 from typing import Optional  # noqa: E402
 
-STATE_PATH = os.path.join(_web_root, "pulse-monitor-state.json")
-QUEUE_PATH = os.path.join(_web_root, "pulse-monitor-checkin-queue.json")
-CACHE_PATH = os.path.join(_web_root, "pulse-monitor-cache.json")
+STATE_PATH = os.path.join(_data_root, "pulse-monitor-state.json")
+QUEUE_PATH = os.path.join(_data_root, "pulse-monitor-checkin-queue.json")
+CACHE_PATH = os.path.join(_data_root, "pulse-monitor-cache.json")
 LOG_NAME = "pulse-monitor.log"
-TICKS_PATH = os.path.join(_web_root, "pulse-monitor-ticks.log")
-POSTS_PATH = os.path.join(_web_root, "pulse-monitor-posts.json")
-EVENT_PATH = os.path.join(_web_root, "pulse-monitor-event.json")
+TICKS_PATH = os.path.join(_data_root, "pulse-monitor-ticks.log")
+POSTS_PATH = os.path.join(_data_root, "pulse-monitor-posts.json")
+EVENT_PATH = os.path.join(_data_root, "pulse-monitor-event.json")
+UPDATE_PATH = os.path.join(_data_root, UPDATE_FILE)
 LOG_MAX_BYTES = 2 * 1024 * 1024
 
 # Collectors whose answer moves over hours, not minutes. Everything else runs
@@ -269,12 +275,22 @@ def _app_version() -> str:
         return ""
 
 
+def _log_to_data_root() -> None:
+    """main.py's log goes to the data folder: main joins PULSE_SERVER_LOG_NAME
+    onto its own folder, and an absolute name wins that join."""
+    path = os.path.join(_data_root, LOG_NAME)
+    os.environ["PULSE_SERVER_LOG_NAME"] = path
+    os.environ["PULSE_SERVER_LOG_APPEND"] = "1"
+    _rotate(path)
+
+
 def _agent_checkin():
     """The check-in module, pointed at the monitor's own queue and stamping
     this agent's version on every post. Import main first: it binds the engine."""
     from pulse_agent import checkin
     checkin._CHECKIN_STATE_PATH = QUEUE_PATH
     checkin._AGENT_VERSION = AGENT_VERSION
+    checkin._AGENT_UPDATE_PATH = UPDATE_PATH
     return checkin
 
 
@@ -282,11 +298,15 @@ def _event_entry(reason: str, ev: dict, tick_wall: float, ended: bool) -> dict:
     import uuid
     posts = monitor.load_posts(POSTS_PATH)
     ident = posts.get("identity") or {}
-    return {"checkinId": str(uuid.uuid4()),
-            "sentAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(tick_wall)),
-            "reason": reason, "venueId": ident.get("venueId"), "vpuName": ident.get("vpuName"),
-            "pulseVersion": _app_version(), "agentVersion": AGENT_VERSION,
-            "event": event_watch.summary(ev, tick_wall, ended)}
+    entry = {"checkinId": str(uuid.uuid4()),
+             "sentAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(tick_wall)),
+             "reason": reason, "venueId": ident.get("venueId"), "vpuName": ident.get("vpuName"),
+             "pulseVersion": _app_version(), "agentVersion": AGENT_VERSION,
+             "event": event_watch.summary(ev, tick_wall, ended)}
+    update = last_update(UPDATE_PATH)
+    if update:
+        entry["agentUpdate"] = update
+    return entry
 
 
 def _event_tick(tick_wall: float) -> str:
@@ -389,9 +409,7 @@ def _read_control() -> dict:
 async def _paused_post(tick_wall: float) -> str:
     """The hourly identity-only line while fleet control has the monitor off.
     Its reply carries the control, so this is how a unit learns it's back on."""
-    os.environ["PULSE_SERVER_LOG_NAME"] = LOG_NAME
-    os.environ["PULSE_SERVER_LOG_APPEND"] = "1"
-    _rotate(os.path.join(_web_root, LOG_NAME))
+    _log_to_data_root()
     import main  # noqa: F401  (binds the engine the check-in runs on)
     checkin = _agent_checkin()
     posts = monitor.load_posts(POSTS_PATH)
@@ -409,9 +427,7 @@ async def _paused_post(tick_wall: float) -> str:
 async def _pass(plan: str, dry_run: bool, force: bool, tick_wall: float,
                 skip=()) -> str:
     """Run one pass; return what was posted (full / heartbeat / none)."""
-    os.environ["PULSE_SERVER_LOG_NAME"] = LOG_NAME
-    os.environ["PULSE_SERVER_LOG_APPEND"] = "1"
-    _rotate(os.path.join(_web_root, LOG_NAME))
+    _log_to_data_root()
 
     import powershell
     powershell.configure_background(concurrency=1, low_priority=True,

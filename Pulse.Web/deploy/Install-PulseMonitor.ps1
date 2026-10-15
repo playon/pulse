@@ -27,6 +27,17 @@
 .PARAMETER InstallDir
     Pulse install root. Default C:\Pulse (what the launchers use).
 
+.PARAMETER Runner
+    Register the task to run the fleet agent's runner (PV-49) instead of the
+    monitor directly:
+
+        <InstallDir>\runtime\python\python.exe <InstallDir>\agent_runner.py
+
+    The runner runs the monitor from one of two slots under
+    <InstallDir>\slots and moves the unit between agent builds as fleet
+    control says. fleet_enroll.py (Pulse Settings, Fleet Monitoring) sets the
+    folder up and passes this.
+
 .PARAMETER Uninstall
     Remove the task. The state, queue, cache and log files are left in place
     unless -Purge is given too.
@@ -54,7 +65,8 @@ param(
     [switch]$Status,
     [switch]$RunNow,
     [switch]$Purge,
-    [switch]$Force
+    [switch]$Force,
+    [switch]$Runner
 )
 
 $ErrorActionPreference = 'Stop'
@@ -65,13 +77,16 @@ $TaskName = 'Pulse Fleet Monitor'
 # it, batch after batch, and nobody could tell which units had it
 # (#leaf-deploy-coordination, 2023-05). Which units run the monitor is read
 # from the check-in data, not from installs.
-$TaskVersion = '2'
+$TaskVersion = '3'
 $MonitorFiles = @('pulse-monitor-state.json', 'pulse-monitor-state.json.tmp',
                   'pulse-monitor-checkin-queue.json', 'pulse-monitor-checkin-queue.json.tmp',
                   'pulse-monitor-posts.json', 'pulse-monitor-posts.json.tmp',
                   'pulse-monitor-cache.json', 'pulse-monitor-cache.json.tmp',
                   'pulse-monitor.log', 'pulse-monitor.log.1',
-                  'pulse-monitor-ticks.log', 'pulse-monitor-ticks.log.1')
+                  'pulse-monitor-ticks.log', 'pulse-monitor-ticks.log.1',
+                  'pulse-monitor-event.json', 'pulse-monitor-event.json.tmp',
+                  'agent-slots.json', 'agent-slots.json.tmp', 'agent-update.json', 'agent-update.json.tmp',
+                  'agent-tick.running', 'agent-download.tmp', 'agent-runner.log', 'agent-runner.log.1')
 
 function Info($msg) { Write-Host "  $msg" }
 function Fail($msg) { Write-Host "  [ERROR] $msg" -ForegroundColor Red; exit 1 }
@@ -126,15 +141,22 @@ if ($Uninstall) {
     exit 0
 }
 
-$pyExe = Join-Path $InstallDir 'app\python\python.exe'
-$tick  = Join-Path $InstallDir 'app\monitor_once.py'
+if ($Runner) {
+    $pyExe   = Join-Path $InstallDir 'runtime\python\python.exe'
+    $tick    = Join-Path $InstallDir 'agent_runner.py'
+    $workDir = $InstallDir
+} else {
+    $pyExe   = Join-Path $InstallDir 'app\python\python.exe'
+    $tick    = Join-Path $InstallDir 'app\monitor_once.py'
+    $workDir = Join-Path $InstallDir 'app'
+}
 if (-not (Test-Path -LiteralPath $pyExe)) { Fail "Embedded Python not found at $pyExe. Launch Pulse once so it sets up its runtime." }
 if (-not (Test-Path -LiteralPath $tick))  { Fail "$tick not found. This Pulse build has no fleet monitor; install one that does." }
 
 # XML text: escape the paths for element content.
 $pyXml   = [Security.SecurityElement]::Escape($pyExe)
 $argXml  = [Security.SecurityElement]::Escape('"' + $tick + '"')
-$dirXml  = [Security.SecurityElement]::Escape((Join-Path $InstallDir 'app'))
+$dirXml  = [Security.SecurityElement]::Escape($workDir)
 
 # Task Scheduler 1.2 schema.
 #   Repetition PT5M with no Duration = every 5 minutes, indefinitely.

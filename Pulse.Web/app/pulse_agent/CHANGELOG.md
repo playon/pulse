@@ -17,6 +17,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-15
+
+### Added
+- The agent can update itself. On a unit enrolled from Pulse Settings, the
+  scheduled task runs a small runner (`agent_runner.py`) that keeps two copies
+  of the agent and runs one. When fleet control pins a build, the runner
+  downloads that `agent-v*` release, checks its SHA-256 against the pin and
+  switches to it between events. A new build is on probation: its first tick
+  posts a full report, and three clean ticks commit it. If one fails, crashes
+  or hangs, the unit goes back to the build it had, and that build isn't tried
+  again until the pin changes.
+- Posts carry `agentUpdate` (`applied`, `failed` or `rolled-back`, with the
+  version and any error) for a day after an update attempt.
+
+### Changed
+- The monitor keeps its state, queue, cache and logs in the folder the runner
+  gives it (`PULSE_MONITOR_DATA`), so they outlive an update. Without one they
+  stay beside the code, as before.
+- Opting in installs the runner layout, and a dev launch moves a unit on the
+  older layout to it. After that a dev launch no longer copies its build into
+  the monitor: fleet control decides which build runs.
+
 ## [0.1.0] - 2026-10-15
 
 ### Added

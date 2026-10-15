@@ -204,11 +204,19 @@ _CHECKIN_IDENTITY_FALLBACK: dict = {}
 # interactive launch: Diagnostics carries a copy of the agent, but that copy
 # isn't the one running on the unit.
 _AGENT_VERSION = ""
+# The runner's record of its last update (pulse_agent.UPDATE_FILE in the
+# monitor's data folder), also set by the monitor. Empty: no agentUpdate.
+_AGENT_UPDATE_PATH = ""
 
 
 def _agent_stamp(entry: dict) -> dict:
     if _AGENT_VERSION:
         entry["agentVersion"] = _AGENT_VERSION
+        if _AGENT_UPDATE_PATH:
+            from pulse_agent import last_update
+            update = last_update(_AGENT_UPDATE_PATH)
+            if update:
+                entry["agentUpdate"] = update
     return entry
 
 
