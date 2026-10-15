@@ -14,7 +14,13 @@ const CHECKIN_ID_RE = /^[A-Za-z0-9-]{8,64}$/;
 const MAX_EVENTS = 25;
 // "paused": the hourly identity-only line from a monitor that fleet control
 // has switched off (monitor_control below).
-const REASONS = new Set(["startup", "periodic", "state-change", "heartbeat", "paused"]);
+// "event-start" / "event-update" / "event-end": the monitor's in-event reader
+// (event_watch.py), which reads Pixellot's own logs while VPU.exe runs.
+const REASONS = new Set(["startup", "periodic", "state-change", "heartbeat", "paused",
+                         "event-start", "event-update", "event-end"]);
+const EVENT_SCHEMA = "pulse.event/v1";
+const MAX_EVENT_BYTES = 4 * 1024;
+const EVENT_STATES = new Set(["on-air", "connecting", "stream-failing", "restart-loop", "camera-link-down", "ended"]);
 const PASSES = new Set(["full", "partial"]);
 const STATUSES = new Set(["PASS", "WARN", "FAIL"]);
 const PATHS = new Set(["zixi-2088", "zixi-443", "rtmp-1935", "blocked"]);
@@ -36,11 +42,13 @@ INSERT INTO checkins (
   tel_subnet_mask, tel_gateway, tel_dns1, tel_dns2, tel_dhcp, tel_last_boot,
   tel_unexpected_7d, tel_reboot_pending, tel_poe_draw_w, tel_clock_offset_s,
   tel_mac, tel_camera_macs, tel_internet_reachable,
-  monitor_cpu_seconds, monitor_cpu_percent, monitor_processes, monitor_memory_peak_mb
+  monitor_cpu_seconds, monitor_cpu_percent, monitor_processes, monitor_memory_peak_mb,
+  event_id, event_state, event_reason, event_on_air, event
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?)
 ON CONFLICT (checkin_id) DO NOTHING`;
 
 export async function handleIngest(request, env) {
@@ -114,6 +122,7 @@ export async function handleIngest(request, env) {
         row.tel.unexpected7d, row.tel.rebootPending, row.tel.poeDrawW,
         row.tel.clockOffsetS, row.tel.mac, row.tel.cameraMacs, row.tel.internetReachable,
         row.monitorCpuSeconds, row.monitorCpuPercent, row.monitorProcesses, row.monitorMemoryPeakMb,
+        row.ev.id, row.ev.state, row.ev.reason, row.ev.onAir, row.ev.json,
       ),
     );
   }
@@ -207,6 +216,7 @@ function normalize(item, receivedAt) {
     monitorMemoryPeakMb: mon ? num(mon.memoryPeakMb, 0, 65536) : null,
     eventLive: mon && typeof mon.eventLive === "boolean" ? (mon.eventLive ? 1 : 0) : null,
     tel: telemetry(item.telemetry),
+    ev: eventDoc(item.event),
   };
   clean.raw = JSON.stringify({
     checkinId: clean.checkinId,
@@ -276,6 +286,25 @@ const NO_TELEMETRY = {
 const MAC_RE = /^([0-9A-F]{2}:){5}[0-9A-F]{2}$/;
 const SYSTEM_TYPES = new Set(["S1", "S2", "S2S"]);
 const SCORE_SOURCES = new Set(["ocr", "scoreconnect"]);
+
+const NO_EVENT = { id: null, state: null, reason: null, onAir: null, json: null };
+
+// The in-event reader's summary, stored whole like telemetry (pulse.event/v1).
+// eventId is Pixellot's; Unity resolves it to the NFHS game and broadcast.
+function eventDoc(e) {
+  if (!e || typeof e !== "object" || Array.isArray(e) || e.schema !== EVENT_SCHEMA) return NO_EVENT;
+  const json = JSON.stringify(e);
+  if (new TextEncoder().encode(json).length > MAX_EVENT_BYTES) return NO_EVENT;
+  const id = str(e.eventId, 64);
+  const state = str(e.state);
+  return {
+    id: id && /^[0-9a-f]{16,32}$/.test(id) ? id : null,
+    state: EVENT_STATES.has(state) ? state : null,
+    reason: str(e.reason),
+    onAir: typeof e.wentOnAir === "boolean" ? (e.wentOnAir ? 1 : 0) : null,
+    json,
+  };
+}
 
 function telemetry(t) {
   if (!t || typeof t !== "object" || Array.isArray(t) || t.schema !== TELEMETRY_SCHEMA) return NO_TELEMETRY;

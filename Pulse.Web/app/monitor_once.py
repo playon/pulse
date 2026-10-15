@@ -38,6 +38,9 @@ if _app_dir not in sys.path:
     sys.path.insert(0, _app_dir)
 
 import monitor  # noqa: E402  (light: stdlib only)
+import event_watch  # noqa: E402  (light: stdlib only)
+import checkin_lite  # noqa: E402  (light: stdlib only)
+from typing import Optional  # noqa: E402
 
 STATE_PATH = os.path.join(_web_root, "pulse-monitor-state.json")
 QUEUE_PATH = os.path.join(_web_root, "pulse-monitor-checkin-queue.json")
@@ -45,6 +48,7 @@ CACHE_PATH = os.path.join(_web_root, "pulse-monitor-cache.json")
 LOG_NAME = "pulse-monitor.log"
 TICKS_PATH = os.path.join(_web_root, "pulse-monitor-ticks.log")
 POSTS_PATH = os.path.join(_web_root, "pulse-monitor-posts.json")
+EVENT_PATH = os.path.join(_web_root, "pulse-monitor-event.json")
 LOG_MAX_BYTES = 2 * 1024 * 1024
 
 # Collectors whose answer moves over hours, not minutes. Everything else runs
@@ -173,6 +177,9 @@ class _CpuMeter:
 _CPU = None
 
 
+_VPU_PID = None   # set by _running_images; a change mid-event is a VPU.exe restart
+
+
 def _running_images():
     """Lower-cased image names of running processes, or None if unreadable."""
     if sys.platform != "win32":
@@ -185,10 +192,16 @@ def _running_images():
         ).stdout or ""
     except Exception:
         return None
+    global _VPU_PID
     names = set()
+    _VPU_PID = None
     for line in out.splitlines():
         if line.startswith('"'):
-            names.add(line[1:line.find('"', 1)].lower())
+            name = line[1:line.find('"', 1)].lower()
+            names.add(name)
+            if name == "vpu.exe" and _VPU_PID is None:
+                parts = line.split('","')
+                _VPU_PID = parts[1] if len(parts) > 1 else None
     return names or None
 
 
@@ -226,6 +239,113 @@ def _record_tick(started: float, plan, event_live: bool,
             fh.write(line)
     except OSError:
         pass
+
+
+def _load_json(path: str) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_json(path: str, data: dict) -> None:
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _app_version() -> str:
+    try:
+        with open(os.path.join(_web_root, "VERSION"), "r", encoding="utf-8") as fh:
+            return fh.read().strip()[:64]
+    except OSError:
+        return ""
+
+
+def _event_entry(reason: str, ev: dict, tick_wall: float, ended: bool) -> dict:
+    import uuid
+    posts = monitor.load_posts(POSTS_PATH)
+    ident = posts.get("identity") or {}
+    return {"checkinId": str(uuid.uuid4()),
+            "sentAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(tick_wall)),
+            "reason": reason, "venueId": ident.get("venueId"), "vpuName": ident.get("vpuName"),
+            "pulseVersion": _app_version(),
+            "event": event_watch.summary(ev, tick_wall, ended)}
+
+
+def _event_tick(tick_wall: float) -> str:
+    """One tick while VPU.exe runs: read what Pixellot wrote since the last
+    tick (event_watch, files only), and post only at the event's start, when
+    a new verdict holds for two reads in a row, or never otherwise."""
+    rec = _load_json(EVENT_PATH)
+    ev = rec.get("event")
+    new_event = not isinstance(ev, dict)
+    if new_event:
+        ev = {"startedAt": tick_wall}
+        mark = rec.get("logMark") or {}
+        # Start where VPU.exe started writing: the log's size at the last
+        # tick before the event, when it's the same file.
+        if mark.get("path"):
+            ev["logFile"], ev["offset"] = mark["path"], int(mark.get("size") or 0)
+    cost = event_watch.observe(ev, _VPU_PID, tick_wall)
+    v = event_watch.verdict(ev, tick_wall)
+    posted = "none"
+    if new_event:
+        reason = "event-start"
+    elif v != ev.get("postedVerdict") and v == ev.get("lastVerdict"):
+        reason = "event-update"
+    else:
+        reason = None
+    ev["lastVerdict"] = v
+    if reason and (ev.get("eventId") or not new_event):
+        entry = _event_entry(reason, ev, tick_wall, ended=False)
+        ok = checkin_lite.send(QUEUE_PATH, entry, user_agent=f"Pulse/{_app_version()}")
+        ev["postedVerdict"] = v
+        posted = f"{reason}{'' if ok else '(queued)'}"
+    elif reason == "event-start":
+        ev["startPending"] = True   # no event id yet; post once it shows up
+    if ev.pop("startPending", False) and ev.get("eventId") and posted == "none":
+        ok = checkin_lite.send(QUEUE_PATH, _event_entry("event-start", ev, tick_wall, False),
+                               user_agent=f"Pulse/{_app_version()}")
+        ev["postedVerdict"] = v
+        posted = f"event-start{'' if ok else '(queued)'}"
+    rec["event"] = ev
+    _save_json(EVENT_PATH, rec)
+    return f"event={v} read={cost['bytes'] // 1024}KB{' skipped' if cost['skipped'] else ''} posted={posted}"
+
+
+def _event_end(tick_wall: float) -> Optional[str]:
+    """VPU.exe has stopped: post the event's summary once, and forget it."""
+    rec = _load_json(EVENT_PATH)
+    ev = rec.get("event")
+    if not isinstance(ev, dict):
+        return None
+    event_watch.observe(ev, None, tick_wall)     # the close reason, the last lines
+    ok = checkin_lite.send(QUEUE_PATH, _event_entry("event-end", ev, tick_wall, ended=True),
+                           user_agent=f"Pulse/{_app_version()}")
+    rec["last"] = event_watch.summary(ev, tick_wall, ended=True)
+    rec.pop("event", None)
+    _save_json(EVENT_PATH, rec)
+    return f"event-end{'' if ok else '(queued)'}"
+
+
+def _mark_vpu_log() -> None:
+    """Between events: remember the VPU log's name and size (one directory
+    listing), so the next event is read from where VPU.exe starts writing."""
+    newest = event_watch._newest(event_watch.LOG_DIR, "VPU_", ".log")
+    if not newest:
+        return
+    rec = _load_json(EVENT_PATH)
+    if rec.get("event"):
+        return
+    rec["logMark"] = {"path": newest[0], "size": newest[1]}
+    _save_json(EVENT_PATH, rec)
 
 
 def _read_control() -> dict:
@@ -394,9 +514,24 @@ def main_entry(argv) -> int:
             raise
         _record_tick(started, "paused", event_live, images, state, f"posted={posted}")
         return 0
+    if event_live and not force and not dry_run:
+        try:
+            note = _event_tick(tick_wall)
+        except Exception as e:  # the reader must never break the tick
+            note = f"event read failed: {type(e).__name__}: {e}"
+        _record_tick(started, "event", event_live, images, state, note)
+        return 0
+    end_note = None
+    if images is not None and not event_live:
+        try:
+            end_note = _event_end(tick_wall)
+            if end_note is None:
+                _mark_vpu_log()
+        except Exception as e:
+            end_note = f"event end failed: {type(e).__name__}: {e}"
     plan = "full" if force else monitor.plan_tick(state, tick_wall, event_live)
     if not plan:
-        _record_tick(started, None, event_live, images, state, "ok")
+        _record_tick(started, None, event_live, images, state, end_note or "ok")
         return 0
     try:
         posted = asyncio.run(_pass(plan, dry_run, force, tick_wall, skip=control["skip"]))

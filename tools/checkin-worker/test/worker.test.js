@@ -584,3 +584,41 @@ test("the monitor's peak memory is stored, and a paused line is accepted", async
   const u = env.DB.raw.prepare("SELECT run_count, monitor_posts FROM units WHERE venue_id = 'V42'").get();
   assert.equal(u.run_count, 0);           // neither a launch nor a monitor report
 });
+
+test("an in-event post stores its event document, and the events view has one row per event", async () => {
+  const base = { venueId: "V42", vpuName: "Main Gym", pulseVersion: "1.5.0" };
+  const ev = (state, extra = {}) => ({ schema: "pulse.event/v1", eventId: "6ad018b2ec5d0313d04118a6",
+                                       state, wentOnAir: state === "on-air", fails: 0, ...extra });
+  await post({ checkins: [
+    { ...base, checkinId: "eeeeeeee-0000-0000-0000-000000000001", sentAt: "2026-10-14T20:10:00Z",
+      reason: "event-start", event: ev("connecting") },
+    { ...base, checkinId: "eeeeeeee-0000-0000-0000-000000000002", sentAt: "2026-10-14T20:20:00Z",
+      reason: "event-update", event: ev("on-air") },
+    { ...base, checkinId: "eeeeeeee-0000-0000-0000-000000000003", sentAt: "2026-10-14T22:15:00Z",
+      reason: "event-end", event: ev("ended", { wentOnAir: true, onAirSeconds: 7200 }) },
+  ] });
+  const rows = env.DB.raw.prepare("SELECT * FROM events").all();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].state, "ended");
+  assert.equal(rows[0].went_on_air, 1);
+  assert.equal(rows[0].on_air_seconds, 7200);
+  assert.equal(rows[0].started_at, "2026-10-14T20:10:00.000Z");
+  const u = env.DB.raw.prepare("SELECT run_count, monitor_posts FROM units WHERE venue_id = 'V42'").get();
+  assert.equal(u.run_count, 0);       // event posts are neither launches nor reports
+});
+
+test("an event document with a bad schema, id or size is dropped, the check-in kept", async () => {
+  await post({ checkins: [
+    { checkinId: "eeeeeeee-0000-0000-0000-000000000011", reason: "event-start", venueId: "V1",
+      event: { schema: "nope", eventId: "6ad018b2ec5d0313d04118a6" } },
+    { checkinId: "eeeeeeee-0000-0000-0000-000000000012", reason: "event-start", venueId: "V1",
+      event: { schema: "pulse.event/v1", eventId: "../../etc", state: "on-air" } },
+    { checkinId: "eeeeeeee-0000-0000-0000-000000000013", reason: "event-start", venueId: "V1",
+      event: { schema: "pulse.event/v1", eventId: "6ad018b2ec5d0313d04118a6", pad: "x".repeat(5000) } },
+  ] });
+  const rows = env.DB.raw.prepare("SELECT event_id, event FROM checkins ORDER BY checkin_id").all();
+  assert.equal(rows.length, 3);
+  assert.equal(rows[0].event, null);
+  assert.equal(rows[1].event_id, null);
+  assert.equal(rows[2].event, null);
+});
