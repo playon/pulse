@@ -337,6 +337,11 @@ async def _on_startup():
         asyncio.create_task(_refresh_launcher_copies(time.time()))
     except Exception:
         pass
+    # An opted-in unit's monitor follows this build (dev channel only).
+    try:
+        asyncio.create_task(_refresh_fleet_monitor())
+    except Exception:
+        pass
 
     # Fire-and-forget run-tracking check-in (queued on disk, never in demo/dev).
     # Scheduled so it can't delay startup.
@@ -5913,6 +5918,71 @@ async def api_save_settings(request: Request):
     body = await request.json()
     save_settings(body)
     return {"ok": True}
+
+
+# ── Fleet monitor opt-in (Settings card) ─────────────────────
+# One click opts this unit in to the fleet monitor, which then reports to
+# Pulse Vitals. The monitor runs from its own copy of Pulse, so a production
+# launch over C:\Pulse doesn't break it. Dev channel only for now. See
+# fleet_enroll.py.
+import fleet_enroll as _fleet_enroll  # noqa: E402
+
+_DEMO_FLEET = {"state": "off"}
+
+
+def _fleet_demo_status():
+    now = time.time()
+    st = {"available": True, "channel": "dev", "admin": True, "root": _fleet_enroll.MONITOR_ROOT,
+          "vitalsUrl": _fleet_enroll.VITALS_URL, "sourceHasMonitor": True, "state": _DEMO_FLEET["state"]}
+    if st["state"] == "on":
+        st.update({"version": "1.5.0-dev", "copiedAt": now - 3600, "current": True,
+                   "lastTickAt": now - 140, "lastTickOutcome": "ok", "lastPostAt": now - 1900,
+                   "lastPostKind": "heartbeat", "verdict": "PASS", "control": "on",
+                   "unitUrl": _fleet_enroll.VITALS_URL + "#/unit/demo"})
+    return st
+
+
+@app.get("/api/fleet-monitor")
+async def api_fleet_monitor_status():
+    if DEMO_MODE:
+        return _fleet_demo_status()
+    return await asyncio.to_thread(_fleet_enroll.status, _web_root, _update_channel())
+
+
+@app.post("/api/fleet-monitor/enroll")
+async def api_fleet_monitor_enroll():
+    if DEMO_MODE:
+        await asyncio.sleep(1.5)
+        _DEMO_FLEET["state"] = "on"
+        return {"ok": True, "steps": ["Demo mode: nothing was installed."]}
+    res = await asyncio.to_thread(_fleet_enroll.enroll, _web_root, _update_channel())
+    _server_log.info("Fleet monitor opt-in: %s", "ok" if res.get("ok") else res.get("error"))
+    return res
+
+
+@app.post("/api/fleet-monitor/unenroll")
+async def api_fleet_monitor_unenroll():
+    if DEMO_MODE:
+        await asyncio.sleep(1.0)
+        _DEMO_FLEET["state"] = "off"
+        return {"ok": True, "steps": ["Demo mode: nothing was removed."]}
+    res = await asyncio.to_thread(_fleet_enroll.unenroll)
+    _server_log.info("Fleet monitor opt-out: %s", "ok" if res.get("ok") else res.get("error"))
+    return res
+
+
+async def _refresh_fleet_monitor():
+    """At a dev launch on an opted-in unit, copy this build over the
+    monitor's if it differs. Waits a minute so it never slows the launch."""
+    if DEMO_MODE:
+        return
+    await asyncio.sleep(60)
+    try:
+        res = await asyncio.to_thread(_fleet_enroll.refresh, _web_root, _update_channel())
+    except Exception as e:
+        res = {"ok": False, "error": str(e)}
+    if res is not None:
+        _server_log.info("Fleet monitor refresh: %s", "ok" if res.get("ok") else res.get("error"))
 
 
 # ── Self-update ──────────────────────────────────────────────
