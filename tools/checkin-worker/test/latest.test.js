@@ -61,10 +61,11 @@ function stream(seed, n) {
     } else if (kind === "paused") {
       c = { ...base, reason: "paused", pulseVersion: "1.5.0" };
     } else {
+      const eventId = pick(["6ad018b2ec5d0313d04118a6", "aaaaaaaabbbbbbbbccccdddd", "DAILYTEST20261014"]);
       const state = kind === "ev-end" ? "ended" : pick(["on-air", "connecting", "stream-failing", "camera-degraded"]);
       c = { ...base, reason: kind === "ev-start" ? "event-start" : kind === "ev-update" ? "event-update" : "event-end",
             pulseVersion: "1.5.0",
-            event: { schema: "pulse.event/v1", eventId: pick(["6ad018b2ec5d0313d04118a6", "aaaaaaaabbbbbbbbccccdddd"]),
+            event: { schema: "pulse.event/v1", eventId, kind: eventId.startsWith("DAILYTEST") ? "daily-test" : "event",
                      state, wentOnAir: r() > 0.4, eventName: `gam${i} Football`, path: "zixi-2088",
                      reason: state === "ended" ? pick([null, "stream-failing"]) : null,
                      warnings: r() > 0.5 ? ["off-air-gaps"] : [] } };
@@ -115,6 +116,7 @@ function compare(label) {
     assert.equal(l.ev_why, e.why_not_on_air);
     assert.equal(l.ev_name, e.event_name);
     assert.equal(l.ev_warnings, e.warnings);
+    assert.equal(l.ev_type, e.kind === "daily-test" ? "daily-test" : "event", `${label}: ${e.unit_key} event type`);
   }
 }
 
@@ -149,6 +151,19 @@ test("a failed unit_latest update never fails the check-in", async () => {
   const body = await res.json();
   assert.equal(body.ok, true);
   assert.ok(body.results.every((r) => r.status === "inserted" || r.status === "duplicate"));
+});
+
+test("migration 0016 backfills ev_type from the event each row points at", async () => {
+  const all = stream(11, 120);
+  for (let i = 0; i < all.length; i += 7) await post(all.slice(i, i + 7));
+  const db = env.DB.raw;
+  const want = db.prepare("SELECT unit_key, ev_type FROM unit_latest WHERE ev_row IS NOT NULL ORDER BY unit_key").all();
+  assert.ok(want.length > 0, "the stream has events");
+  db.exec("UPDATE unit_latest SET ev_type = NULL");
+  const sql = readFileSync(new URL("../migrations/0016_unit_latest_event_type.sql", import.meta.url), "utf8");
+  db.exec(sql.slice(sql.indexOf("UPDATE unit_latest")));
+  assert.deepEqual(db.prepare("SELECT unit_key, ev_type FROM unit_latest WHERE ev_row IS NOT NULL ORDER BY unit_key").all(), want);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM unit_latest WHERE ev_row IS NULL AND ev_type IS NOT NULL").get().n, 0);
 });
 
 test("migration 0015 is exactly its generator's output", () => {
