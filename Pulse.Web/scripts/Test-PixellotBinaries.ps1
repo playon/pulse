@@ -128,11 +128,44 @@ try {
     if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
         $sys32 = Join-Path $winDir 'Sysnative'
     }
+    # The loader uses the PATH of the account that starts the exe, and
+    # Pixellot's installer puts C:\Pixellot\dependencies on the Pixellot
+    # account's own user PATH, not the machine PATH. The fleet monitor runs
+    # this script as SYSTEM, whose user PATH lacks it, so every opencv and
+    # cpprest DLL read missing and a working unit read FAIL (6493,
+    # 2026-10-15). So add the user PATH of each account that runs a Pixellot
+    # exe; with none running, that of every signed-in user (their registry
+    # hives are the ones loaded under HKEY_USERS).
+    $pixSids = New-Object 'System.Collections.Generic.List[string]'
+    try {
+        $procs = @(Get-CimInstance Win32_Process -ErrorAction Stop -Filter (
+            "Name='VPU.exe' OR Name='Agent.exe' OR Name='Coordinator.exe' OR Name='KeepAgentUp.exe'"))
+        foreach ($proc in $procs) {
+            $own = Invoke-CimMethod -InputObject $proc -MethodName GetOwnerSid -ErrorAction SilentlyContinue
+            if ($own -and $own.Sid -and -not $pixSids.Contains($own.Sid)) { $pixSids.Add($own.Sid) }
+        }
+    } catch { }
+    if ($pixSids.Count -eq 0) {
+        try {
+            foreach ($hive in @(Get-ChildItem -LiteralPath 'Registry::HKEY_USERS' -ErrorAction Stop)) {
+                $sid = $hive.PSChildName
+                if ($sid -match '^S-1-5-21-[0-9-]+$' -and -not $pixSids.Contains($sid)) { $pixSids.Add($sid) }
+            }
+        } catch { }
+    }
+    $accountPaths = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($sid in $pixSids) {
+        try {
+            $v = (Get-ItemProperty -LiteralPath ('Registry::HKEY_USERS\' + $sid + '\Environment') -Name 'Path' -ErrorAction Stop).Path
+            if ($v) { $accountPaths.Add($v) }
+        } catch { }
+    }
+
     $pathDirs = New-Object 'System.Collections.Generic.List[string]'
-    foreach ($p in @(
+    foreach ($p in (@(
             [Environment]::GetEnvironmentVariable('Path', 'Machine'),
             [Environment]::GetEnvironmentVariable('Path', 'User'),
-            $env:Path)) {
+            $env:Path) + $accountPaths.ToArray())) {
         if (-not $p) { continue }
         foreach ($d in ($p -split ';')) {
             $d = [Environment]::ExpandEnvironmentVariables($d.Trim().Trim('"'))
