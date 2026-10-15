@@ -24,6 +24,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 ## [Unreleased]
 
 ### Added
+- Dashboard: Pulse now catches a VPU whose Pixellot video program (VPU.exe) can't start because one of its files is missing, such as the "libcef.dll was not found" error. Stream Readiness reads FAIL and names the missing file, how many times Windows showed the error this week, and to escalate to Pixellot support. Before, these units read PASS, because the stuck program still showed as running.
 - ScoreConnect tab: a **Reinstall ScoreConnect III** button. It stops the service, deletes the whole Sportzcast LLC program folder, and installs a fresh copy, with progress shown in Pulse. Saved settings and logs are kept. Use it when ScoreConnect III won't start or keeps failing.
 - Settings (dev channel only): a **Fleet Monitoring** card. **Opt in this unit** installs the fleet monitor, which checks every 5 minutes whether the VPU is ready to stream and reports to Pulse Vitals. The card shows when it last checked and reported, and **Opt out** removes it. A production launch on the same VPU doesn't affect it.
 

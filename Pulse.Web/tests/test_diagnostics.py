@@ -1489,6 +1489,80 @@ class TestScoreboardSource(unittest.TestCase):
         self.assertFalse(r["ocrKnown"])
 
 
+# ── Pixellot programs that can't start (Test-PixellotBinaries) ───────
+# Bear Grass NC, 2026-10-15, web-v1.4.1: libcef.dll gone from Bin, VPU.exe on
+# the loader dialog for a week (66 Application Popup 26 events), and Stream
+# Readiness said PASS because the stuck 2.8 MB VPU.exe read Running.
+class TestPixellotBinaries(unittest.TestCase):
+    NOW = "2026-10-15T11:45:00-04:00"
+    LIBCEF = ("The code execution cannot proceed because libcef.dll was not found. "
+              "Reinstalling the program may fix this problem.")
+
+    def _bin(self, missing=(), popups=(), stuck=False):
+        return {
+            "now": self.NOW,
+            "exes": [
+                {"name": "VPU.exe", "present": True, "readable": True, "scanned": 51,
+                 "missing": [{"dll": d, "neededBy": "VPU.exe"} for d in missing]},
+                {"name": "Agent.exe", "present": True, "readable": True, "scanned": 1, "missing": []},
+            ],
+            "popupDays": 7, "popupsRead": True, "popups": list(popups),
+            "vpuProcesses": [{"pid": 11744, "created": "2026-10-15T11:40:47-04:00",
+                              "workingSetMB": 2.8, "stuckOnLoaderError": stuck}],
+            "binHasLibcef": not missing, "cefPackages": ["cef-78.3.9"],
+        }
+
+    def _popup(self, last, count=66, first="2026-10-08T17:42:05-04:00"):
+        return {"exe": "VPU.exe", "title": "System Error", "text": self.LIBCEF,
+                "dll": "libcef.dll", "count": count, "first": first, "last": last}
+
+    def _dash(self, binaries):
+        return main._build_dashboard({}, {}, {"services": []}, {}, binaries=binaries)
+
+    def test_bear_grass_fails_readiness(self):
+        b = self._bin(missing=["libcef.dll"], stuck=True,
+                      popups=[self._popup("2026-10-15T11:40:47-04:00")])
+        dash = self._dash(b)
+        self.assertEqual(dash["readiness"]["status"], "FAIL")
+        f = [x for x in dash["findings"] if x["code"] == "pixellot-dll-missing"]
+        self.assertEqual(len(f), 1)
+        self.assertIn("libcef.dll", f[0]["title"])
+        self.assertIn("Pixellot support", f[0]["recommendation"])
+        text = _finding_text(f[0])
+        self.assertIn("66 times", text)
+        self.assertIn("Oct 8, 5:42 PM", text)
+        self.assertIn("stuck on that error box", text)
+        self.assertIn("cef-78.3.9", text)
+
+    def test_healthy_unit_says_nothing(self):
+        self.assertEqual(main._binary_findings(self._bin()), [])
+
+    def test_collector_error_is_reported_not_passed(self):
+        dash = self._dash({"error": True, "message": "timed out"})
+        self.assertIn("Pixellot program files", dash["sourceErrors"])
+        self.assertFalse([f for f in dash["findings"] if f["code"].startswith("pixellot-")])
+
+    def test_popup_without_missing_file(self):
+        # Something the import scan can't see (a wrong DLL version, a bad
+        # image): the popup alone still gates, by age.
+        live = main._binary_findings(self._bin(popups=[self._popup("2026-10-15T11:00:00-04:00")]))
+        self.assertEqual([f["code"] for f in live], ["pixellot-start-error"])
+        self.assertEqual(main._readiness_class("pixellot-start-error"), "blocker")
+        stuck = main._binary_findings(self._bin(stuck=True, popups=[self._popup("2026-10-14T20:00:00-04:00")]))
+        self.assertEqual([f["code"] for f in stuck], ["pixellot-start-error"])
+        recent = main._binary_findings(self._bin(popups=[self._popup("2026-10-14T20:00:00-04:00")]))
+        self.assertEqual([f["code"] for f in recent], ["pixellot-start-error-recent"])
+        self.assertEqual(main._readiness_class("pixellot-start-error-recent"), "risk")
+        past = main._binary_findings(self._bin(popups=[self._popup("2026-10-11T03:30:00-04:00", count=1)]))
+        self.assertEqual([f["code"] for f in past], ["pixellot-start-error-past"])
+        self.assertIn("1 time,", past[0]["recommendation"])
+
+    def test_several_missing_dlls(self):
+        f = main._binary_findings(self._bin(missing=["libcef.dll", "chrome_elf.dll", "a.dll", "b.dll"]))
+        self.assertIn("libcef.dll, chrome_elf.dll, a.dll, and 1 more are missing", f[0]["title"])
+        self.assertEqual(len(f[0]["details"]), 4)
+
+
 # Finding codes emitted with severity "critical" by _compute_findings. Kept
 # explicit rather than scraped so adding a critical is a deliberate two-line
 # change: emit it, then classify it.
@@ -1512,6 +1586,8 @@ _CRITICAL_FINDING_CODES = {
     "tz-non-us",
     "uplink-on-camera-port",
     "graphics-handoff-failed",
+    "pixellot-dll-missing",
+    "pixellot-start-error",
     # port-dns-blocked / port-required-blocked share one emit site.
     "port-dns-blocked",
     "port-required-blocked",
