@@ -70,6 +70,12 @@ function stream(seed, n) {
                      reason: state === "ended" ? pick([null, "stream-failing"]) : null,
                      warnings: r() > 0.5 ? ["off-air-gaps"] : [] } };
     }
+    // The fleet agent's posts carry its version, now and then with an update outcome (PV-49).
+    if (kind !== "launch" && r() < 0.8) c.agentVersion = pick(["0.1.0", "0.2.0", "0.3.0"]);
+    if (kind !== "launch" && r() < 0.2) {
+      c.agentUpdate = { status: pick(["applied", "failed", "rolled-back"]), version: pick(["0.2.0", "0.3.0"]),
+                        error: r() < 0.5 ? `e-${i}` : undefined };
+    }
     out.push(c);
     if (r() < 0.1) out.push({ ...c });              // a replay of the same id: a duplicate
   }
@@ -104,10 +110,18 @@ function compare(label) {
     for (const [view, col] of Object.entries(STATUS_MAP)) assert.deepEqual(l[col], s[view], `${label}: ${s.k}.${view}`);
   }
   // The newest event post per unit, as Vitals ranks the events view.
-  const ev = db.prepare(`SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY unit_key ORDER BY updated_at DESC) rn
-                         FROM events) WHERE rn = 1`).all();
-  for (const e of ev) {
-    const l = latest.get(e.unit_key);
+  // Two events can share the newest minute (the streams collide times on
+  // purpose). unit_latest breaks that tie by check-in id, which the view
+  // doesn't expose, so any event at the newest time is a valid pick: check
+  // unit_latest chose one of them, then compare it field by field.
+  const top = db.prepare(`SELECT * FROM (SELECT *, RANK() OVER (PARTITION BY unit_key ORDER BY updated_at DESC) rk
+                          FROM events) WHERE rk = 1`).all();
+  const tied = new Map();
+  for (const e of top) tied.set(e.unit_key, [...(tied.get(e.unit_key) || []), e]);
+  for (const [unitKey, events] of tied) {
+    const l = latest.get(unitKey);
+    const e = events.find((x) => x.event_id === l.ev_id);
+    assert.ok(e, `${label}: ${unitKey} event id ${l.ev_id} is one of the newest (${events.map((x) => x.event_id)})`);
     assert.equal(l.ev_at, e.updated_at, `${label}: ${e.unit_key} event time`);
     assert.equal(l.ev_id, e.event_id, `${label}: ${e.unit_key} event id`);
     assert.equal(l.ev_state, e.state, `${label}: ${e.unit_key} event state`);
@@ -118,6 +132,21 @@ function compare(label) {
     assert.equal(l.ev_warnings, e.warnings);
     assert.equal(l.ev_type, e.kind === "daily-test" ? "daily-test" : "event", `${label}: ${e.unit_key} event type`);
   }
+  // No view carries the agent groups: check them against the newest check-in
+  // that has them, by (sent time, id), straight from checkins.
+  const newest = (cond, cols) => db.prepare(`SELECT ${key} AS k, ${cols} FROM (
+      SELECT *, ROW_NUMBER() OVER (PARTITION BY ${key} ORDER BY COALESCE(sent_at, received_at) DESC, id DESC) rn
+      FROM checkins WHERE ${cond}) WHERE rn = 1`).all();
+  const agents = newest("agent_version IS NOT NULL", "agent_version");
+  assert.ok(agents.length > 0, `${label}: the stream has agent posts`);
+  for (const a of agents) assert.equal(latest.get(a.k).agent_version, a.agent_version, `${label}: ${a.k} agent version`);
+  for (const u of newest("agent_update_status IS NOT NULL", "agent_update_status, agent_update_version, agent_update_error")) {
+    const l = latest.get(u.k);
+    assert.deepEqual([l.agent_update_status, l.agent_update_version, l.agent_update_error],
+                     [u.agent_update_status, u.agent_update_version, u.agent_update_error], `${label}: ${u.k} agent update`);
+  }
+  const withAgent = db.prepare("SELECT COUNT(*) n FROM unit_latest WHERE agent_version IS NOT NULL").get().n;
+  assert.equal(withAgent, agents.length, `${label}: agent_version only where an agent posted`);
 }
 
 for (const seed of [1, 2, 3, 4, 5, 6, 7, 8]) {

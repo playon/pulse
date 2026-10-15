@@ -27,6 +27,12 @@ const STATUSES = new Set(["PASS", "WARN", "FAIL"]);
 const PATHS = new Set(["zixi-2088", "zixi-443", "rtmp-1935", "blocked"]);
 const TELEMETRY_SCHEMA = "pulse.telemetry/v1";
 const MAX_TELEMETRY_BYTES = 16 * 1024;
+// The fleet agent's update outcome (agentUpdate.status), PV-49.
+const UPDATE_STATUSES = new Set(["applied", "failed", "rolled-back"]);
+// A pinned agent target. The agent builds a URL from the version and checks
+// the zip against the hash, so both must be exactly this shape.
+const TARGET_VERSION_RE = /^\d{1,4}\.\d{1,4}\.\d{1,6}$/;
+const SHA256_RE = /^[0-9a-f]{64}$/;
 
 const INSERT_SQL = `
 INSERT INTO checkins (
@@ -44,12 +50,14 @@ INSERT INTO checkins (
   tel_unexpected_7d, tel_reboot_pending, tel_poe_draw_w, tel_clock_offset_s,
   tel_mac, tel_camera_macs, tel_internet_reachable,
   monitor_cpu_seconds, monitor_cpu_percent, monitor_processes, monitor_memory_peak_mb,
-  event_id, event_state, event_reason, event_on_air, event
+  event_id, event_state, event_reason, event_on_air, event,
+  agent_version, agent_update_status, agent_update_version, agent_update_error
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-          ?, ?, ?, ?, ?)
+          ?, ?, ?, ?, ?,
+          ?, ?, ?, ?)
 ON CONFLICT (checkin_id) DO NOTHING`;
 
 export async function handleIngest(request, env) {
@@ -124,6 +132,7 @@ export async function handleIngest(request, env) {
         row.tel.clockOffsetS, row.tel.mac, row.tel.cameraMacs, row.tel.internetReachable,
         row.monitorCpuSeconds, row.monitorCpuPercent, row.monitorProcesses, row.monitorMemoryPeakMb,
         row.ev.id, row.ev.state, row.ev.reason, row.ev.onAir, row.ev.json,
+        row.agentVersion, row.upd.status, row.upd.version, row.upd.error,
       ),
     );
   }
@@ -155,10 +164,17 @@ export async function handleIngest(request, env) {
 // one collector, on a unit or the whole fleet. A unit's own row decides its
 // mode; skip lists add up. Any failure leaves control out of the reply, and
 // Pulse then keeps the last instruction it had.
+//
+// It also carries the agent build a unit should run (PV-49), as agent:
+// { version, sha256 }. A unit's own row wins when it sets a version (a canary,
+// or a unit held back); otherwise the fleet row's applies. The pair comes from
+// one row, and a malformed one means no target at all rather than the fleet's,
+// so a unit that was held back is never moved by a typo. No target: the agent
+// stays on what it runs.
 async function controlFor(env, unit) {
   try {
     const { results } = await env.DB.prepare(
-      "SELECT scope, mode, skip FROM monitor_control WHERE scope = 'fleet' OR scope = ?",
+      "SELECT scope, mode, skip, agent_version, agent_sha256 FROM monitor_control WHERE scope = 'fleet' OR scope = ?",
     ).bind(unit || "").all();
     if (!results || !results.length) return { mode: "on", skip: [] };
     const fleet = results.find((r) => r.scope === "fleet");
@@ -173,7 +189,12 @@ async function controlFor(env, unit) {
         // a malformed skip list in one row never blocks the reply
       }
     }
-    return { mode, skip: [...skip].slice(0, 50) };
+    const control = { mode, skip: [...skip].slice(0, 50) };
+    const pin = [own, fleet].find((r) => r && r.agent_version !== null && r.agent_version !== undefined);
+    if (pin && TARGET_VERSION_RE.test(pin.agent_version) && SHA256_RE.test(pin.agent_sha256 || "")) {
+      control.agent = { version: pin.agent_version, sha256: pin.agent_sha256 };
+    }
+    return control;
   } catch (e) {
     console.error("control lookup failed", e && e.message);
     return null;
@@ -221,6 +242,8 @@ function normalize(item, receivedAt) {
     eventLive: mon && typeof mon.eventLive === "boolean" ? (mon.eventLive ? 1 : 0) : null,
     tel: telemetry(item.telemetry),
     ev: eventDoc(item.event),
+    agentVersion: str(item.agentVersion, 64),
+    upd: agentUpdate(item.agentUpdate),
   };
   clean.raw = JSON.stringify({
     checkinId: clean.checkinId,
@@ -231,6 +254,7 @@ function normalize(item, receivedAt) {
     vpuName: clean.vpuName,
     model: clean.model,
     pulseVersion: clean.pulseVersion,
+    agentVersion: clean.agentVersion,
     channel: clean.channel,
     readiness: {
       status: clean.readinessStatus,
@@ -258,8 +282,21 @@ function normalize(item, receivedAt) {
       memoryPeakMb: clean.monitorMemoryPeakMb,
       eventLive: clean.eventLive === null ? null : clean.eventLive === 1,
     },
+    agentUpdate: clean.upd.status ? { status: clean.upd.status, version: clean.upd.version,
+                                      error: clean.upd.error } : undefined,
   });
   return clean;
+}
+
+const NO_UPDATE = { status: null, version: null, error: null };
+
+// How the agent's last update attempt went: { status, version, error }.
+// Kept only with a known status; version is the build it tried to move to.
+function agentUpdate(u) {
+  if (!u || typeof u !== "object" || Array.isArray(u)) return NO_UPDATE;
+  const status = str(u.status);
+  if (!UPDATE_STATUSES.has(status)) return NO_UPDATE;
+  return { status, version: str(u.version, 64), error: str(u.error, 256) };
 }
 
 function str(v, max = MAX_FIELD) {
