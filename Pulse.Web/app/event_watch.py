@@ -239,6 +239,23 @@ def read_bench(path: str, header: Optional[list], since: float):
     return header, (summ if rows else None)
 
 
+def _folder_mtime(path: str, own: float) -> float:
+    """The newest write in an event folder: VPU.exe keeps writing the
+    recordings inside it for the whole event, while the folder's own time
+    stays at its creation. One listing of its top level, no file opened."""
+    newest = own
+    try:
+        with os.scandir(path) as it:
+            for e in it:
+                try:
+                    newest = max(newest, e.stat().st_mtime)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return newest
+
+
 def newest_event_id(events_dir: str = EVENTS_DIR, since: Optional[float] = None) -> Optional[str]:
     """The newest event folder's id, only if it was written after `since`
     (minus a margin): an older folder belongs to an earlier event."""
@@ -248,7 +265,7 @@ def newest_event_id(events_dir: str = EVENTS_DIR, since: Optional[float] = None)
             for e in it:
                 m = _EVENT_DIR_RE.match(e.name)
                 if m and e.is_dir():
-                    mt = e.stat().st_mtime
+                    mt = _folder_mtime(e.path, e.stat().st_mtime)
                     if since is not None and mt < since - 900:
                         continue
                     if best is None or mt > best[1]:

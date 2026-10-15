@@ -225,3 +225,19 @@ class MidEventTest(RealLinesTest):
         self.assertEqual(event_watch.verdict(ev, T0 + 3000), "on-air")
         ev = self.run_on(self.REAL.splitlines(True)[0], ev)   # then VPU.exe restarts
         self.assertEqual(ev["restarts"], 1)
+
+
+class EventFolderTest(unittest.TestCase):
+    def test_an_old_folder_still_being_written_is_the_live_event(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = os.path.join(d, "2026-10-13_p_aaaaaaaaaaaaaaaaaaaaaaaa")
+            live = os.path.join(d, "2026-10-14_p_6ad018b2ec5d0313d04118a6")
+            os.makedirs(old); os.makedirs(live)
+            hour_ago = time.time() - 3600
+            os.utime(old, (hour_ago - 86400,) * 2)
+            with open(os.path.join(live, "x_hd.mkv"), "w") as fh:
+                fh.write("frames")                      # written just now
+            os.utime(live, (hour_ago,) * 2)             # the folder itself is an hour old
+            self.assertEqual(event_watch.newest_event_id(d, since=time.time()), "6ad018b2ec5d0313d04118a6")
+            os.utime(os.path.join(live, "x_hd.mkv"), (hour_ago,) * 2)
+            self.assertIsNone(event_watch.newest_event_id(d, since=time.time()))   # nothing live
