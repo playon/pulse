@@ -510,3 +510,52 @@ class TestEventKeepAlive(unittest.TestCase):
         for k in range(13, 24):
             self.mo._event_tick(t + 300 * k)
         self.assertEqual(self.sent, ["event-start", "event-update"])
+
+
+class TestSetupRunPosts(unittest.TestCase):
+    """Head setup (VPU.exe with no event) posts setup-start, hourly
+    setup-update and setup-end, with no event id (PV-48)."""
+
+    def setUp(self):
+        import monitor_once
+        self.mo = monitor_once
+        self.tmp = tempfile.TemporaryDirectory()
+        self.saved = (monitor_once.EVENT_PATH, monitor_once.QUEUE_PATH, monitor_once.POSTS_PATH,
+                      monitor_once.event_watch.observe)
+        monitor_once.EVENT_PATH = os.path.join(self.tmp.name, "event.json")
+        monitor_once.QUEUE_PATH = os.path.join(self.tmp.name, "queue.json")
+        monitor_once.POSTS_PATH = os.path.join(self.tmp.name, "posts.json")
+        self.observe = lambda ev: ev.update(setup=True, eventId=None)
+        monitor_once.event_watch.observe = lambda ev, pid, now, **kw: self.observe(ev) or {"bytes": 0, "skipped": False}
+        self.sent = []
+        self.saved_send = monitor_once.checkin_lite.send
+        monitor_once.checkin_lite.send = lambda q, e, user_agent="": self.sent.append(e) or True
+
+    def tearDown(self):
+        (self.mo.EVENT_PATH, self.mo.QUEUE_PATH, self.mo.POSTS_PATH, self.mo.event_watch.observe) = self.saved
+        self.mo.checkin_lite.send = self.saved_send
+        self.tmp.cleanup()
+
+    def test_start_hourly_and_end_without_an_event_id(self):
+        t = 1_000_000.0
+        for k in range(12):
+            self.mo._event_tick(t + 300 * k)
+        self.mo._event_tick(t + 3600)
+        self.assertEqual([e["reason"] for e in self.sent], ["setup-start", "setup-update"])
+        self.assertEqual(self.sent[0]["event"]["kind"], "setup")
+        self.assertEqual(self.sent[0]["event"]["state"], "setup")
+        self.assertIsNone(self.sent[0]["event"]["eventId"])
+        self.assertEqual(self.mo._event_end(t + 3900), "pending")
+        self.assertEqual(self.mo._event_end(t + 4200), "setup-end")
+        self.assertEqual(self.sent[-1]["event"]["state"], "ended")
+
+    def test_switching_to_an_event_ends_the_setup_run_first(self):
+        t = 1_000_000.0
+        self.mo._event_tick(t)
+        import event_watch
+        ended = event_watch.summary({"setup": True, "startedAt": t}, t + 600, ended=True)
+        self.observe = lambda ev: ev.update(setup=False, eventId="6ad018b2ec5d0313d04118a6", endedRun=ended)
+        self.mo._event_tick(t + 600)
+        self.assertEqual([e["reason"] for e in self.sent], ["setup-start", "setup-end", "event-start"])
+        self.assertEqual(self.sent[1]["event"]["kind"], "setup")
+        self.assertEqual(self.sent[2]["event"]["eventId"], "6ad018b2ec5d0313d04118a6")

@@ -270,7 +270,14 @@ def _app_version() -> str:
         return ""
 
 
-def _event_entry(reason: str, ev: dict, tick_wall: float, ended: bool) -> dict:
+def _run_kind(ev: dict) -> str:
+    """The reason prefix for a VPU.exe run: "setup" for head setup (no event,
+    no stream; Vitals shows it as Maintenance, PV-48), else "event"."""
+    return "setup" if ev.get("setup") else "event"
+
+
+def _event_entry(reason: str, ev: dict, tick_wall: float, ended: bool,
+                 doc: Optional[dict] = None) -> dict:
     import uuid
     posts = monitor.load_posts(POSTS_PATH)
     ident = posts.get("identity") or {}
@@ -278,13 +285,17 @@ def _event_entry(reason: str, ev: dict, tick_wall: float, ended: bool) -> dict:
             "sentAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(tick_wall)),
             "reason": reason, "venueId": ident.get("venueId"), "vpuName": ident.get("vpuName"),
             "pulseVersion": _app_version(),
-            "event": event_watch.summary(ev, tick_wall, ended)}
+            "event": doc or event_watch.summary(ev, tick_wall, ended)}
 
 
 def _event_tick(tick_wall: float) -> str:
     """One tick while VPU.exe runs: read what Pixellot wrote since the last
     tick (event_watch, files only), and post only at the event's start, when
-    a new verdict holds for two reads in a row, or never otherwise."""
+    a new verdict holds for two reads in a row, or never otherwise.
+
+    A head-setup run posts the same way as "setup-start" / "setup-update"
+    (it needs no event id, and its verdict never changes, so it posts at
+    its start and then hourly)."""
     rec = _load_json(EVENT_PATH)
     ev = rec.get("event")
     if isinstance(ev, dict):
@@ -300,26 +311,36 @@ def _event_tick(tick_wall: float) -> str:
     cost = event_watch.observe(ev, _VPU_PID, tick_wall, images=_IMAGES)
     v = event_watch.verdict(ev, tick_wall)
     posted = "none"
+    ended = ev.pop("endedRun", None)
+    if ended:
+        # VPU.exe went straight from head setup to an event, or back: end the
+        # old run, and this one starts now.
+        old = "setup" if ended.get("kind") == "setup" else "event"
+        ok = checkin_lite.send(QUEUE_PATH, _event_entry(f"{old}-end", ev, tick_wall, True, doc=ended),
+                               user_agent=f"Pulse/{_app_version()}")
+        posted = f"{old}-end{'' if ok else '(queued)'}, "
+        new_event = True
+    kind = _run_kind(ev)
     if new_event:
-        reason = "event-start"
+        reason = f"{kind}-start"
     elif v != ev.get("postedVerdict") and v == ev.get("lastVerdict"):
-        reason = "event-update"
+        reason = f"{kind}-update"
     elif tick_wall - (ev.get("lastPostAt") or tick_wall) >= monitor.HEARTBEAT_SECONDS - monitor.TICK_SLACK_SECONDS:
         # Hourly while nothing changes: Vitals reads a unit not heard from in
         # 70 minutes as Silent, and a steady game lasts longer than that.
-        reason = "event-update"
+        reason = f"{kind}-update"
     else:
         reason = None
     ev["lastVerdict"] = v
-    if reason and (ev.get("eventId") or not new_event):
+    if reason and (ev.get("eventId") or ev.get("setup") or not new_event):
         entry = _event_entry(reason, ev, tick_wall, ended=False)
         ok = checkin_lite.send(QUEUE_PATH, entry, user_agent=f"Pulse/{_app_version()}")
         ev["postedVerdict"] = v
         ev["lastPostAt"] = tick_wall
-        posted = f"{reason}{'' if ok else '(queued)'}"
+        posted = f"{'' if posted == 'none' else posted}{reason}{'' if ok else '(queued)'}"
     elif reason == "event-start":
         ev["startPending"] = True   # no event id yet; post once it shows up
-    if ev.pop("startPending", False) and ev.get("eventId") and posted == "none":
+    if ev.pop("startPending", False) and ev.get("eventId") and "start" not in posted:
         ok = checkin_lite.send(QUEUE_PATH, _event_entry("event-start", ev, tick_wall, False),
                                user_agent=f"Pulse/{_app_version()}")
         ev["postedVerdict"] = v
@@ -347,12 +368,14 @@ def _event_end(tick_wall: float) -> Optional[str]:
         _save_json(EVENT_PATH, rec)
         return "pending"
     event_watch.observe(ev, None, tick_wall)     # the close reason, the last lines
-    ok = checkin_lite.send(QUEUE_PATH, _event_entry("event-end", ev, tick_wall, ended=True),
+    ev.pop("endedRun", None)     # a switch in the last lines: the newest run's end covers it
+    reason = f"{_run_kind(ev)}-end"
+    ok = checkin_lite.send(QUEUE_PATH, _event_entry(reason, ev, tick_wall, ended=True),
                            user_agent=f"Pulse/{_app_version()}")
     rec["last"] = event_watch.summary(ev, tick_wall, ended=True)
     rec.pop("event", None)
     _save_json(EVENT_PATH, rec)
-    return f"event-end{'' if ok else '(queued)'}"
+    return f"{reason}{'' if ok else '(queued)'}"
 
 
 def _mark_vpu_log() -> None:
