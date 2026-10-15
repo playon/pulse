@@ -399,6 +399,40 @@ def _demo_scoreconnect():
 # through _CAMERA_MODELS, so role / expected-speed resolution — and the
 # Port 2 "degraded" finding (gigabit main camera negotiated to 100 Mbps) —
 # stay intact.
+def _demo_binaries():
+    import os
+
+    def ts(dt):  # the collector's yyyy-MM-ddTHH:mm:ss+hh:mm
+        z = dt.astimezone().strftime("%z")
+        return dt.strftime("%Y-%m-%dT%H:%M:%S") + z[:3] + ":" + z[3:]
+    now = datetime.now()
+    out = {
+        "now": ts(now),
+        "exes": [
+            {"name": "VPU.exe", "present": True, "readable": True, "scanned": 53, "missing": []},
+            {"name": "Agent.exe", "present": True, "readable": True, "scanned": 1, "missing": []},
+            {"name": "Coordinator.exe", "present": True, "readable": True, "scanned": 1, "missing": []},
+        ],
+        "truncated": False, "popupsRead": True, "popupDays": 7, "popups": [],
+        "vpuProcesses": [], "binHasLibcef": True,
+        "cefPackages": ["cef-127.3.5", "cef-78.3.9"],
+    }
+    if os.environ.get("PULSE_DEMO_BINARIES", "").strip().lower() == "libcef":
+        out["exes"][0]["missing"] = [{"dll": "libcef.dll", "neededBy": "VPU.exe"}]
+        out["exes"][0]["scanned"] = 51
+        out["popups"] = [{
+            "exe": "VPU.exe", "title": "System Error", "dll": "libcef.dll", "count": 66,
+            "text": "The code execution cannot proceed because libcef.dll was not found. "
+                    "Reinstalling the program may fix this problem.",
+            "first": ts(now - timedelta(days=6, hours=18)), "last": ts(now - timedelta(minutes=4)),
+        }]
+        out["vpuProcesses"] = [{"pid": 11744, "created": ts(now - timedelta(minutes=4)),
+                                "workingSetMB": 2.8, "stuckOnLoaderError": True}]
+        out["binHasLibcef"] = False
+        out["cefPackages"] = ["cef-78.3.9"]
+    return out
+
+
 def _demo_cam(ip, mac, serial, *, ocr=False, gateway=None):
     if ocr:
         return {
@@ -1477,6 +1511,10 @@ DEMO = {
         "findings": [],
         "notes": "Port 9001 is always owned by PID 4 (HTTP.SYS); listener ownership is not a health signal.",
     },
+    # Healthy by default (vpu-home's real shape). PULSE_DEMO_BINARIES=libcef
+    # plays Bear Grass NC, 2026-10-15: libcef.dll gone from Bin and VPU.exe
+    # stuck on the loader dialog.
+    "Test-PixellotBinaries.ps1": lambda **kw: _demo_binaries(),
     "Test-PixellotInstallState.ps1": lambda **kw: {
         "dirExists": True,
         "dir": "C:\\pixellot\\downloadedversion",

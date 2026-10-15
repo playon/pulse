@@ -2049,6 +2049,172 @@ def _lmi_findings(lmi_log) -> list:
     }]
 
 
+# ── Can Pixellot's programs start? (Test-PixellotBinaries) ────────────────
+# Bear Grass NC, 2026-10-15: VPU.exe died at launch on every start for a week
+# ("libcef.dll was not found") and Pulse read PASS, because the error dialog
+# keeps a 2.8 MB VPU.exe alive and Get-Services counts it as Running. The
+# collector resolves each exe's DLL imports the way the Windows loader does,
+# and reads the loader-error popups Windows logs (System, Application Popup 26).
+START_ERROR_LIVE_SECONDS = 2 * 3600    # agent retries every ~7-11 min in an event
+START_ERROR_RECENT_SECONDS = 24 * 3600
+
+_PIX_EXE_ROLE = {
+    "vpu.exe": "Pixellot's video program (VPU.exe)",
+    "agent.exe": "The Pixellot Agent",
+    "coordinator.exe": "The Pixellot Coordinator",
+}
+
+
+def _ps_time(s):
+    """Parse the collector's yyyy-MM-ddTHH:mm:ss+hh:mm stamp, or None."""
+    from datetime import datetime
+    try:
+        return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S%z")
+    except (TypeError, ValueError):
+        return None
+
+
+def _short_time(dt) -> str:
+    """'Oct 8, 5:42 PM' in the VPU's own local time."""
+    return f"{dt.strftime('%b')} {dt.day}, {dt.strftime('%I:%M %p').lstrip('0')}"
+
+
+def _join_names(names) -> str:
+    names = list(names)
+    if len(names) <= 2:
+        return " and ".join(names)
+    return ", ".join(names[:-1]) + ", and " + names[-1]
+
+
+def _binary_findings(binaries) -> list:
+    if not binaries or binaries.get("error"):
+        return []
+    now = _ps_time(binaries.get("now"))
+    popups = [p for p in (binaries.get("popups") or []) if p.get("count")]
+    stuck = [p for p in (binaries.get("vpuProcesses") or []) if p.get("stuckOnLoaderError")]
+    days = binaries.get("popupDays") or 7
+
+    def popup_line(p):
+        first, last = _ps_time(p.get("first")), _ps_time(p.get("last"))
+        span = (f", first {_short_time(first)}, last {_short_time(last)}"
+                if first and last and p["count"] > 1 else
+                f", at {_short_time(last)}" if last else "")
+        return (f"Windows logged \"{p.get('exe')} - {p.get('title') or 'System Error'}\" "
+                f"{p['count']} time{'s' if p['count'] != 1 else ''} in the last {days} days{span} "
+                f"(System log, Application Popup event 26).")
+
+    stuck_line = (
+        f"The VPU.exe in Task Manager (process {stuck[0].get('pid')}, "
+        f"{stuck[0].get('workingSetMB')} MB) is the copy stuck on that error box, "
+        "which is why the Services check still lists it as running."
+    ) if stuck else None
+
+    # (1) A file a Pixellot program needs is missing right now.
+    exes = binaries.get("exes") or []
+    broken = [e for e in exes if e.get("missing")]
+    if broken:
+        primary = next((e for e in broken if e.get("name", "").lower() == "vpu.exe"), broken[0])
+        exe = primary.get("name") or "VPU.exe"
+        who = _PIX_EXE_ROLE.get(exe.lower(), exe)
+        dlls = []
+        for e in broken:
+            for m in e["missing"]:
+                if m.get("dll") and m["dll"] not in dlls:
+                    dlls.append(m["dll"])
+        shown = (", ".join(dlls[:3]) + f", and {len(dlls) - 3} more" if len(dlls) > 3
+                 else _join_names(dlls))
+        noun = "a file" if len(dlls) == 1 else "files"
+        evidence = [
+            f"Pulse read the list of files each Pixellot program loads at start and looked for "
+            f"each one where Windows looks (the program's folder, System32, Windows and PATH). "
+            f"Not found: {shown}."
+        ]
+        exe_popups = [p for p in popups if (p.get("exe") or "").lower() in
+                      {e.get("name", "").lower() for e in broken}]
+        evidence += [popup_line(p) for p in exe_popups]
+        if stuck_line:
+            evidence.append(stuck_line)
+        if any(d.lower() == "libcef.dll" for d in dlls):
+            cef = binaries.get("cefPackages") or []
+            evidence.append(
+                "CEF packages in C:\\Pixellot\\dependencies: " + (", ".join(cef) if cef else "none")
+                + ". On a working 5.37.3 VPU, Bin\\libcef.dll is a copy from the cef-127.3.5 "
+                "package that Pixellot's dependencies installer adds."
+            )
+        return [{
+            "code": "pixellot-dll-missing",
+            "severity": "critical",
+            "category": "Pixellot",
+            "title": f"{exe} can't start because {shown} {'is' if len(dlls) == 1 else 'are'} "
+                     f"missing, so the VPU can't record or stream",
+            "recommendation": (
+                f"{who} needs {noun} that {'is' if len(dlls) == 1 else 'are'} missing from the VPU "
+                f"({shown}), so it stops at launch and no game can record or stream. "
+                f"Escalate to Pixellot support to repair the Pixellot software install. "
+                f"Clicking OK on the Windows error does not fix it."
+            ),
+            "evidence": " ".join(evidence),
+            "details": [f"{m.get('dll')}: needed by {m.get('neededBy')}"
+                        for e in broken for m in e["missing"]][:12],
+        }]
+
+    # (2) No file is missing that Pulse can see, but Windows says a Pixellot
+    # program failed at startup (wrong DLL version, bad image, a crash at
+    # load). How recent decides whether it still stops tonight's game.
+    if not popups:
+        return []
+    latest = max(popups, key=lambda p: _ps_time(p.get("last")) or _ps_time("1970-01-01T00:00:00+00:00"))
+    last = _ps_time(latest.get("last"))
+    age = (now - last).total_seconds() if now and last else None
+    exe = latest.get("exe") or "VPU.exe"
+    who = _PIX_EXE_ROLE.get(exe.lower(), exe)
+    text = (latest.get("text") or "").strip()
+    evidence = " ".join([popup_line(p) for p in popups] + ([stuck_line] if stuck_line else []))
+    details = [f"{p.get('exe')}: {p.get('text')}" for p in popups][:8]
+
+    if stuck or (age is not None and age <= START_ERROR_LIVE_SECONDS):
+        return [{
+            "code": "pixellot-start-error",
+            "severity": "critical",
+            "category": "Pixellot",
+            "title": f"{exe} is failing at startup, so the VPU can't record or stream",
+            "recommendation": (
+                f"{who} stops at startup with a Windows error (\"{text}\"), so no game can record "
+                f"or stream. Escalate to Pixellot support to repair the Pixellot software install."
+            ),
+            "evidence": evidence,
+            "details": details,
+        }]
+    when = _short_time(last) if last else "earlier this week"
+    if age is not None and age <= START_ERROR_RECENT_SECONDS:
+        return [{
+            "code": "pixellot-start-error-recent",
+            "severity": "warning",
+            "category": "Pixellot",
+            "title": f"{exe} failed to start in the last day, so the next game may not stream",
+            "recommendation": (
+                f"{who} last failed at startup at {when} with a Windows error (\"{text}\"), and "
+                f"Pulse can't tell whether it has started cleanly since. Check that the last "
+                f"scheduled event streamed. If it did not, escalate to Pixellot support."
+            ),
+            "evidence": evidence,
+            "details": details,
+        }]
+    return [{
+        "code": "pixellot-start-error-past",
+        "severity": "info",
+        "category": "Pixellot",
+        "title": f"{exe} failed to start earlier this week",
+        "recommendation": (
+            f"{who} failed at startup {latest.get('count')} time"
+            f"{'s' if latest.get('count') != 1 else ''}, last at {when}. Windows has not logged it since. "
+            f"Games that week may not have streamed."
+        ),
+        "evidence": evidence,
+        "details": details,
+    }]
+
+
 # ── Graphics delivery (Get-GraphicsDelivery) ──────────────────────────────
 # Pulse's network checks can't see a scorebug that never reaches the video:
 # the hand-off from GraphicsManager to VPU.exe is localhost gRPC, so a unit
@@ -2172,7 +2338,7 @@ def _graphics_findings(gd) -> list:
     return out
 
 
-def _compute_findings(identity, performance, services, nics, hardware=None, installed_sw=None, network_config=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None) -> list:
+def _compute_findings(identity, performance, services, nics, hardware=None, installed_sw=None, network_config=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None, binaries=None) -> list:
     findings = []
 
     # None vs {} matters for probe_results: None means the caller never
@@ -2181,6 +2347,9 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
     # collection burst starving the probes, not an empty rig, and gates the
     # startup-grace suppressions below. Capture before any rebinding.
     probes_attempted = probe_results is not None
+
+    # ── Pixellot program can't start (missing DLL / loader error) ──
+    findings.extend(_binary_findings(binaries))
 
     # ── Wi-Fi uplink, internet on a camera port, Wi-Fi card off ──
     findings.extend(_uplink_findings(network_config, wifi))
@@ -2876,6 +3045,15 @@ _READINESS_POLICY = {
                                          #     (Olympic WA, 2026-08-18).
     "agent-down":            "blocker",  # F2  core capture process down
     "coordinator-down":      "blocker",  # F3  core capture process down
+    "pixellot-dll-missing":  "blocker",  # F42 a DLL VPU.exe / Agent / Coordinator loads
+                                         #     at start is missing, so it dies at launch.
+                                         #     The error box keeps a 3 MB VPU.exe alive,
+                                         #     so it read Running and the unit scored
+                                         #     PASS for a week. Field: Bear Grass NC,
+                                         #     2026-10-15 (libcef.dll, 5.37.3).
+    "pixellot-start-error":  "blocker",  # F43 Windows logged a Pixellot loader error in
+                                         #     the last 2 h, or the running VPU.exe is the
+                                         #     copy on the error box.
     "cam-none":              "blocker",  # F4  0 of N main cameras present
     "gpu-none":              "blocker",  # F5  no NVIDIA GPU — encoder can't run
     "gpu-igpu-only":         "blocker",  # F11 Intel iGPU only — wrong hardware
@@ -2938,6 +3116,8 @@ _READINESS_POLICY = {
                                          #     The game still airs, without graphics,
                                          #     and it recurs, so WARN. Field: Tanque
                                          #     Verde, MacLaren, Armstrong IL (2026-09).
+    "pixellot-start-error-recent": "risk",  # F43b same, last 2-24 h ago: can't
+                                         #     tell whether it has started since.
     "graphics-engine-none":  "risk",     # F41 agent turns graphics off because no
                                          #     scoreboard type is selected. Airs clean
                                          #     of graphics every game until fixed.
@@ -2969,6 +3149,7 @@ _READINESS_POLICY = {
     "sw-game-platform":      "info",     # F34
     "sw-consumer-sync":      "info",     # F35
     "uptime-high":           "info",     # F36
+    "pixellot-start-error-past": "info", # F43c same, 1-7 days ago, not since.
     "tls-filtered-support":  "info",     # F38b only support-plane hosts filtered
                                          #      (LogMeIn / python.org) - remote
                                          #      support and installer downloads
@@ -3913,7 +4094,7 @@ def _compute_camera_findings(ports: list, poe=None) -> list:
 # ─── Data-building helpers (shared by per-page and preload) ──
 
 
-def _build_dashboard(identity, performance, services, nics, network_config=None, hardware=None, installed_sw=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, perf_sample=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None):
+def _build_dashboard(identity, performance, services, nics, network_config=None, hardware=None, installed_sw=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, perf_sample=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None, binaries=None):
     # Tag adapter roles (motherboard / camera / wifi) so both the findings and
     # the embedded "Network config" the dashboard ships carry them.
     _classify_network_adapters(network_config)
@@ -3970,13 +4151,14 @@ def _build_dashboard(identity, performance, services, nics, network_config=None,
         "Installed software": installed_sw,
         "Port connectivity": port_tests,
         "Graphics delivery": graphics_delivery,
+        "Pixellot program files": binaries,
     }
     source_errors = [
         name for name, data in _sources.items()
         if isinstance(data, dict) and data.get("error")
     ]
 
-    findings = _compute_findings(identity, performance, services, nics, hardware, installed_sw, network_config, install_state, port_tests, gpu_info, wifi, pixellot_config=pixellot_config, expectations=expectations, disk_health=disk_health, probe_results=probe_results, tls_inspection=tls_inspection, lmi_log=lmi_log, graphics_delivery=graphics_delivery)
+    findings = _compute_findings(identity, performance, services, nics, hardware, installed_sw, network_config, install_state, port_tests, gpu_info, wifi, pixellot_config=pixellot_config, expectations=expectations, disk_health=disk_health, probe_results=probe_results, tls_inspection=tls_inspection, lmi_log=lmi_log, graphics_delivery=graphics_delivery, binaries=binaries)
 
     return {
         "identity": flat_identity,
@@ -4149,7 +4331,8 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
         return None
     (identity, performance, services, nics, net_config, hardware, installed_sw,
      install_state, port_tests, gpu_info, wifi, pixellot_config, expectations,
-     disk_health, perf_sample, tls_inspection, lmi_log, graphics_delivery) = await asyncio.gather(
+     disk_health, perf_sample, tls_inspection, lmi_log, graphics_delivery,
+     binaries) = await asyncio.gather(
         run_ps("Get-SystemIdentity.ps1"),
         run_ps("Get-Performance.ps1"),
         run_ps("Get-Services.ps1"),
@@ -4185,6 +4368,11 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
         # did the scorebug ever reach the video? ~1s on VPU2; the collector
         # stops itself at 25s and says so.
         run_ps("Get-GraphicsDelivery.ps1", timeout=40),
+        # Can VPU.exe / Agent / Coordinator start? A missing DLL leaves a
+        # 3 MB VPU.exe stuck on an error box that reads Running (Bear Grass
+        # NC, 2026-10-15). ~2s on vpu-home; libcef.dll alone is 212 MB, so
+        # it seeks the import table rather than reading files.
+        run_ps("Test-PixellotBinaries.ps1", timeout=20),
     )
     # CGI probe (cached 30s; usually already warm from preload) so the
     # slow-port finding identifies the OCR by its actual camera model, not a
@@ -4231,6 +4419,7 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
         disk_health=disk_health, perf_sample=perf_sample,
         probe_results=probe_results, tls_inspection=tls_inspection,
         lmi_log=lmi_log, graphics_delivery=graphics_delivery,
+        binaries=binaries,
     )
 
 
@@ -7415,6 +7604,7 @@ async def build_report() -> dict:
         ("pixellotConfig",       run_ps("Get-PixellotConfig.ps1", timeout=15)),
         ("pixellotInstallState", run_ps("Test-PixellotInstallState.ps1", timeout=15)),
         ("pixellotDependencies", run_ps("Get-PixellotDependencies.ps1", timeout=15)),
+        ("pixellotBinaries",     run_ps("Test-PixellotBinaries.ps1", timeout=20)),
         ("installedSoftware",    run_ps("Get-InstalledSoftware.ps1")),
         ("gpuInfo",              run_ps("Get-GpuInfo.ps1", timeout=15)),
         ("wifi",                 run_ps("Get-WifiAdapters.ps1", timeout=10)),
@@ -7472,6 +7662,7 @@ async def build_report() -> dict:
             disk_health=sections.get("diskHealth"),
             probe_results=cam_probes,
             tls_inspection=sections.get("tlsInspection"),
+            binaries=sections.get("pixellotBinaries"),
         )
     except Exception as e:
         sections["findings"] = {"error": f"findings computation failed: {type(e).__name__}: {e}"}
