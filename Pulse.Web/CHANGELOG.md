@@ -25,9 +25,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 
 ### Added
 - ScoreConnect tab: a **Reinstall ScoreConnect III** button. It stops the service, deletes the whole Sportzcast LLC program folder, and installs a fresh copy, with progress shown in Pulse. Saved settings and logs are kept. Use it when ScoreConnect III won't start or keeps failing.
+- Camera Connectivity: on VPUs with ADLINK's AVS software installed, the PoE card is named exactly, for example "PCIe-GIE74P, PCB rev 4, MCU 2.0". The name can take a few seconds to appear after Pulse starts. Without AVS, the card still shows as "GIE74-series".
 
 ### Fixed
-- Camera Connectivity: an Intel I210 camera card is now labelled "ADLINK GIE74-series" instead of always "GIE74P". Pulse can't tell a GIE74 from a GIE74P, and it had been calling GIE74 cards GIE74P.
+- Camera Connectivity: an Intel I210 camera card is now labelled "ADLINK GIE74-series" instead of always "GIE74P". It had been calling GIE74 cards GIE74P, and without ADLINK's AVS software Pulse can't tell the two apart.
 - Camera Connectivity: when the PoE card won't report its power budget, the message no longer blames only the driver. It now says the card's PoE controller may not be responding, and tells you to check the card's Molex power lead first. If cameras still get no power after that, treat it as a card fault.
 
 ## [1.4.1] - 2026-10-13
