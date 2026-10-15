@@ -304,6 +304,10 @@ def _event_tick(tick_wall: float) -> str:
         reason = "event-start"
     elif v != ev.get("postedVerdict") and v == ev.get("lastVerdict"):
         reason = "event-update"
+    elif tick_wall - (ev.get("lastPostAt") or tick_wall) >= monitor.HEARTBEAT_SECONDS - monitor.TICK_SLACK_SECONDS:
+        # Hourly while nothing changes: Vitals reads a unit not heard from in
+        # 70 minutes as Silent, and a steady game lasts longer than that.
+        reason = "event-update"
     else:
         reason = None
     ev["lastVerdict"] = v
@@ -311,6 +315,7 @@ def _event_tick(tick_wall: float) -> str:
         entry = _event_entry(reason, ev, tick_wall, ended=False)
         ok = checkin_lite.send(QUEUE_PATH, entry, user_agent=f"Pulse/{_app_version()}")
         ev["postedVerdict"] = v
+        ev["lastPostAt"] = tick_wall
         posted = f"{reason}{'' if ok else '(queued)'}"
     elif reason == "event-start":
         ev["startPending"] = True   # no event id yet; post once it shows up
@@ -318,6 +323,7 @@ def _event_tick(tick_wall: float) -> str:
         ok = checkin_lite.send(QUEUE_PATH, _event_entry("event-start", ev, tick_wall, False),
                                user_agent=f"Pulse/{_app_version()}")
         ev["postedVerdict"] = v
+        ev["lastPostAt"] = tick_wall
         posted = f"event-start{'' if ok else '(queued)'}"
     rec["event"] = ev
     _save_json(EVENT_PATH, rec)

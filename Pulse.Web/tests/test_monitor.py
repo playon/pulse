@@ -474,3 +474,39 @@ class TestEventEndGrace(unittest.TestCase):
         with open(self.mo.EVENT_PATH, "w") as fh:
             json.dump(rec, fh)
         self.assertEqual(self.mo._event_end(2300.0), "pending")   # a fresh gap, not an end
+
+
+class TestEventKeepAlive(unittest.TestCase):
+    """A steady event posts once an hour, so Vitals never reads it as Silent."""
+
+    def setUp(self):
+        import monitor_once
+        self.mo = monitor_once
+        self.tmp = tempfile.TemporaryDirectory()
+        self.saved = (monitor_once.EVENT_PATH, monitor_once.QUEUE_PATH, monitor_once.POSTS_PATH,
+                      monitor_once.event_watch.observe, monitor_once.event_watch.verdict)
+        monitor_once.EVENT_PATH = os.path.join(self.tmp.name, "event.json")
+        monitor_once.QUEUE_PATH = os.path.join(self.tmp.name, "queue.json")
+        monitor_once.POSTS_PATH = os.path.join(self.tmp.name, "posts.json")
+        monitor_once.event_watch.observe = lambda ev, pid, now, **kw: ev.update(eventId="6ad018b2ec5d0313d04118a6") or {"bytes": 0, "skipped": False}
+        monitor_once.event_watch.verdict = lambda ev, now: "on-air"
+        self.sent = []
+        self.saved_send = monitor_once.checkin_lite.send
+        monitor_once.checkin_lite.send = lambda q, e, user_agent="": self.sent.append(e["reason"]) or True
+
+    def tearDown(self):
+        (self.mo.EVENT_PATH, self.mo.QUEUE_PATH, self.mo.POSTS_PATH,
+         self.mo.event_watch.observe, self.mo.event_watch.verdict) = self.saved
+        self.mo.checkin_lite.send = self.saved_send
+        self.tmp.cleanup()
+
+    def test_start_then_silence_then_hourly(self):
+        t = 1_000_000.0
+        self.mo._event_tick(t)                       # start
+        for k in range(1, 12):                       # 55 minutes of steady on air: nothing
+            self.mo._event_tick(t + 300 * k)
+        self.assertEqual(self.sent, ["event-start"])
+        self.mo._event_tick(t + 3600)                # the hour: one keep-alive
+        for k in range(13, 24):
+            self.mo._event_tick(t + 300 * k)
+        self.assertEqual(self.sent, ["event-start", "event-update"])
