@@ -7,13 +7,24 @@ would end up with half its files from another build and fail every tick,
 quietly. Its own folder is never touched by a launcher, so it keeps running
 whatever channel the interactive Pulse is on.
 
-  enroll()        copy this Pulse build into the monitor folder and register
-                  the task there (deploy/Install-PulseMonitor.ps1), then run
-                  the first tick, so the unit shows in Vitals within a minute
-  unenroll()      remove the task and the copied files
-  refresh()       at a dev-channel launch: if the copy is from another build,
-                  copy this one over it (never during an event)
+  enroll()        install this Pulse build as the agent's slot a, with the
+                  agent's runner and a copy of the Python runtime, register the
+                  task to run the runner (deploy/Install-PulseMonitor.ps1
+                  -Runner), then run the first tick, so the unit shows in
+                  Vitals within a minute
+  unenroll()      remove the task and everything enroll installed
+  refresh()       at a dev-channel launch, on a unit still on the older layout
+                  (the monitor's code straight in the folder): move it to the
+                  runner layout. A unit on the runner layout is left alone:
+                  fleet control decides which build it runs (PV-49).
   status()        what the Settings card shows
+
+The runner layout (PV-49, pulse_agent/runner.py):
+
+    C:\\PulseFleetMonitor\\agent_runner.py     what the task runs
+    C:\\PulseFleetMonitor\\runtime\\python\\     the embedded Python, shared
+    C:\\PulseFleetMonitor\\slots\\a, slots\\b    two builds; the runner swaps them
+    C:\\PulseFleetMonitor\\pulse-monitor-*      the monitor's state, as before
 
 Copying is robocopy /MIR, which skips unchanged files, so the 50 MB Python
 runtime is only copied the first time. The task is disabled and stopped
@@ -48,6 +59,14 @@ STATE_FILES = ("pulse-monitor-state.json", "pulse-monitor-checkin-queue.json",
                "pulse-monitor-event.json")
 # A tick every 5 minutes; past this the task isn't running.
 STALE_AFTER_SECONDS = 20 * 60
+# The agent's runner layout (PV-49).
+RUNNER_FILE = "agent_runner.py"
+RUNTIME_DIR = "runtime"
+ENROLL_SLOT = "a"
+SLOTS_FILE = "agent-slots.json"
+UPDATE_FILE = "agent-update.json"
+RUNNER_FILES = (RUNNER_FILE, SLOTS_FILE, SLOTS_FILE + ".tmp", UPDATE_FILE, UPDATE_FILE + ".tmp",
+                "agent-tick.running", "agent-download.tmp", "agent-runner.log", "agent-runner.log.1")
 
 _CREATE_NO_WINDOW = 0x08000000
 _TASK_NS = "{http://schemas.microsoft.com/windows/2004/02/mit/task}"
@@ -145,11 +164,14 @@ def parse_task_xml(text: str) -> Optional[dict]:
     arguments = (arg.text or "").strip().strip('"') if arg is not None else ""
     # <Enabled> is omitted when true.
     enabled = en is None or (en.text or "").strip().lower() != "false"
-    # C:\X\app\python\python.exe -> C:\X
-    tail = "\\app\\python\\python.exe"
+    # C:\X\app\python\python.exe (older) or C:\X\runtime\python\python.exe -> C:\X
     norm = command.replace("/", "\\")
-    install_dir = norm[: -len(tail)] if norm.lower().endswith(tail) else None
-    return {"command": command, "arguments": arguments, "enabled": enabled,
+    install_dir = None
+    for tail in ("\\app\\python\\python.exe", "\\" + RUNTIME_DIR + "\\python\\python.exe"):
+        if norm.lower().endswith(tail):
+            install_dir = norm[: -len(tail)]
+    runner = arguments.replace("/", "\\").lower().endswith("\\" + RUNNER_FILE)
+    return {"command": command, "arguments": arguments, "enabled": enabled, "runner": runner,
             "installDir": install_dir, "definition": (ver.text or "").strip() if ver is not None else None}
 
 
@@ -163,6 +185,18 @@ def query_task() -> Optional[dict]:
     if r.returncode != 0:
         return None
     return parse_task_xml(r.stdout)
+
+
+def _on_runner(task: Optional[dict]) -> bool:
+    """The task runs the agent's runner from the monitor folder (PV-49)."""
+    return bool(task and task.get("runner")
+                and (task.get("installDir") or "").rstrip("\\").lower() == MONITOR_ROOT.lower())
+
+
+def _active_slot_root() -> str:
+    """The slot the runner runs: its code root, a Pulse.Web tree."""
+    active = _read_json(os.path.join(MONITOR_ROOT, SLOTS_FILE)).get("active")
+    return os.path.join(MONITOR_ROOT, "slots", active if active in ("a", "b") else ENROLL_SLOT)
 
 
 def _last_tick(root: str) -> dict:
@@ -221,16 +255,24 @@ def status(source_root: str, channel: str, now: Optional[float] = None) -> dict:
     if not here:
         out["state"] = "elsewhere"
         return out
+    runner = _on_runner(task)
+    code_root = _active_slot_root() if runner else MONITOR_ROOT
     build = _read_json(os.path.join(MONITOR_ROOT, BUILD_FILE))
     posts = _read_json(os.path.join(MONITOR_ROOT, "pulse-monitor-posts.json"))
     st = _read_json(os.path.join(MONITOR_ROOT, "pulse-monitor-state.json"))
     queue = _read_json(os.path.join(MONITOR_ROOT, "pulse-monitor-checkin-queue.json"))
     tick = _last_tick(MONITOR_ROOT)
     ctl = queue.get("control") if isinstance(queue.get("control"), dict) else {}
+    version = _read_text(os.path.join(code_root, "VERSION"))
+    agent_version = _read_text(os.path.join(code_root, "app", "pulse_agent", "VERSION"))
     out.update({
-        "version": _read_text(os.path.join(MONITOR_ROOT, "VERSION")),
+        "version": f"agent {agent_version} (Pulse {version or 'unknown'})" if runner else version,
+        "agentVersion": agent_version,
+        "agentUpdate": _read_json(os.path.join(MONITOR_ROOT, UPDATE_FILE)) or None,
         "copiedAt": build.get("copiedAt"),
-        "current": src is not None and build.get("fingerprint") == src,
+        # On the runner layout fleet control picks the build, not this launch:
+        # there's no "older than this Pulse" to show.
+        "current": None if runner else (src is not None and build.get("fingerprint") == src),
         "lastTickAt": tick.get("at"),
         "lastTickOutcome": tick.get("outcome"),
         "lastPostAt": posts.get("lastPostAt"),
@@ -240,7 +282,8 @@ def status(source_root: str, channel: str, now: Optional[float] = None) -> dict:
         "unitUrl": unit_link(posts),
     })
     problem = None
-    if not os.path.isfile(os.path.join(MONITOR_ROOT, "app", "monitor_once.py")):
+    if not os.path.isfile(os.path.join(code_root, "app", "monitor_once.py")) or \
+            (runner and not os.path.isfile(os.path.join(MONITOR_ROOT, RUNNER_FILE))):
         problem = "The monitor's files are missing from " + MONITOR_ROOT + "."
     elif not task.get("enabled"):
         problem = "The scheduled task is disabled."
@@ -266,8 +309,8 @@ def _stop_task() -> None:
     time.sleep(1.0)
 
 
-def _robocopy(src: str, dst: str) -> Optional[str]:
-    r = _run(["robocopy", src, dst, "/MIR", "/XD", "__pycache__", "/R:3", "/W:2",
+def _robocopy(src: str, dst: str, skip_dirs=()) -> Optional[str]:
+    r = _run(["robocopy", src, dst, "/MIR", "/XD", "__pycache__", *skip_dirs, "/R:3", "/W:2",
               "/NP", "/NFL", "/NDL", "/NJH", "/NJS"], timeout=300)
     # robocopy: 0-7 = success (bits for copied / extra / mismatched), 8+ = failure.
     if r.returncode >= 8:
@@ -277,8 +320,11 @@ def _robocopy(src: str, dst: str) -> Optional[str]:
 
 
 def _readable(root: str) -> bool:
+    slot = os.path.join("slots", ENROLL_SLOT)
     for rel in (os.path.join("app", "monitor_once.py"),
-                os.path.join("deploy", "Install-PulseMonitor.ps1")) + STATE_FILES:
+                os.path.join("deploy", "Install-PulseMonitor.ps1"),
+                RUNNER_FILE, os.path.join(slot, "app", "monitor_once.py"),
+                os.path.join(slot, "deploy", "Install-PulseMonitor.ps1")) + STATE_FILES:
         p = os.path.join(root, rel)
         if os.path.exists(p):
             try:
@@ -315,8 +361,17 @@ def _lock_down(root: str) -> Optional[str]:
     return None
 
 
+def _installer_script() -> str:
+    """The installer from the running slot, else the older layout's."""
+    for root in (_active_slot_root(), MONITOR_ROOT):
+        script = os.path.join(root, "deploy", "Install-PulseMonitor.ps1")
+        if os.path.isfile(script):
+            return script
+    return os.path.join(MONITOR_ROOT, "deploy", "Install-PulseMonitor.ps1")
+
+
 def _run_installer(args) -> tuple:
-    script = os.path.join(MONITOR_ROOT, "deploy", "Install-PulseMonitor.ps1")
+    script = _installer_script()
     r = _run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script,
               "-InstallDir", MONITOR_ROOT] + list(args), timeout=120)
     lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
@@ -360,11 +415,16 @@ def _guard(source_root: str, channel: str) -> Optional[str]:
 
 
 def enroll(source_root: str, channel: str) -> dict:
-    """Copy this build into the monitor folder, register the task there and run
-    the first tick. Safe to repeat: it's also how the copy is refreshed."""
+    """Install this build as the agent's slot a, with the runner and a copy of
+    the Python runtime; register the task to run the runner; run the first
+    tick. Safe to repeat: it's also how a unit on the older layout moves to the
+    runner, and how a broken one is reinstalled. From then on the runner moves
+    the unit between builds as fleet control says (PV-49)."""
     err = _guard(source_root, channel)
     if err:
         return {"ok": False, "error": err}
+    if not os.path.isfile(os.path.join(source_root, "app", "pulse_agent", "runner.py")):
+        return {"ok": False, "error": "This Pulse build has no agent runner (pulse_agent/runner.py)."}
     if vpu_running():
         return {"ok": False, "error": "An event is live on this VPU (vpu.exe is running). Try again after it ends."}
     old = query_task()
@@ -374,27 +434,45 @@ def enroll(source_root: str, channel: str) -> dict:
             _stop_task()
             steps.append("Paused the monitor task.")
         os.makedirs(MONITOR_ROOT, exist_ok=True)
+        runtime = os.path.join(MONITOR_ROOT, RUNTIME_DIR)
+        err = _robocopy(os.path.join(source_root, "app", "python"), os.path.join(runtime, "python"))
+        if err:
+            raise RuntimeError(err)
+        # What the runtime can run: the runner refuses a build that needs more.
+        _copy_file(os.path.join(source_root, "app", "requirements.txt"), os.path.join(runtime, "requirements.txt"))
+        slot = os.path.join(MONITOR_ROOT, "slots", ENROLL_SLOT)
         for d in COPY_DIRS:
-            err = _robocopy(os.path.join(source_root, d), os.path.join(MONITOR_ROOT, d))
+            err = _robocopy(os.path.join(source_root, d), os.path.join(slot, d),
+                            skip_dirs=("python",) if d == "app" else ())
             if err:
                 raise RuntimeError(err)
         for f in COPY_FILES:
-            src = os.path.join(source_root, f)
-            if os.path.isfile(src):
-                with open(src, "rb") as a, open(os.path.join(MONITOR_ROOT, f), "wb") as b:
-                    b.write(a.read())
-        steps.append("Copied this Pulse build to " + MONITOR_ROOT + ".")
+            if os.path.isfile(os.path.join(source_root, f)):
+                _copy_file(os.path.join(source_root, f), os.path.join(slot, f))
+        _copy_file(os.path.join(source_root, "app", "pulse_agent", "runner.py"), os.path.join(MONITOR_ROOT, RUNNER_FILE))
+        agent_version = _read_text(os.path.join(slot, "app", "pulse_agent", "VERSION"))
+        # A fresh start: slot a runs, nothing on probation, nothing blocked. No
+        # hash: if fleet control pins a release, the runner fetches it, even of
+        # the same version, so the unit runs exactly the pinned bytes.
+        with open(os.path.join(MONITOR_ROOT, SLOTS_FILE), "w", encoding="utf-8") as fh:
+            json.dump({"active": ENROLL_SLOT, "previous": None, "probation": None,
+                       "slots": {ENROLL_SLOT: {"version": agent_version, "sha256": None,
+                                               "installedAt": time.time(), "source": source_root}},
+                       "blocked": {}, "retryAt": {}}, fh, indent=2)
+        steps.append(f"Installed this Pulse build (agent {agent_version or 'unknown'}) in {slot}.")
         carried = _carry_state(old.get("installDir") if old else None)
         if carried:
             steps.append(f"Kept the monitor's history from {old['installDir']} ({carried} files).")
-        build = {"fingerprint": fingerprint(MONITOR_ROOT), "version": _read_text(os.path.join(source_root, "VERSION")),
+        if _remove_older_layout():
+            steps.append("Moved the monitor from the older layout to the agent runner.")
+        build = {"fingerprint": fingerprint(slot), "version": _read_text(os.path.join(source_root, "VERSION")),
                  "copiedAt": time.time(), "source": source_root}
         with open(os.path.join(MONITOR_ROOT, BUILD_FILE), "w", encoding="utf-8") as fh:
             json.dump(build, fh, indent=2)
         err = _lock_down(MONITOR_ROOT)
         if err:
             raise RuntimeError(err)
-        code, lines = _run_installer(["-Force", "-RunNow"])
+        code, lines = _run_installer(["-Runner", "-Force", "-RunNow"])
         steps.extend(lines)
         if code != 0:
             raise RuntimeError("The installer failed: " + (" ".join(lines[-2:]) or f"exit {code}"))
@@ -405,6 +483,29 @@ def enroll(source_root: str, channel: str) -> dict:
             _run(["schtasks", "/Change", "/TN", TASK_NAME, "/ENABLE"], timeout=20)
         return {"ok": False, "error": str(e), "steps": steps}
     return {"ok": True, "steps": steps}
+
+
+def _copy_file(src: str, dst: str) -> None:
+    with open(src, "rb") as a, open(dst, "wb") as b:
+        b.write(a.read())
+
+
+def _remove_older_layout() -> bool:
+    """The monitor's code straight in the folder (before PV-49), including its
+    own Python: the runner layout replaces it. The state files stay."""
+    import shutil
+    found = False
+    for d in COPY_DIRS:
+        path = os.path.join(MONITOR_ROOT, d)
+        if os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+            found = True
+    for f in COPY_FILES:
+        try:
+            os.remove(os.path.join(MONITOR_ROOT, f))
+        except OSError:
+            pass
+    return found
 
 
 def unenroll() -> dict:
@@ -418,8 +519,7 @@ def unenroll() -> dict:
     steps = []
     if task:
         _stop_task()
-    script = os.path.join(MONITOR_ROOT, "deploy", "Install-PulseMonitor.ps1")
-    if os.path.isfile(script):
+    if os.path.isfile(_installer_script()):
         code, lines = _run_installer(["-Uninstall", "-Purge"])
         steps.extend(lines)
         if code != 0:
@@ -428,9 +528,9 @@ def unenroll() -> dict:
         _run(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"], timeout=20)
         steps.append(f"Removed {TASK_NAME}.")
     import shutil
-    for d in COPY_DIRS:
+    for d in COPY_DIRS + ("slots", RUNTIME_DIR):
         shutil.rmtree(os.path.join(MONITOR_ROOT, d), ignore_errors=True)
-    for f in COPY_FILES + (BUILD_FILE, "pulse-monitor-event.json", "pulse-monitor-event.json.tmp"):
+    for f in COPY_FILES + RUNNER_FILES + (BUILD_FILE, "pulse-monitor-event.json", "pulse-monitor-event.json.tmp"):
         try:
             os.remove(os.path.join(MONITOR_ROOT, f))
         except OSError:
@@ -453,14 +553,16 @@ def unenroll() -> dict:
 
 
 def refresh(source_root: str, channel: str) -> Optional[dict]:
-    """At a launch: bring an enrolled unit's copy up to this build. Does
-    nothing unless the monitor runs from its folder and holds another build.
-    Never during an event: the copy is a burst of disk work."""
+    """At a dev launch, on a unit whose monitor runs from its folder on the
+    older layout and holds another build: enroll, which moves it to the
+    runner layout. Never during an event: the copy is a burst of disk work."""
     if channel != "dev" or sys.platform != "win32" or not is_admin():
         return None
     task = query_task()
     if not task or (task.get("installDir") or "").rstrip("\\").lower() != MONITOR_ROOT.lower():
         return None
+    if _on_runner(task):
+        return None                    # fleet control picks the build now (PV-49)
     src = fingerprint(source_root)
     if src is None or _read_json(os.path.join(MONITOR_ROOT, BUILD_FILE)).get("fingerprint") == src:
         return None

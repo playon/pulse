@@ -36,11 +36,24 @@ def _build(root, body="x = 1\n"):
     os.makedirs(os.path.join(root, "app", "python"), exist_ok=True)
     os.makedirs(os.path.join(root, "scripts"), exist_ok=True)
     os.makedirs(os.path.join(root, "deploy"), exist_ok=True)
+    os.makedirs(os.path.join(root, "app", "pulse_agent"), exist_ok=True)
     for rel, text in (("app/monitor_once.py", body), ("app/main.py", "m = 1\n"),
                       ("scripts/Get-X.ps1", "1"), ("deploy/Install-PulseMonitor.ps1", "1"),
-                      ("VERSION", "web-dev-v1.5.0-dev"), ("app/python/python.exe", "bin")):
+                      ("VERSION", "web-dev-v1.5.0-dev"), ("app/python/python.exe", "bin"),
+                      ("app/requirements.txt", "fastapi\n"), ("app/pulse_agent/VERSION", "0.2.0\n"),
+                      ("app/pulse_agent/runner.py", "# runner\n")):
         with open(os.path.join(root, rel), "w") as fh:
             fh.write(text)
+
+
+RUNNER_TASK_XML = """<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Version>3</Version></RegistrationInfo>
+  <Actions Context="Author"><Exec>
+    <Command>C:\\PulseFleetMonitor\\runtime\\python\\python.exe</Command>
+    <Arguments>"C:\\PulseFleetMonitor\\agent_runner.py"</Arguments>
+  </Exec></Actions>
+</Task>"""
 
 
 class TaskXml(unittest.TestCase):
@@ -54,6 +67,12 @@ class TaskXml(unittest.TestCase):
         t = fe.parse_task_xml(TASK_XML.format(enabled="<Enabled>false</Enabled>", root="C:\\Pulse"))
         self.assertEqual(t["installDir"], "C:\\Pulse")
         self.assertFalse(t["enabled"])
+
+    def test_runner_layout(self):
+        t = fe.parse_task_xml(RUNNER_TASK_XML)
+        self.assertEqual(t["installDir"], "C:\\PulseFleetMonitor")
+        self.assertTrue(t["runner"])
+        self.assertFalse(fe.parse_task_xml(TASK_XML.format(enabled="", root="C:\\X"))["runner"])
 
     def test_garbage(self):
         self.assertIsNone(fe.parse_task_xml("ERROR: The system cannot find the file specified."))
@@ -74,7 +93,7 @@ class Fingerprint(unittest.TestCase):
     def test_changes_with_the_agent_package(self):
         with tempfile.TemporaryDirectory() as d:
             _build(d)
-            os.makedirs(os.path.join(d, "app", "pulse_agent"))
+            os.makedirs(os.path.join(d, "app", "pulse_agent"), exist_ok=True)
             with open(os.path.join(d, "app", "pulse_agent", "checkin.py"), "w") as fh:
                 fh.write("x = 1\n")
             a = fe.fingerprint(d)
@@ -222,6 +241,97 @@ class Guards(unittest.TestCase):
                 with mock.patch.object(fe, "vpu_running", return_value=False):
                     fe.refresh(src, "dev")
                 en.assert_called_once()
+
+
+
+class RunnerLayout(unittest.TestCase):
+    """PV-49: the task runs the agent's runner; the code is in slots."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.src = os.path.join(self.tmp.name, "Pulse")
+        self.root = os.path.join(self.tmp.name, "PulseFleetMonitor")
+        _build(self.src)
+        for p in (mock.patch.object(fe, "MONITOR_ROOT", self.root),
+                  mock.patch.object(fe.sys, "platform", "win32"),
+                  mock.patch.object(fe, "is_admin", return_value=True),
+                  mock.patch.object(fe, "vpu_running", return_value=False)):
+            p.start()
+            self.addCleanup(p.stop)
+        self.calls = []
+
+    def _fake_run(self, args, timeout=60):
+        """robocopy as a real copy (honouring /XD); the rest succeed."""
+        import shutil
+        import subprocess
+        self.calls.append(args)
+        if args[0] == "robocopy":
+            src, dst = args[1], args[2]
+            skip = set(args[args.index("/XD") + 1:args.index("/R:3")])
+            shutil.rmtree(dst, ignore_errors=True)
+            shutil.copytree(src, dst, ignore=lambda d, names: [n for n in names if n in skip])
+            return subprocess.CompletedProcess(args, 1, "", "")
+        return subprocess.CompletedProcess(args, 0, "  Installed Pulse Fleet Monitor.", "")
+
+    def _runner_task(self):
+        return {"installDir": self.root, "enabled": True, "runner": True, "command": "", "arguments": "",
+                "definition": "3"}
+
+    def test_enroll_moves_an_older_layout_to_the_runner_and_keeps_state(self):
+        _build(self.root)                                       # the older layout, code in the folder
+        with open(os.path.join(self.root, "pulse-monitor-state.json"), "w") as fh:
+            json.dump({"status": "WARN"}, fh)
+        old = {"installDir": self.root, "enabled": True, "runner": False}
+        with mock.patch.object(fe, "_run", side_effect=self._fake_run), \
+                mock.patch.object(fe, "query_task", return_value=old):
+            res = fe.enroll(self.src, "dev")
+        self.assertTrue(res["ok"], res)
+        r = self.root
+        self.assertTrue(os.path.isfile(os.path.join(r, "runtime", "python", "python.exe")))
+        self.assertEqual(open(os.path.join(r, "runtime", "requirements.txt")).read(), "fastapi\n")
+        self.assertTrue(os.path.isfile(os.path.join(r, "slots", "a", "app", "monitor_once.py")))
+        self.assertFalse(os.path.exists(os.path.join(r, "slots", "a", "app", "python")))   # the runtime is shared
+        self.assertEqual(open(os.path.join(r, "agent_runner.py")).read(), "# runner\n")
+        slots = json.load(open(os.path.join(r, fe.SLOTS_FILE)))
+        self.assertEqual((slots["active"], slots["slots"]["a"]["version"], slots["slots"]["a"]["sha256"]),
+                         ("a", "0.2.0", None))
+        self.assertFalse(os.path.exists(os.path.join(r, "app")))                         # older layout gone
+        self.assertEqual(json.load(open(os.path.join(r, "pulse-monitor-state.json"))), {"status": "WARN"})
+        installer = [c for c in self.calls if c[0] == "powershell.exe"][-1]
+        self.assertIn("-Runner", installer)
+        self.assertEqual(installer[installer.index("-File") + 1],
+                         os.path.join(r, "slots", "a", "deploy", "Install-PulseMonitor.ps1"))
+        self.assertTrue(any("older layout" in s for s in res["steps"]))
+
+    def test_enroll_refuses_a_build_without_the_runner(self):
+        os.remove(os.path.join(self.src, "app", "pulse_agent", "runner.py"))
+        self.assertIn("no agent runner", fe.enroll(self.src, "dev")["error"])
+
+    def test_status_reads_the_active_slot(self):
+        with mock.patch.object(fe, "_run", side_effect=self._fake_run), \
+                mock.patch.object(fe, "query_task", return_value=None):
+            self.assertTrue(fe.enroll(self.src, "dev")["ok"])
+        with open(os.path.join(self.root, fe.UPDATE_FILE), "w") as fh:
+            json.dump({"status": "applied", "version": "0.2.0"}, fh)
+        ticks = os.path.join(self.root, "pulse-monitor-ticks.log")
+        with open(ticks, "w") as fh:
+            fh.write("2026-10-16 00:05:00 plan=none ok\n")
+        with mock.patch.object(fe, "query_task", return_value=self._runner_task()):
+            st = fe.status(self.src, "dev")
+        self.assertEqual(st["state"], "on")
+        self.assertEqual(st["version"], "agent 0.2.0 (Pulse web-dev-v1.5.0-dev)")
+        self.assertIsNone(st["current"])            # fleet control picks the build, not this launch
+        self.assertEqual(st["agentUpdate"]["status"], "applied")
+        os.remove(os.path.join(self.root, "agent_runner.py"))
+        with mock.patch.object(fe, "query_task", return_value=self._runner_task()):
+            self.assertEqual(fe.status(self.src, "dev")["state"], "broken")
+
+    def test_refresh_leaves_the_runner_layout_alone(self):
+        with mock.patch.object(fe, "query_task", return_value=self._runner_task()), \
+                mock.patch.object(fe, "enroll") as en:
+            self.assertIsNone(fe.refresh(self.src, "dev"))
+        en.assert_not_called()
 
 
 if __name__ == "__main__":
