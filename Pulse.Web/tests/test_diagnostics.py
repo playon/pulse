@@ -353,6 +353,48 @@ class TestComputeFindings(unittest.TestCase):
         self.assertTrue(any("running slow" in t for t in titles), titles)
 
 
+# ── Streaming chain: the four outcomes and their titles (PV-50) ──
+class TestStreamFindingTitles(unittest.TestCase):
+    def _chain(self, main_ok, backup_ok, rtmp_ok):
+        def rung(purpose, ok, port, proto):
+            return {"purpose": purpose, "status": "pass" if ok else "fail",
+                    "host": "prod-echo.pixellot.tv", "port": port, "protocol": proto}
+        return {"results": [
+            rung("Zixi Streaming", main_ok, 2088, "udp"),
+            rung("Zixi Backup", backup_ok, 443, "udp"),
+            rung(main._RTMP_FALLBACK_PURPOSE, rtmp_ok, 1935, "tcp"),
+        ]}
+
+    def _one(self, **kw):
+        found = main._stream_findings(self._chain(**kw))
+        self.assertEqual(len(found), 1, found)
+        return found[0]
+
+    def test_every_connection_blocked(self):
+        f = self._one(main_ok=False, backup_ok=False, rtmp_ok=False)
+        self.assertEqual((f["code"], f["title"]),
+                         ("stream-blocked", "Streaming is blocked by the venue's network"))
+
+    def test_only_the_last_resort_is_open(self):
+        f = self._one(main_ok=False, backup_ok=False, rtmp_ok=True)
+        self.assertEqual((f["code"], f["title"]),
+                         ("stream-degraded-rtmp", "Streaming is using its last-resort connection (1935 TCP)"))
+
+    def test_on_the_backup_connection(self):
+        f = self._one(main_ok=False, backup_ok=True, rtmp_ok=True)
+        self.assertEqual((f["code"], f["title"]),
+                         ("stream-resiliency-reduced", "Streaming is using its backup connection (443 UDP)"))
+
+    def test_main_connection_fine_but_the_backup_is_blocked(self):
+        # Streaming on the main connection, so it is NOT "using the backup".
+        f = self._one(main_ok=True, backup_ok=False, rtmp_ok=True)
+        self.assertEqual((f["code"], f["title"]),
+                         ("stream-resiliency-reduced", "Streaming backup connection is blocked"))
+
+    def test_everything_open_raises_nothing(self):
+        self.assertEqual(main._stream_findings(self._chain(True, True, True)), [])
+
+
 # ── Missing-main-cameras finding: probe-aware + cold-start grace ──
 class TestCamCountFinding(unittest.TestCase):
     """The cam-none/cam-partial finding must not trust the ARP snapshot
