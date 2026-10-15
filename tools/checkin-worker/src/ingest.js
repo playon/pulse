@@ -20,7 +20,7 @@ const REASONS = new Set(["startup", "periodic", "state-change", "heartbeat", "pa
                          "event-start", "event-update", "event-end"]);
 const EVENT_SCHEMA = "pulse.event/v1";
 const MAX_EVENT_BYTES = 4 * 1024;
-const EVENT_STATES = new Set(["on-air", "connecting", "stream-failing", "restart-loop", "camera-link-down", "ended"]);
+const EVENT_STATES = new Set(["on-air", "connecting", "stream-failing", "restart-loop", "camera-link-down", "camera-degraded", "ended"]);
 const PASSES = new Set(["full", "partial"]);
 const STATUSES = new Set(["PASS", "WARN", "FAIL"]);
 const PATHS = new Set(["zixi-2088", "zixi-443", "rtmp-1935", "blocked"]);

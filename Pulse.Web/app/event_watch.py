@@ -49,6 +49,7 @@ CATCH_UP_BYTES = 96 * 1024 * 1024   # once, when the monitor starts mid-event
 BENCH_TAIL_BYTES = 16 * 1024        # ~40 rows of AgentBenchmarks
 FAILING_AFTER_SECONDS = 120         # failed tries for this long with no connect
 RESTART_LOOP_COUNT = 2              # VPU.exe restarts within one event
+CAMERA_SLOW_FPS = 15.0              # a camera below this is degrading the picture
 SCHEMA = "pulse.event/v1"
 
 _TIME_RE = re.compile(r"(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})")
@@ -184,6 +185,7 @@ def parse_vpu_lines(text: str) -> list:
                 and "failed, move to" not in line and "Created Zixi stream" not in line
                 and "Created Successfuly" not in line and "START NEW LOG SESSION" not in line
                 and "CloseUnit" not in line and "LEAKY BUCKET" not in line
+                and "Request to disable the Poe" not in line and "Camera reset happened" not in line
                 and "recordedEvents" not in line):
             continue
         t = _line_time(line)
@@ -213,6 +215,10 @@ def parse_vpu_lines(text: str) -> list:
             out.append({"t": t, "kind": "close", "reason": m.group(1) if m else None})
         elif "LEAKY BUCKET" in line and "dropping" in line:
             out.append({"t": t, "kind": "drop"})
+        elif "Request to disable the Poe" in line:
+            out.append({"t": t, "kind": "poeReset"})
+        elif "Camera reset happened" in line:
+            out.append({"t": t, "kind": "cameraReset"})
         elif "cannot find needed calibration for" in line:
             m = re.search(r"cannot find needed calibration for (\S+?)\.", line)
             out.append({"t": t, "kind": "uncalibrated", "sport": m.group(1) if m else None})
@@ -330,6 +336,13 @@ def _round(v):
     return None if v is None else round(v, 1)
 
 
+def slow_cameras(ev: dict) -> list:
+    """Indexes of cameras below CAMERA_SLOW_FPS in the newest status line."""
+    st = ev.get("status") or {}
+    return [i for i in range(3)
+            if f"Camera{i}AvgFps" in st and st[f"Camera{i}AvgFps"] < CAMERA_SLOW_FPS]
+
+
 def verdict(ev: dict, now: float) -> str:
     """One word for what the event is doing now."""
     if (ev.get("restarts") or 0) >= RESTART_LOOP_COUNT:
@@ -337,6 +350,10 @@ def verdict(ev: dict, now: float) -> str:
     down = ev.get("nicsDown") or []
     if down:
         return "camera-link-down"
+    if slow_cameras(ev):
+        # On 6493 a camera link forced to 100 Mbps took that camera from 25
+        # to 0 fps while the stream itself kept encoding at 25 (2026-10-14).
+        return "camera-degraded"
     st = ev.get("status") or {}
     # On air = the log's newest connect line has no failed attempt after it.
     # The status line's stream FPS is NOT proof: it counts frames leaving the
@@ -411,6 +428,10 @@ def observe(ev: dict, vpu_pid: Optional[str], now: float,
             elif k == "session":
                 ev["sessions"] = (ev.get("sessions") or 0) + 1
                 ev["vpuVersion"] = e.get("version")
+            elif k == "poeReset":
+                ev["poeResets"] = (ev.get("poeResets") or 0) + 1
+            elif k == "cameraReset":
+                ev["cameraResets"] = (ev.get("cameraResets") or 0) + 1
             elif k == "uncalibrated":
                 ev["calibrated"] = False
                 ev["sport"] = e.get("sport")
@@ -490,6 +511,9 @@ def summary(ev: dict, now: float, ended: bool) -> dict:
         "restarts": ev.get("restarts") or 0,
         "drops": ev.get("drops") or 0,
         "camerasDown": len(ev.get("nicsDown") or []),
+        "camerasSlow": slow_cameras(ev),
+        "poeResets": ev.get("poeResets") or 0,
+        "cameraResets": ev.get("cameraResets") or 0,
         "closeReason": ev.get("closeReason"),
         "calibrated": ev.get("calibrated", True) if ev.get("sessions") else ev.get("calibrated"),
         "sport": ev.get("sport"),
@@ -514,6 +538,7 @@ def summary(ev: dict, now: float, ended: bool) -> dict:
         if not first:
             out["reason"] = ("restart-loop" if out["restarts"] >= RESTART_LOOP_COUNT else
                              "camera-link-down" if out["camerasDown"] else
+                             "camera-degraded" if out["camerasSlow"] else
                              "stream-failing" if out["fails"] else "never-connected")
         else:
             out["reason"] = None

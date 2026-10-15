@@ -299,3 +299,22 @@ class OutageTest(RealLinesTest):
         s = event_watch.summary(ev, T0 + 3000, ended=False)
         self.assertEqual(s["path"], "zixi-2088")
         self.assertFalse(s["fallback"])
+
+
+class CameraDegradedTest(RealLinesTest):
+    """6493, 2026-10-14 21:07-21:10: camera NIC forced to 100 Mbps."""
+
+    SLOW = (
+        "Info\t| 2026-10-14 21:08:08.731 |POE\t|x(1)\t|x\t|Request to disable the Poe. Reset POE counter: 1. Sleep for: 20000. Thread Id: 11564\n"
+        "Alert\t| 2026-10-14 21:09:13.925 |Cameras\t|x(1)\t|x\t|Camera reset happened.\n"
+        "Info\t| 2026-10-14 21:10:00.000 |StatusReporter\t|StatusReporter.cpp(694)\t|StatusReporter::reportStatus\t|VPU:|Camera0AvgFps:Lst=0.00   |Camera0LowFpsCount:Lst=70.00   |Camera1AvgFps:Lst=25.60   |HD_Writer0_Stream0_FPS:Lst=25.00   |HD_Writer0_Stream0_Fails:Lst=0     |HD_Writer0_Stream0_UrlPort:Lst=1935.00 |Health:Lst=0.63    |\n"
+    )
+
+    def test_a_starved_camera_reads_camera_degraded_with_pixellots_own_resets(self):
+        ev = self.run_on(self.REAL + self.SLOW)
+        self.assertEqual(event_watch.verdict(ev, T0 + 3000), "camera-degraded")
+        s = event_watch.summary(ev, T0 + 3000, ended=False)
+        self.assertEqual(s["camerasSlow"], [0])
+        self.assertEqual(s["poeResets"], 1)
+        self.assertEqual(s["cameraResets"], 1)
+        self.assertEqual(s["live"]["health"], 0.63)
