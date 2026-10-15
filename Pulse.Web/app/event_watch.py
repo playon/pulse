@@ -51,8 +51,21 @@ RESTART_LOOP_COUNT = 2              # VPU.exe restarts within one event
 SCHEMA = "pulse.event/v1"
 
 _TIME_RE = re.compile(r"(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})")
-_EVENT_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_p_([0-9a-fA-F]{16,32})$")
-_EVENT_IN_LOG_RE = re.compile(r"recordedEvents[\\/]\d{4}-\d{2}-\d{2}_p_([0-9a-fA-F]{16,32})")
+_EVENT_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_p_([0-9A-Za-z]{8,40})$")
+# The event's folder, as VPU.exe logs it when it copies the calibration in:
+# "...recordedEvents/2026-10-14_p_6ad018b2ec5d0313d04118a6/..." or, for
+# Pixellot's own daily test, "..._p_DAILYTEST20261014/...".
+_EVENT_IN_LOG_RE = re.compile(r"recordedEvents[\\/]\d{4}-\d{2}-\d{2}_p_([0-9A-Za-z]{8,40})")
+# The per-second status line: the values the reader keeps from its newest one.
+_STATUS_KEYS = {
+    "CFPS": "Avr", "Camera0AvgFps": "Lst", "Camera1AvgFps": "Lst", "Camera2AvgFps": "Lst",
+    "Camera0LowFpsCount": "Lst", "Camera1LowFpsCount": "Lst", "Camera2LowFpsCount": "Lst",
+    "HD_Writer0_Stream0_FPS": "Lst", "HD_Writer0_Stream0_Fails": "Lst",
+    "HD_Writer0_Stream0_UrlPort": "Lst", "HD_WritersDroppedFrames": "Lst",
+    "HD_WritersSkippedFrames": "Lst", "Debayer_Drops": "Lst", "Health": "Lst",
+    "CumulativeNetworkIssues": "Lst", "CamerasHardResetCount": "Lst",
+    "CamerasSoftResetCount": "Lst",
+}
 
 
 def _line_time(line: str) -> Optional[float]:
@@ -106,11 +119,28 @@ def _read_new(path: str, offset: int, size: int):
     return data[:end + 1].decode("utf-8", "replace"), start + end + 1, skipped
 
 
+def parse_status(line: str) -> dict:
+    """The kept values from one StatusReporter::reportStatus line."""
+    out = {}
+    for key, field in _STATUS_KEYS.items():
+        m = re.search(r"\|" + key + r":[^|]*?" + field + r"=\s*(-?[0-9.]+)", line)
+        if m:
+            try:
+                out[key] = float(m.group(1))
+            except ValueError:
+                pass
+    return out
+
+
 def parse_vpu_lines(text: str) -> list:
     """The stream's events, in order, from VPU.exe log text."""
     out = []
+    status = None
     for line in text.splitlines():
-        if ("urlToStreamWriter" not in line and "Failed connecting to" not in line
+        if "StatusReporter::reportStatus" in line:
+            status = line          # only the newest one is parsed, below
+            continue
+        if ("urlToStreamWriter" not in line and "calibration" not in line and "Failed connecting to" not in line
                 and "failed, move to" not in line and "Created Zixi stream" not in line
                 and "Created Successfuly" not in line and "START NEW LOG SESSION" not in line
                 and "CloseUnit" not in line and "LEAKY BUCKET" not in line
@@ -142,10 +172,15 @@ def parse_vpu_lines(text: str) -> list:
             out.append({"t": t, "kind": "close", "reason": m.group(1) if m else None})
         elif "LEAKY BUCKET" in line and "dropping" in line:
             out.append({"t": t, "kind": "drop"})
+        elif "cannot find needed calibration for" in line:
+            m = re.search(r"cannot find needed calibration for (\S+?)\.", line)
+            out.append({"t": t, "kind": "uncalibrated", "sport": m.group(1) if m else None})
         else:
             m = _EVENT_IN_LOG_RE.search(line)
             if m:
-                out.append({"t": t, "kind": "eventId", "id": m.group(1).lower()})
+                out.append({"t": t, "kind": "eventId", "id": m.group(1)})
+    if status:
+        out.append({"t": _line_time(status), "kind": "status", "values": parse_status(status)})
     return out
 
 
@@ -204,7 +239,9 @@ def read_bench(path: str, header: Optional[list], since: float):
     return header, (summ if rows else None)
 
 
-def newest_event_id(events_dir: str = EVENTS_DIR) -> Optional[str]:
+def newest_event_id(events_dir: str = EVENTS_DIR, since: Optional[float] = None) -> Optional[str]:
+    """The newest event folder's id, only if it was written after `since`
+    (minus a margin): an older folder belongs to an earlier event."""
     best = None
     try:
         with os.scandir(events_dir) as it:
@@ -212,8 +249,10 @@ def newest_event_id(events_dir: str = EVENTS_DIR) -> Optional[str]:
                 m = _EVENT_DIR_RE.match(e.name)
                 if m and e.is_dir():
                     mt = e.stat().st_mtime
+                    if since is not None and mt < since - 900:
+                        continue
                     if best is None or mt > best[1]:
-                        best = (m.group(1).lower(), mt)
+                        best = (m.group(1), mt)
     except OSError:
         return None
     return best[0] if best else None
@@ -230,9 +269,16 @@ def verdict(ev: dict, now: float) -> str:
     down = ev.get("nicsDown") or []
     if down:
         return "camera-link-down"
+    st = ev.get("status") or {}
+    # The newest status line is the ground truth for "now": frames leaving
+    # the stream writer on a known port means it's on air, whatever the
+    # log lines before it said (and a reader that started mid-event may
+    # never have seen the connect line).
+    if (st.get("HD_Writer0_Stream0_FPS") or 0) > 0 and st.get("HD_Writer0_Stream0_UrlPort"):
+        return "on-air"
     conn = ev.get("connectedAt")
     last_fail = ev.get("lastFailAt")
-    if conn and (not last_fail or last_fail <= conn):
+    if conn and (not last_fail or last_fail <= conn) and not st:
         return "on-air"
     first_fail = ev.get("failingSince")
     if first_fail and now - first_fail >= FAILING_AFTER_SECONDS:
@@ -244,10 +290,10 @@ def observe(ev: dict, vpu_pid: Optional[str], now: float,
             log_dir: str = LOG_DIR, events_dir: str = EVENTS_DIR) -> dict:
     """Advance one event record by one tick. Returns the cost of the read."""
     cost = {"bytes": 0, "skipped": False}
-    if vpu_pid and ev.get("vpuPid") and vpu_pid != ev["vpuPid"]:
-        ev["restarts"] = (ev.get("restarts") or 0) + 1
+    pid_changed = bool(vpu_pid and ev.get("vpuPid") and vpu_pid != ev["vpuPid"])
     if vpu_pid:
         ev["vpuPid"] = vpu_pid
+    sessions_before = ev.get("sessions") or 0
 
     newest = _newest(log_dir, "VPU_", ".log")
     if newest:
@@ -258,6 +304,8 @@ def observe(ev: dict, vpu_pid: Optional[str], now: float,
             # the monitor noticed it: then only the last MAX_READ_BYTES count.
             first_look = ev.get("logFile") is None
             ev["logFile"], ev["offset"] = path, (max(0, size - MAX_READ_BYTES) if first_look else 0)
+            if first_look:
+                ev["midEventStart"] = True
         text, ev["offset"], skipped = _read_new(path, ev.get("offset") or 0, size)
         cost["bytes"], cost["skipped"] = len(text), skipped
         for e in parse_vpu_lines(text):
@@ -283,10 +331,37 @@ def observe(ev: dict, vpu_pid: Optional[str], now: float,
                 ev["closedAt"] = t
             elif k == "drop":
                 ev["drops"] = (ev.get("drops") or 0) + 1
+            elif k == "session":
+                ev["sessions"] = (ev.get("sessions") or 0) + 1
+                ev["vpuVersion"] = e.get("version")
+            elif k == "uncalibrated":
+                ev["calibrated"] = False
+                ev["sport"] = e.get("sport")
             elif k == "eventId":
-                ev.setdefault("eventId", e["id"])
+                # The newest session's folder names the event. A restart
+                # mid-event logs the same id again.
+                ev["eventId"] = e["id"]
+            elif k == "status":
+                ev["status"] = e["values"]
+                ev["statusAt"] = t
+                if (e["values"].get("HD_Writer0_Stream0_FPS") or 0) > 0 and e["values"].get("HD_Writer0_Stream0_UrlPort"):
+                    ev.setdefault("firstConnectedAt", t)
+                    ev.setdefault("via", "zixi" if e["values"]["HD_Writer0_Stream0_UrlPort"] in (2088, 443) else "rtmp")
+    if ev.pop("midEventStart", False) and not ev.get("sessions"):
+        # Started reading mid-event, past the session line: VPU.exe is in a
+        # session we didn't see begin, so the next one is a restart.
+        ev["sessions"] = 1
+        sessions_before = 1
+    # A VPU.exe restart: a new log session after the first one this event
+    # saw, or (when the log can't be read) a new process id.
+    new_sessions = (ev.get("sessions") or 0) - sessions_before
+    restarts_now = max(new_sessions - (1 if sessions_before == 0 else 0), 0)
+    if restarts_now == 0 and pid_changed and not newest:
+        restarts_now = 1
+    if restarts_now:
+        ev["restarts"] = (ev.get("restarts") or 0) + restarts_now
     if not ev.get("eventId"):
-        ev["eventId"] = newest_event_id(events_dir)
+        ev["eventId"] = newest_event_id(events_dir, since=ev.get("startedAt"))
 
     bench = _newest(log_dir, "AgentBenchmarks_", ".csv")
     if bench:
@@ -319,9 +394,12 @@ def summary(ev: dict, now: float, ended: bool) -> dict:
         end = ev.get("closedAt") or ev.get("lastReadAt") or now
         on_air = max(0, int(end - first))
     v = verdict(ev, now)
+    eid = ev.get("eventId")
+    st = ev.get("status") or {}
     out = {
         "schema": SCHEMA,
-        "eventId": ev.get("eventId"),
+        "eventId": eid,
+        "kind": ("daily-test" if eid and eid.upper().startswith("DAILYTEST") else "event") if eid else None,
         "state": ("ended" if ended else v),
         "startedAt": _iso(ev.get("startedAt")),
         "wentOnAir": bool(first),
@@ -335,7 +413,22 @@ def summary(ev: dict, now: float, ended: bool) -> dict:
         "drops": ev.get("drops") or 0,
         "camerasDown": len(ev.get("nicsDown") or []),
         "closeReason": ev.get("closeReason"),
+        "calibrated": ev.get("calibrated", True) if ev.get("sessions") else ev.get("calibrated"),
+        "sport": ev.get("sport"),
+        "vpuVersion": ev.get("vpuVersion"),
         "peak": {k: _round(val) for k, val in (ev.get("peak") or {}).items()},
+        "live": {
+            "fps": st.get("HD_Writer0_Stream0_FPS"),
+            "cameraFps": [st[k] for k in ("Camera0AvgFps", "Camera1AvgFps", "Camera2AvgFps") if k in st],
+            "lowFpsCount": sum(st.get(k) or 0 for k in ("Camera0LowFpsCount", "Camera1LowFpsCount", "Camera2LowFpsCount")) if st else None,
+            "streamFails": st.get("HD_Writer0_Stream0_Fails"),
+            "port": int(st["HD_Writer0_Stream0_UrlPort"]) if st.get("HD_Writer0_Stream0_UrlPort") else None,
+            "droppedFrames": st.get("HD_WritersDroppedFrames"),
+            "health": st.get("Health"),
+            "networkIssues": st.get("CumulativeNetworkIssues"),
+            "cameraResets": (st.get("CamerasHardResetCount") or 0) + (st.get("CamerasSoftResetCount") or 0) if st else None,
+            "at": _iso(ev.get("statusAt")),
+        } if st else None,
     }
     if ended:
         out["endedAt"] = _iso(ev.get("closedAt") or now)

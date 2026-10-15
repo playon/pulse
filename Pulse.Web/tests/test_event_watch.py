@@ -152,3 +152,76 @@ class EventWatchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RealLinesTest(unittest.TestCase):
+    """Lines copied from 6493's VPU log during the 2026-10-14 test event."""
+
+    REAL = (
+        "INFO\t| 2026-10-14 20:06:21 |MAIN\t|x(1)\t|x\t|START NEW LOG SESSION >>> VPU.exe - Version: 5.37.3 >>> Host: vpu\n"
+        "Info\t| 2026-10-14 20:06:24.576 |DEFAULT_MODULE\t|x(1)\t|x\t|Copying directory from C:\\Pixellot\\Data\\configuration/calibration to d:/recordedEvents/2026-10-14_p_6ad018b2ec5d0313d04118a6/2026-10-14_p_6ad018b2ec5d0313d04118a6_metadata.2011.123.i/calibration\n"
+        "Error\t| 2026-10-14 20:06:25.242 |VPU\t|x(1)\t|x\t|cannot find needed calibration for Americanfootball. Using default fixed-frame. turning off AP\n"
+        "Info\t| 2026-10-14 20:06:35.041 |AVWriter\t|x(1)\t|x\t|urlToStreamWriter for urls rtsp://@:7788 finish\n"
+        "Info\t| 2026-10-14 20:07:35.101 |AVWriter\t|x(1)\t|x\t|urlToStreamWriter for urls zixi://pxltd-100-62-83-36.pixellot.stream:2088/0_hd_2000|zixi://pxltd-100-62-83-36.pixellot.stream:443/0_hd_2000 finish\n"
+        "Info\t| 2026-10-14 20:07:35.308 |ZixiStreams\t|x(1)\t|x\t|Created Zixi stream: HD_Writer0_Stream0\n"
+        "Alert\t| 2026-10-14 20:11:05.944 |FFMPEGStreams\t|x(1)\t|x\t|Video Connection d:\\recordedEvents\\2026-10-14_p_6ad018b2ec5d0313d04118a6\\x_hd.mkv Created Successfuly\n"
+        "Info\t| 2026-10-14 20:31:51.804 |StatusReporter\t|StatusReporter.cpp(694)\t|StatusReporter::reportStatus\t|VPU:|CFPS:,Avr=25.00  ,Min=24.99  ,Max=25.01   |Camera0AvgFps:Lst=25.40   |Camera0LowFpsCount:Lst=0.00    |Camera1AvgFps:Lst=25.40   |Camera1LowFpsCount:Lst=0.00    |Debayer_Drops:Lst=10.00   |HD_Writer0_Stream0_FPS:Lst=25.00   |HD_Writer0_Stream0_Fails:Lst=0     |HD_Writer0_Stream0_UrlPort:Lst=2088.00 |HD_WritersDroppedFrames:Lst=0.00    |Health:Lst=1.00    |\n"
+    )
+    DAILY = (
+        "INFO\t| 2026-10-14 10:59:16 |MAIN\t|x(1)\t|x\t|START NEW LOG SESSION >>> VPU.exe - Version: 5.37.3 >>> Host: vpu\n"
+        "Info\t| 2026-10-14 10:59:45.350 |DEFAULT_MODULE\t|x(1)\t|x\t|Copying directory from C:\\Pixellot\\Data\\configuration/calibration to d:/recordedEvents/2026-10-14_p_DAILYTEST20261014/2026-10-14_p_DAILYTEST20261014_metadata.0330.10.i/calibration\n"
+        "Alert\t| 2026-10-14 11:30:25.025 |VPUGenericCommand\t|x(1)\t|x\t|GRPC receiving CloseUnit Command from Agent. Reason: \"AgentGui: stop recorder in manual mode was pressed\"\n"
+    )
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.logs = os.path.join(self.tmp.name, "Log")
+        os.makedirs(self.logs)
+        self.vpu = os.path.join(self.logs, "VPU_vpu_20261014_105916.log")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_on(self, text, ev=None):
+        with open(self.vpu, "a", encoding="utf-8") as fh:
+            fh.write(text)
+        ev = ev if ev is not None else {"startedAt": T0}
+        event_watch.observe(ev, "1", T0 + 3000, log_dir=self.logs, events_dir=self.tmp.name)
+        return ev
+
+    def test_the_test_event_reads_on_air_uncalibrated_on_zixi_2088(self):
+        ev = self.run_on(self.REAL)
+        self.assertEqual(event_watch.verdict(ev, T0 + 3000), "on-air")
+        s = event_watch.summary(ev, T0 + 3000, ended=False)
+        self.assertEqual(s["eventId"], "6ad018b2ec5d0313d04118a6")
+        self.assertEqual(s["kind"], "event")
+        self.assertFalse(s["calibrated"])
+        self.assertEqual(s["sport"], "Americanfootball")
+        self.assertEqual(s["via"], "zixi")
+        self.assertEqual(s["live"]["port"], 2088)
+        self.assertEqual(s["live"]["fps"], 25.0)
+        self.assertEqual(s["live"]["cameraFps"], [25.4, 25.4])
+        self.assertEqual(s["restarts"], 0)
+        self.assertEqual(ev["chain"][0], "zixi://pxltd-100-62-83-36.pixellot.stream:2088/0_hd_2000")
+
+    def test_a_second_session_is_a_restart(self):
+        ev = self.run_on(self.REAL)
+        ev = self.run_on(self.REAL.splitlines(True)[0], ev)
+        self.assertEqual(ev["restarts"], 1)
+
+    def test_the_daily_test_is_labelled_and_never_borrows_an_older_event(self):
+        ev = self.run_on(self.DAILY)
+        s = event_watch.summary(ev, T0 + 3000, ended=True)
+        self.assertEqual(s["eventId"], "DAILYTEST20261014")
+        self.assertEqual(s["kind"], "daily-test")
+        self.assertEqual(s["closeReason"], "AgentGui: stop recorder in manual mode was pressed")
+        self.assertFalse(s["wentOnAir"])
+
+
+class MidEventTest(RealLinesTest):
+    def test_a_reader_that_starts_mid_event_trusts_the_status_line_and_counts_the_next_restart(self):
+        status_only = self.REAL.splitlines(True)[-1]
+        ev = self.run_on(status_only)                         # no session or connect line seen
+        self.assertEqual(event_watch.verdict(ev, T0 + 3000), "on-air")
+        ev = self.run_on(self.REAL.splitlines(True)[0], ev)   # then VPU.exe restarts
+        self.assertEqual(ev["restarts"], 1)

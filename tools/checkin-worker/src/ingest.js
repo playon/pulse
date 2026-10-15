@@ -298,7 +298,7 @@ function eventDoc(e) {
   const id = str(e.eventId, 64);
   const state = str(e.state);
   return {
-    id: id && /^[0-9a-f]{16,32}$/.test(id) ? id : null,
+    id: id && /^[0-9A-Za-z]{8,40}$/.test(id) ? id : null,
     state: EVENT_STATES.has(state) ? state : null,
     reason: str(e.reason),
     onAir: typeof e.wentOnAir === "boolean" ? (e.wentOnAir ? 1 : 0) : null,
