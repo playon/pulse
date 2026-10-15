@@ -1590,7 +1590,7 @@ def _uplink_findings(network_config, wifi) -> list:
                 "code": "wifi-uplink",
                 "severity": "warning",
                 "category": "Network",
-                "title": "VPU is using Wi-Fi for its internet connection. Switch to wired Ethernet",
+                "title": "VPU is using Wi-Fi for its internet connection",
                 "recommendation": (
                     (
                         "The VPU is reaching the internet over Wi-Fi, which adds lag and dropouts "
@@ -1689,7 +1689,7 @@ def _stream_findings(port_tests) -> list:
             "code": "stream-blocked",
             "severity": "critical",
             "category": "Network",
-            "title": "Streaming is blocked, so the VPU can't broadcast",
+            "title": "Streaming is blocked by the venue's network",
             "recommendation": (
                 "The venue's network is blocking all three connections the VPU uses to send "
                 "live video, so the game can't broadcast. Ask venue IT to open at least one."
@@ -1707,7 +1707,7 @@ def _stream_findings(port_tests) -> list:
             "code": "stream-degraded-rtmp",
             "severity": "critical",
             "category": "Network",
-            "title": "Streaming has dropped to its last-resort path, so games start about 4 minutes late",
+            "title": "Streaming is using its last-resort connection (1935 TCP)",
             "recommendation": (
                 "The venue's network blocks both normal streaming connections, so games use the "
                 "last-resort path: they start about 4 minutes late and have no protection "
@@ -1726,8 +1726,8 @@ def _stream_findings(port_tests) -> list:
             "severity": "warning",
             "category": "Network",
             "title": (
-                "Streaming is riding its backup connection"
-                if on_backup else "Streaming resiliency is reduced"
+                "Streaming is using its backup connection (443 UDP)"
+                if on_backup else "Streaming backup connection is blocked"
             ),
             "recommendation": (
                 "The main streaming connection is blocked, so the VPU is using its backup. "
@@ -1961,7 +1961,7 @@ def _tls_findings(tls_inspection, lmi_log=None) -> list:
                     "code": "tls-filtered",
                     "severity": "critical",
                     "category": "Network",
-                    "title": f"{who} is blocking {n} Pixellot service{'s' if n != 1 else ''}",
+                    "title": "The venue's web filter is blocking Pixellot services",
                     "recommendation": (
                         f"{who_lower} is blocking the services below by category, so the VPU "
                         f"can't reach them. Ask venue IT to add a category exception for them "
@@ -2028,7 +2028,7 @@ def _lmi_findings(lmi_log) -> list:
         "code": "lmi-ssl-blocked",
         "severity": "warning",
         "category": "Network",
-        "title": "Venue network is blocking LogMeIn, so remote support can't reach this VPU",
+        "title": "Venue network is blocking LogMeIn",
         "recommendation": (
             "The venue's firewall is cutting off LogMeIn, so our support team can't reach this "
             "VPU remotely. Ask venue IT to exempt LogMeIn from SSL inspection and from their "
@@ -2145,8 +2145,7 @@ def _binary_findings(binaries) -> list:
             "code": "pixellot-dll-missing",
             "severity": "critical",
             "category": "Pixellot",
-            "title": f"{exe} can't start because {shown} {'is' if len(dlls) == 1 else 'are'} "
-                     f"missing, so the VPU can't record or stream",
+            "title": f"{exe} can't start because {shown} {'is' if len(dlls) == 1 else 'are'} missing",
             "recommendation": (
                 f"{who} needs {noun} that {'is' if len(dlls) == 1 else 'are'} missing from the VPU "
                 f"({shown}), so it stops at launch and no game can record or stream. "
@@ -2177,7 +2176,7 @@ def _binary_findings(binaries) -> list:
             "code": "pixellot-start-error",
             "severity": "critical",
             "category": "Pixellot",
-            "title": f"{exe} is failing at startup, so the VPU can't record or stream",
+            "title": f"{exe} is failing at startup",
             "recommendation": (
                 f"{who} stops at startup with a Windows error (\"{text}\"), so no game can record "
                 f"or stream. Escalate to Pixellot support to repair the Pixellot software install."
@@ -2191,7 +2190,7 @@ def _binary_findings(binaries) -> list:
             "code": "pixellot-start-error-recent",
             "severity": "warning",
             "category": "Pixellot",
-            "title": f"{exe} failed to start in the last day, so the next game may not stream",
+            "title": f"{exe} failed to start in the last day",
             "recommendation": (
                 f"{who} last failed at startup at {when} with a Windows error (\"{text}\"), and "
                 f"Pulse can't tell whether it has started cleanly since. Check that the last "
@@ -2266,10 +2265,9 @@ def _graphics_findings(gd) -> list:
         latest_failed = judged[0]["status"] == "failed"
         n, m = len(failed), len(judged)
         title = (
-            f"Graphics didn't reach the broadcast on {n} of the last {m} event{'s' if m != 1 else ''}, "
-            "so those games streamed with no scorebug"
+            f"Graphics didn't reach the broadcast on {n} of the last {m} event{'s' if m != 1 else ''}"
             if latest_failed else
-            f"Graphics failed on {n} of the last {m} events, so some games streamed with no scorebug"
+            f"Graphics failed on {n} of the last {m} events"
         )
         received = [e.get("vpuReceived") for e in failed]
         out.append({
@@ -2320,7 +2318,7 @@ def _graphics_findings(gd) -> list:
             "code": "graphics-engine-none",
             "severity": "warning",
             "category": "Pixellot",
-            "title": "No scoreboard type is selected on this VPU, so it turns graphics off for every game",
+            "title": "No scoreboard type is selected on this VPU",
             "recommendation": (
                 "The VPU has no scoreboard type selected, so it switches graphics off when each "
                 "game starts and the stream goes out with no scorebug. Support: set the scoreboard "
@@ -2475,7 +2473,7 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                     "code": "tz-non-us",
                     "severity": "critical",
                     "category": "System",
-                    "title": "VPU clock is set to a non-US time zone, so games may go on or off air at the wrong time",
+                    "title": "VPU clock is set to a non-US time zone",
                     "recommendation": (
                         f"The VPU's clock is set to {shown}, not a US time zone, so it may go "
                         f"on air or off air at the wrong time. Open Date & Time settings and "
@@ -2574,7 +2572,7 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                 "code": "gpu-none",
                 "severity": "critical",
                 "category": "Hardware",
-                "title": "No NVIDIA graphics card detected, so this VPU can't encode video",
+                "title": "No NVIDIA graphics card detected",
                 "recommendation": (
                     "No NVIDIA graphics card was found, so this VPU can't encode video. If a card "
                     "is fitted, check that it's seated and its driver is installed."
@@ -2613,7 +2611,7 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                     "code": "gpu-igpu-only",
                     "severity": "warning",
                     "category": "Hardware",
-                    "title": "No dedicated graphics card, so this is the wrong hardware for a VPU",
+                    "title": "No dedicated graphics card",
                     "recommendation": (
                         f"This VPU only has built-in graphics ({vendor_str}), so it's missing "
                         f"the dedicated NVIDIA or AMD card a VPU needs to encode video. Check "
@@ -2815,7 +2813,7 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                             "code": "watchdog-down",
                             "severity": "warning",
                             "category": "Services",
-                            "title": "Pixellot watchdog (KeepAgentUp) not running",
+                            "title": "KeepAgentUp is not running",
                             "recommendation": (
                                 "The watchdog that restarts Pixellot's software after a crash "
                                 "isn't running, so a crash would stay down until someone "
@@ -2861,6 +2859,17 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
         # falls back to the ARP-only behavior.
         probe_results = probe_results or {}
         ocr_confirmed = any(r.get("is_ocr") for r in probe_results.values())
+        # The NIC collector picks adapters by chipset, and the onboard
+        # motherboard port often shares the camera card's chipset, so it is
+        # in `ports` too. Its speed is the venue uplink's business, not a
+        # camera link, so find it by PCI bus (the adapter role) and skip it.
+        # Without network_config nothing is excluded, as before.
+        _classify_network_adapters(network_config)
+        onboard_macs = {
+            _mac_to_int(a.get("macAddress"))
+            for a in ((network_config or {}).get("adapters") or [])
+            if a.get("role") == "motherboard"
+        } - {_mac_to_int(None)}
         for idx, port in enumerate(ordered_ports):
             label = f"Port {idx + 1}"
             is_up = port.get("status") == "Up"
@@ -2889,7 +2898,8 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
             # OCR's Dynacolor OUI (00:D0:89), so the OUI can't tell them apart
             # (and the raw ARP MAC is dash-formatted, so the old colon-prefix
             # check never matched anyway).
-            if is_up and speed and speed < 1000:
+            on_motherboard = _mac_to_int(port.get("mac")) in onboard_macs
+            if is_up and speed and speed < 1000 and not on_motherboard:
                 port_is_ocr = any(
                     (a.get("ip") or "").strip() in _DEFAULT_OCR_IPS
                     for a in pixellot_arps
@@ -3035,6 +3045,9 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
 # readiness `info` (it never stops tonight's game); iGPU-only is `warning` but
 # readiness `blocker` (wrong hardware, can't encode). Don't reuse `severity`.
 READINESS_POLICY_VERSION = "v1"
+# A drive over this share full is a readiness finding (C: blocks, D: informs).
+# The C: title names it, so the title and the check cannot drift apart.
+READINESS_DISK_FULL_PCT = 90
 
 _READINESS_POLICY = {
     # ── BLOCKERS → FAIL (don't expect a clean broadcast tonight) ──
@@ -3076,6 +3089,8 @@ _READINESS_POLICY = {
                                          #     is its own code. Field: Linewize,
                                          #     Ohio venue 2026-08-19, where this
                                          #     scored PASS.
+    "install-incomplete":    "blocker",  # F13 interrupted installer (Ian, 2026-10-15: was risk)
+    "ram-insufficient":      "blocker",  # F21 <32 GB host (Ian, 2026-10-15: was risk)
     # F15a C: disk >90% is computed below from disk-health (not the
     # `disk-critical` finding — see _compute_readiness).
 
@@ -3105,10 +3120,8 @@ _READINESS_POLICY = {
                                          #     info and Copy for ticket pasted a critical
                                          #     wiring fault under "Worth knowing". Ian's
                                          #     call: risk.
-    "install-incomplete":    "risk",     # F13 interrupted installer, agent up
     # F16 (`disk-low`, a volume at 80–90%) removed — disk fill is critical-only now.
     "disk-smart-prefail":    "risk",     # F16b drive SMART pre-fail / uncorrectable errors
-    "ram-insufficient":      "risk",     # F21 <32 GB host
     "ntp-unapproved":        "risk",     # F22 drift can break signed-URL stream
     "wifi-uplink":           "risk",     # F24 Wi-Fi uplink — latency/loss
     "graphics-handoff-failed": "risk",   # F40 scorebug never reached VPU.exe on recent
@@ -3122,6 +3135,16 @@ _READINESS_POLICY = {
                                          #     scoreboard type is selected. Airs clean
                                          #     of graphics every game until fixed.
                                          #     Field: Merrol Hyde, 2026-08-17.
+    "disk-smart-wear":       "risk",     # SSD at 80%+ of rated write life (Ian, 2026-10-15: was info)
+    "sw-security":           "risk",     # F29 (blocking agent.exe would surface as F2) (Ian, 2026-10-15: was info)
+    "sw-crypto-miner":       "risk",     # F30 (Ian, 2026-10-15: was info)
+    "sw-torrent":            "risk",     # F31 (Ian, 2026-10-15: was info)
+    "sw-system-cleaner":     "risk",     # F32 (Ian, 2026-10-15: was info)
+    "sw-game-platform":      "risk",     # F34 (Ian, 2026-10-15: was info)
+    "sw-consumer-sync":      "risk",     # F35 (Ian, 2026-10-15: was info)
+    "ssl-inspection-support": "risk",    # F37b only support-plane hosts inspected (LogMeIn /
+                                         #      python.org); every broadcast host passed.
+                                         #      (Ian, 2026-10-15: was info)
     # F14 temp≥90, F15b D:>90, F17 CPU sustained, F19 mem sustained are computed
     # below (readiness-specific thresholds the dashboard findings don't surface).
 
@@ -3135,29 +3158,18 @@ _READINESS_POLICY = {
     # F15a/F15b report those drives at their own class. This entry is the
     # fallback for any OTHER volume >90%.
     "disk-critical":         "info",
-    "disk-smart-wear":       "info",     # SSD ≥80% rated life — heads-up, won't stop tonight's game
     "temp-critical":         "info",     # 85°C snapshot — readiness gate is 90°C (F14)
     "os-eos-reached":        "info",     # F26
     "os-eos-imminent":       "info",     # F27
     "os-eos-approaching":    "info",     # F28
     "os-mainstream-eos":     "info",     # headline EOS passed, IoT servicing continues
-    "sw-security":           "info",     # F29 (if it's blocking agent.exe, that surfaces as F2)
-    "sw-crypto-miner":       "info",     # F30
-    "sw-torrent":            "info",     # F31
-    "sw-system-cleaner":     "info",     # F32
     "sw-alt-remote":         "info",     # F33
-    "sw-game-platform":      "info",     # F34
-    "sw-consumer-sync":      "info",     # F35
     "uptime-high":           "info",     # F36
     "pixellot-start-error-past": "info", # F43c same, 1-7 days ago, not since.
     "tls-filtered-support":  "info",     # F38b only support-plane hosts filtered
                                          #      (LogMeIn / python.org) - remote
                                          #      support and installer downloads
                                          #      suffer, tonight's game does not.
-    "ssl-inspection-support": "info",    # F37b only support-plane hosts inspected
-                                         #      (LogMeIn / python.org); every
-                                         #      broadcast host passed. Same
-                                         #      rationale as F38b.
     "lmi-ssl-blocked":       "info",     # F39 LogMeIn's own service log shows the
                                          #     venue killing its TLS handshakes
                                          #     (SSL error on client hello) with no
@@ -3299,14 +3311,14 @@ def _compute_readiness(findings, performance=None, disk_health=None,
     # (app.js ~6115) — so a tech working storage sees the urgency there,
     # where the fix is.
     c_pct, d_pct = _disk_used_by_letter(disk_health, performance)
-    if isinstance(c_pct, (int, float)) and c_pct > 90:
-        add("blocker", "disk-c-critical", "System drive (C:) almost full",
+    if isinstance(c_pct, (int, float)) and c_pct > READINESS_DISK_FULL_PCT:
+        add("blocker", "disk-c-critical", f"System drive (C:) is over {READINESS_DISK_FULL_PCT}% full",
             f"C: is {c_pct:g}% full. The live stream is processed on C:, so if it "
             f"fills the VPU can't broadcast. Free up space on C: now.",
             "Storage")
-    if isinstance(d_pct, (int, float)) and d_pct > 90:
+    if isinstance(d_pct, (int, float)) and d_pct > READINESS_DISK_FULL_PCT:
         add("info", "disk-d-critical",
-            "Recording drive (D:) almost full, so recordings may not save",
+            "Recording drive (D:) almost full",
             f"D: is {d_pct:g}% full. The game recording (VOD) is saved to D:, so if "
             f"it fills during the game the recording may not save. Free up space "
             f"on D:.", "Storage")
@@ -3914,7 +3926,7 @@ def _camera_count_findings(ports, expected_main, probe_results, probes_attempted
             "code": CAM_COUNT_PENDING,
             "severity": "warning",
             "category": "Camera",
-            "title": "Cameras not confirmed yet, so this verdict may change",
+            "title": "Cameras not confirmed yet",
             "recommendation": (
                 "Pulse just started and the cameras haven't answered yet. It checks again "
                 "in about a minute; nothing to do unless this stays."
@@ -3951,8 +3963,8 @@ def _camera_count_findings(ports, expected_main, probe_results, probes_attempted
             "code": "cam-none",
             "severity": "critical",
             "category": "Camera",
-            "title": (f"No main cameras detected (expected {expected_main}), so there's nothing to broadcast"
-                      if known else "No main cameras detected, so there's nothing to broadcast"),
+            "title": (f"No main cameras detected (expected {expected_main})"
+                      if known else "No main cameras detected"),
             "recommendation": (
                 (f"The VPU expects {expected_main} main camera{s_} but can't see any on the camera card, "
                  if known else "The VPU can't see any main cameras on the camera card, ")

@@ -45,7 +45,7 @@ in the body.
 
 | Part | Rule | Example (all streaming blocked) |
 |---|---|---|
-| **Title** | `<cause>, so <effect>`. Most titles already do this. | Streaming is blocked, so the VPU can't broadcast (today's title, keep it) |
+| **Title** | The cause, short. The effect goes in the body, not the title. (Was `<cause>, so <effect>`; changed 2026-10-15, Ian.) | Streaming is blocked by the venue's network |
 | **Body: cause + effect** | One sentence. Name the thing, not the protocol. | The venue's network is blocking all three connections the VPU uses to send live video. |
 | **Body: fix + owner** | One sentence. A step someone can do, and who does it. | Ask venue IT to open at least one. |
 | **For venue IT** | Optional line. Ports, domains, lists. Protocol names live here and only here. | Outbound UDP 2088 and UDP 443 to prod-echo.pixellot.tv, and TCP 1935. Filters that match by destination must also allow *.pixellot.stream. |

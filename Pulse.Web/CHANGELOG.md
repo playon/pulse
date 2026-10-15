@@ -28,6 +28,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - ScoreConnect tab: a **Reinstall ScoreConnect III** button. It stops the service, deletes the whole Sportzcast LLC program folder, and installs a fresh copy, with progress shown in Pulse. Saved settings and logs are kept. Use it when ScoreConnect III won't start or keeps failing.
 - Settings (dev channel only): a **Fleet Monitoring** card. **Opt in this unit** installs the fleet monitor, which checks every 5 minutes whether the VPU is ready to stream and reports to Pulse Vitals. The card shows when it last checked and reported, and **Opt out** removes it. A production launch on the same VPU doesn't affect it.
 
+### Changed
+- Finding titles are shorter: the effect ("so games start late") is no longer in the title, only in the details. For example, "Streaming is blocked by the venue's network", "KeepAgentUp is not running" and "Cameras not confirmed yet". The streaming backup finding now says which case it is: "Streaming is using its backup connection (443 UDP)", or "Streaming backup connection is blocked" when you're streaming on the main connection and the backup is blocked. The C: drive finding names its limit: "System drive (C:) is over 90% full".
+- Stream Readiness is stricter about six things. It now reads **FAIL** when a Pixellot update didn't finish, or when the VPU doesn't have enough memory. It now reads **WARN**, not PASS, for a worn SSD (80% or more of its rated writes), unsupported security software, a crypto miner, a torrent client, a system cleaner, a gaming platform, a cloud-sync client, or a venue firewall inspecting support services such as LogMeIn.
+
+### Fixed
+- A slow onboard network port is no longer reported as "Network port N is running slow". Only the camera card's ports are checked for gigabit speed.
+
 ## [1.4.1] - 2026-10-13
 
 ### Changed
