@@ -434,3 +434,43 @@ class TestSkippedCollector(unittest.IsolatedAsyncioTestCase):
         finally:
             for n, v in saved.items():
                 setattr(powershell, n, v)
+
+
+class TestEventEndGrace(unittest.TestCase):
+    """A VPU.exe restart gap must not end the event or start a full pass."""
+
+    def setUp(self):
+        import monitor_once
+        self.mo = monitor_once
+        self.tmp = tempfile.TemporaryDirectory()
+        self.saved = (monitor_once.EVENT_PATH, monitor_once.QUEUE_PATH, monitor_once.POSTS_PATH)
+        monitor_once.EVENT_PATH = os.path.join(self.tmp.name, "event.json")
+        monitor_once.QUEUE_PATH = os.path.join(self.tmp.name, "queue.json")
+        monitor_once.POSTS_PATH = os.path.join(self.tmp.name, "posts.json")
+        self.sent = []
+        self.saved_send = monitor_once.checkin_lite.send
+        monitor_once.checkin_lite.send = lambda q, e, user_agent="": self.sent.append(e) or True
+        with open(monitor_once.EVENT_PATH, "w") as fh:
+            json.dump({"event": {"startedAt": 1000.0, "eventId": "6ad018b2ec5d0313d04118a6"}}, fh)
+
+    def tearDown(self):
+        self.mo.EVENT_PATH, self.mo.QUEUE_PATH, self.mo.POSTS_PATH = self.saved
+        self.mo.checkin_lite.send = self.saved_send
+        self.tmp.cleanup()
+
+    def test_first_tick_without_vpu_is_pending_second_ends(self):
+        self.assertEqual(self.mo._event_end(2000.0), "pending")
+        self.assertEqual(self.sent, [])
+        note = self.mo._event_end(2300.0)
+        self.assertTrue(note.startswith("event-end"))
+        self.assertEqual(self.sent[0]["reason"], "event-end")
+        self.assertIsNone(self.mo._event_end(2600.0))      # forgotten after the end
+
+    def test_vpu_back_clears_the_pending_end(self):
+        self.assertEqual(self.mo._event_end(2000.0), "pending")
+        with open(self.mo.EVENT_PATH) as fh:
+            rec = json.load(fh)
+        rec["event"].pop("goneAt")                        # what _event_tick does on return
+        with open(self.mo.EVENT_PATH, "w") as fh:
+            json.dump(rec, fh)
+        self.assertEqual(self.mo._event_end(2300.0), "pending")   # a fresh gap, not an end

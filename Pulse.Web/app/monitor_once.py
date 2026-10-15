@@ -287,6 +287,8 @@ def _event_tick(tick_wall: float) -> str:
     a new verdict holds for two reads in a row, or never otherwise."""
     rec = _load_json(EVENT_PATH)
     ev = rec.get("event")
+    if isinstance(ev, dict):
+        ev.pop("goneAt", None)        # VPU.exe is back: it was a restart, not the end
     new_event = not isinstance(ev, dict)
     if new_event:
         ev = {"startedAt": tick_wall}
@@ -323,11 +325,21 @@ def _event_tick(tick_wall: float) -> str:
 
 
 def _event_end(tick_wall: float) -> Optional[str]:
-    """VPU.exe has stopped: post the event's summary once, and forget it."""
+    """VPU.exe has stopped: post the event's summary once, and forget it.
+
+    Only on the second tick in a row without VPU.exe. Pixellot relaunched a
+    killed VPU.exe in 5 s on 6493 (2026-10-14); a tick landing in that gap
+    must neither end the event nor start a full pass (port tests, PowerShell)
+    while VPU.exe is coming back. Returns "pending" for that first tick."""
     rec = _load_json(EVENT_PATH)
     ev = rec.get("event")
     if not isinstance(ev, dict):
         return None
+    if not ev.get("goneAt"):
+        ev["goneAt"] = tick_wall
+        rec["event"] = ev
+        _save_json(EVENT_PATH, rec)
+        return "pending"
     event_watch.observe(ev, None, tick_wall)     # the close reason, the last lines
     ok = checkin_lite.send(QUEUE_PATH, _event_entry("event-end", ev, tick_wall, ended=True),
                            user_agent=f"Pulse/{_app_version()}")
@@ -531,6 +543,10 @@ def main_entry(argv) -> int:
                 _mark_vpu_log()
         except Exception as e:
             end_note = f"event end failed: {type(e).__name__}: {e}"
+        if end_note == "pending" and not force:
+            # VPU.exe just disappeared: could be a restart. No pass this tick.
+            _record_tick(started, None, event_live, images, state, "vpu.exe gone, event end pending")
+            return 0
     plan = "full" if force else monitor.plan_tick(state, tick_wall, event_live)
     if not plan:
         _record_tick(started, None, event_live, images, state, end_note or "ok")
