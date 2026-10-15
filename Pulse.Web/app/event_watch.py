@@ -67,6 +67,10 @@ _STATUS_KEYS = {
     "HD_WritersSkippedFrames": "Lst", "Debayer_Drops": "Lst", "Health": "Lst",
     "CumulativeNetworkIssues": "Lst", "CamerasHardResetCount": "Lst",
     "CamerasSoftResetCount": "Lst",
+    # Scorebug: data arriving from the scoreboard, and seconds since the
+    # graphics last changed (6493's static test scorebug read 0/s and an
+    # ever-growing delta for the whole event).
+    "ScoreboardDataFrequencyPerSecond": "Lst", "GraphicsTimestampsDelta": "Avr",
 }
 
 
@@ -374,8 +378,10 @@ def verdict(ev: dict, now: float) -> str:
 
 
 def observe(ev: dict, vpu_pid: Optional[str], now: float,
-            log_dir: str = LOG_DIR, events_dir: str = EVENTS_DIR) -> dict:
-    """Advance one event record by one tick. Returns the cost of the read."""
+            log_dir: str = LOG_DIR, events_dir: str = EVENTS_DIR,
+            images: Optional[set] = None) -> dict:
+    """Advance one event record by one tick. Returns the cost of the read.
+    `images` is the tick's tasklist (already collected), for ScoreConnect."""
     cost = {"bytes": 0, "skipped": False}
     pid_changed = bool(vpu_pid and ev.get("vpuPid") and vpu_pid != ev["vpuPid"])
     if vpu_pid:
@@ -483,6 +489,11 @@ def observe(ev: dict, vpu_pid: Optional[str], now: float,
             nics = summ.get("cameraNics") or {}
             linked = ev.setdefault("nicsLinked", [n for n, v in nics.items() if v and v > 0])
             ev["nicsDown"] = [n for n in linked if nics.get(n) == 0]
+    if images is not None:
+        sc = any(n.startswith("scoreconnect") for n in images)
+        ev["scoreConnectRunning"] = sc
+        if not sc:
+            ev["scoreConnectDownSeen"] = True
     ev["lastReadAt"] = now
     return cost
 
@@ -526,6 +537,8 @@ def summary(ev: dict, now: float, ended: bool) -> dict:
         "camerasLost": sorted((ev.get("unreachable") or {}).keys()),
         "cameraResets": ev.get("cameraResets") or 0,
         "closeReason": ev.get("closeReason"),
+        "scoreConnectRunning": ev.get("scoreConnectRunning"),
+        "scoreConnectWasDown": bool(ev.get("scoreConnectDownSeen")),
         "calibrated": ev.get("calibrated", True) if ev.get("sessions") else ev.get("calibrated"),
         "sport": ev.get("sport"),
         "vpuVersion": ev.get("vpuVersion"),
@@ -540,6 +553,8 @@ def summary(ev: dict, now: float, ended: bool) -> dict:
             "health": st.get("Health"),
             "networkIssues": st.get("CumulativeNetworkIssues"),
             "cameraResets": (st.get("CamerasHardResetCount") or 0) + (st.get("CamerasSoftResetCount") or 0) if st else None,
+            "scoreboardDataPerSecond": st.get("ScoreboardDataFrequencyPerSecond"),
+            "scorebugAgeSeconds": int(st["GraphicsTimestampsDelta"]) if st.get("GraphicsTimestampsDelta") is not None else None,
             "at": _iso(ev.get("statusAt")),
         } if st else None,
     }

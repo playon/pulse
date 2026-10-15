@@ -178,6 +178,7 @@ _CPU = None
 
 
 _VPU_PID = None   # set by _running_images; a change mid-event is a VPU.exe restart
+_IMAGES = None    # the tick's process names, reused by the event reader
 
 
 def _running_images():
@@ -192,7 +193,7 @@ def _running_images():
         ).stdout or ""
     except Exception:
         return None
-    global _VPU_PID
+    global _VPU_PID, _IMAGES
     names = set()
     _VPU_PID = None
     for line in out.splitlines():
@@ -202,6 +203,7 @@ def _running_images():
             if name == "vpu.exe" and _VPU_PID is None:
                 parts = line.split('","')
                 _VPU_PID = parts[1] if len(parts) > 1 else None
+    _IMAGES = names or None
     return names or None
 
 
@@ -293,7 +295,7 @@ def _event_tick(tick_wall: float) -> str:
         # tick before the event, when it's the same file.
         if mark.get("path"):
             ev["logFile"], ev["offset"] = mark["path"], int(mark.get("size") or 0)
-    cost = event_watch.observe(ev, _VPU_PID, tick_wall)
+    cost = event_watch.observe(ev, _VPU_PID, tick_wall, images=_IMAGES)
     v = event_watch.verdict(ev, tick_wall)
     posted = "none"
     if new_event:

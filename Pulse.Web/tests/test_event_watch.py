@@ -331,3 +331,19 @@ class CameraUnreachableTest(RealLinesTest):
         s = event_watch.summary(ev, ev["lastReadAt"], ended=True)
         self.assertEqual(s["camerasUnreachable"], [])
         self.assertEqual(s["camerasLost"], ["169.254.16.51"])
+
+
+class ScoreboardTest(RealLinesTest):
+    def test_scorebug_age_data_rate_and_scoreconnect_down(self):
+        sb = ("Info\t| 2026-10-14 21:19:16.804 |StatusReporter\t|StatusReporter.cpp(694)\t|StatusReporter::reportStatus\t"
+              "|VPU:|GraphicsTimestampsDelta:,Avr=4312.25,Min=4311.77,Max=4312.73 |ScoreboardDataFrequencyPerSecond:Lst=0.00    |\n")
+        with open(self.vpu, "a", encoding="utf-8") as fh:
+            fh.write(self.REAL + sb)
+        ev = {"startedAt": T0}
+        event_watch.observe(ev, "1", T0 + 3000, log_dir=self.logs, events_dir=self.tmp.name,
+                            images={"vpu.exe", "explorer.exe"})
+        s = event_watch.summary(ev, T0 + 3000, ended=False)
+        self.assertEqual(s["live"]["scorebugAgeSeconds"], 4312)
+        self.assertEqual(s["live"]["scoreboardDataPerSecond"], 0.0)
+        self.assertFalse(s["scoreConnectRunning"])
+        self.assertTrue(s["scoreConnectWasDown"])
