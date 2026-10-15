@@ -48,20 +48,26 @@ try {
     $vpuName = $null
     try {
         if (Test-Path $logDir) {
+            # Newest first, back up to a week: Pixellot starts a new log at
+            # midnight, and the new one has no BROADCAST_NAME line until the
+            # agent logs it again (a unit that hasn't streamed can go days).
+            # Reading only the newest log sent nameless check-ins after
+            # midnight (6493, 2026-10-15).
             $logPatterns = @('agent_vpu2_*.log', 'agent_vpu_*.log', 'agent_*.log')
-            $latestLog = $null
+            $agentLogs = $null
             foreach ($pattern in $logPatterns) {
-                $latestLog = Get-ChildItem -Path $logDir -Filter $pattern -ErrorAction SilentlyContinue |
-                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
-                if ($latestLog) { break }
+                $agentLogs = @(Get-ChildItem -Path $logDir -Filter $pattern -ErrorAction SilentlyContinue |
+                    Sort-Object LastWriteTime -Descending | Select-Object -First 7)
+                if ($agentLogs.Count -gt 0) { break }
             }
-            if ($latestLog) {
-                $lines = & findstr /C:"BROADCAST_NAME" $latestLog.FullName 2>$null
+            foreach ($log in $agentLogs) {
+                $lines = & findstr /C:"BROADCAST_NAME" $log.FullName 2>$null
                 if ($lines) {
                     # Take the last matching line
                     $last = if ($lines -is [array]) { $lines[-1] } else { $lines }
                     if ($last -match 'result:\s*(.+)$') {
                         $vpuName = $Matches[1].Trim()
+                        break
                     }
                 }
             }
@@ -80,18 +86,20 @@ try {
     $venueId = $null
     try {
         if (Test-Path $logDir) {
-            $coordLog = Get-ChildItem -Path $logDir -Filter 'coordinator*.log' -ErrorAction SilentlyContinue |
-                Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            if (-not $coordLog) {
-                $coordLog = Get-ChildItem -Path $logDir -Filter '*Coordinator*.log' -ErrorAction SilentlyContinue |
-                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            # Newest first, back up to a week (same midnight rollover as above).
+            $coordLogs = @(Get-ChildItem -Path $logDir -Filter 'coordinator*.log' -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 7)
+            if ($coordLogs.Count -eq 0) {
+                $coordLogs = @(Get-ChildItem -Path $logDir -Filter '*Coordinator*.log' -ErrorAction SilentlyContinue |
+                    Sort-Object LastWriteTime -Descending | Select-Object -First 7)
             }
-            if ($coordLog) {
-                $lines = & findstr /C:"/GENERAL/VenueID" $coordLog.FullName 2>$null
+            foreach ($log in $coordLogs) {
+                $lines = & findstr /C:"/GENERAL/VenueID" $log.FullName 2>$null
                 if ($lines) {
                     $last = if ($lines -is [array]) { $lines[-1] } else { $lines }
                     if ($last -match 'result:\s*(\S+)') {
                         $venueId = $Matches[1].Trim()
+                        break
                     }
                 }
             }
