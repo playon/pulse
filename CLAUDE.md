@@ -158,7 +158,7 @@ The fleet dashboard Pulse Vitals (`playon/pulse-vitals`, private) is built on wh
 | What | Where |
 |---|---|
 | Check-in envelope and client queue | `Pulse.Web/app/main.py` (`_build_checkin_entry`, `_flush_checkin_queue`) |
-| Telemetry document `pulse.telemetry/v1` | `_build_telemetry` in `Pulse.Web/app/main.py` (on `fleet-monitor` until it merges) |
+| Telemetry document `pulse.telemetry/v1` | `_build_telemetry` in `Pulse.Web/app/main.py` |
 | When the monitor posts | `Pulse.Web/app/monitor.py` (`plan_tick`, `plan_post`) |
 | Ingest validation and storage | `tools/checkin-worker/src/ingest.js` |
 | Schema and the views Vitals reads | `tools/checkin-worker/migrations/` |

@@ -14,11 +14,16 @@ if _app_dir not in _sys.path:
 # when it's None, so the server would import fine but never bind the
 # port. Point both streams at the server log so the hidden server starts
 # cleanly and uvicorn's own output is captured for the Server Log tab.
-_SERVER_LOG_EARLY = _os.path.join(_os.path.dirname(_app_dir), "pulse-server.log")
-try:
-    open(_SERVER_LOG_EARLY, "w", encoding="utf-8").close()  # fresh log per launch
-except Exception:
-    pass
+# The scheduled monitor (monitor_once.py) imports this module from the same
+# install, so it names its own log and keeps it across runs instead of wiping
+# the interactive session's.
+_SERVER_LOG_NAME = _os.environ.get("PULSE_SERVER_LOG_NAME") or "pulse-server.log"
+_SERVER_LOG_EARLY = _os.path.join(_os.path.dirname(_app_dir), _SERVER_LOG_NAME)
+if not _os.environ.get("PULSE_SERVER_LOG_APPEND"):
+    try:
+        open(_SERVER_LOG_EARLY, "w", encoding="utf-8").close()  # fresh log per launch
+    except Exception:
+        pass
 if _sys.stdout is None or _sys.stderr is None:
     try:
         _redir = open(_SERVER_LOG_EARLY, "a", buffering=1, encoding="utf-8", errors="replace")
@@ -29,6 +34,7 @@ if _sys.stdout is None or _sys.stderr is None:
 
 import asyncio
 import json
+import re
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -221,7 +227,7 @@ def _read_version() -> str:
 APP_VERSION = _read_version()
 _static_dir = _os.path.join(_app_dir, "static")
 
-SERVER_LOG_PATH = _os.path.join(_web_root, "pulse-server.log")
+SERVER_LOG_PATH = _os.path.join(_web_root, _SERVER_LOG_NAME)
 
 # ── Server log file ──────────────────────────────────────────
 # Attach a file handler to the root logger so ANY library that logs
@@ -4121,10 +4127,21 @@ async def api_scripts_cancel_all():
     return {"ok": True, "cancelled": count}
 
 
-async def _collect_dashboard() -> dict:
+async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dict] = None) -> dict:
     """Run the dashboard's data-collection scripts and build the payload
-    (findings + Stream Readiness verdict). Shared by `/api/dashboard` and the
-    launch check-in beacon so both score readiness with identical inputs."""
+    (findings + Stream Readiness verdict). Shared by `/api/dashboard`, the
+    launch check-in beacon and the scheduled monitor, so all three score
+    readiness with identical inputs.
+
+    `skip_intrusive=True` (the monitor, mid-event) leaves out Test-NetworkPorts,
+    the only collector that sends live UDP/TCP probes, incl. the 2088 echo. The
+    monitor treats such a pass as partial and resolves nothing from it.
+
+    `raw_out`, when given, receives the raw collector results the dashboard
+    folds into findings (port rows, camera ports, GPUs, disks), which the
+    monitor's telemetry check-in reports as-is (_build_telemetry)."""
+    async def _skipped():
+        return None
     (identity, performance, services, nics, net_config, hardware, installed_sw,
      install_state, port_tests, gpu_info, wifi, pixellot_config, expectations,
      disk_health, perf_sample, tls_inspection, lmi_log, graphics_delivery) = await asyncio.gather(
@@ -4140,7 +4157,7 @@ async def _collect_dashboard() -> dict:
         # retry once (a blocked-UDP venue costs ~14s in port checks alone),
         # so 20s would expire on exactly the venues the test exists to catch.
         # Healthy connections still finish in well under 15s.
-        run_ps("Test-NetworkPorts.ps1", timeout=30),
+        _skipped() if skip_intrusive else run_ps("Test-NetworkPorts.ps1", timeout=30),
         run_ps("Get-GpuInfo.ps1", timeout=15),
         run_ps("Get-WifiAdapters.ps1", timeout=10),
         # Pixellot config + expected camera count feed the dashboard's new
@@ -4195,6 +4212,13 @@ async def _collect_dashboard() -> dict:
                 cpu_block["usagePercent"] = confirmed_cpu
                 performance["cpu"] = cpu_block
 
+    if raw_out is not None:
+        raw_out.update(
+            identity=identity, port_tests=port_tests, nics=nics,
+            pixellot_config=pixellot_config, network_config=net_config,
+            probe_results=probe_results, gpu_info=gpu_info,
+            expectations=expectations, disk_health=disk_health,
+        )
     return _build_dashboard(
         identity, performance, services, nics, net_config, hardware,
         installed_sw, install_state, port_tests, gpu_info, wifi,
@@ -6468,7 +6492,9 @@ async def _remove_splashtop() -> None:
 # list. Fail-open in every branch: a blocked network or unreachable sink must
 # never slow or break launch. Stdlib urllib on purpose (no httpx): the beacon has
 # to work on any installed build, even one missing an optional pip dependency.
-_CHECKIN_URL    = "https://pulse-checkin.pulse-checkin-worker.workers.dev/checkin"
+# The address lives in checkin_lite.py, the one place to change it (the
+# monitor's event-time sender can't import this file).
+from checkin_lite import CHECKIN_URL as _CHECKIN_URL  # noqa: E402
 _CHECKIN_FALLBACK_URL    = "https://script.google.com/macros/s/AKfycbworYEcINtNfd1R6sTvHFDFqOHzYVA1XxHZRStB54T2GcTgQ8JvE0lxnboJ9q_jEFS4/exec"
 _CHECKIN_FALLBACK_SECRET = "7a161bad7765fc5078b8375007999160c5687bf5da52ae1ca717ebbad628e648"
 _CHECKIN_STATE_PATH = _os.path.join(_web_root, "pulse-checkin-queue.json")
@@ -6602,10 +6628,49 @@ async def _flush_checkin_queue(state: dict, url: str) -> None:
         state["queue"] = [e for e in state["queue"] if e["checkinId"] not in answered]
         state["lastSentAt"] = state["lastAttemptAt"]
         state.pop("lastError", None)
+        # Fleet control for the scheduled monitor (monitor.read_control):
+        # whether it runs and which collectors it skips. Kept until the Worker
+        # says otherwise, so an unreachable Worker never turns it back on.
+        if isinstance(reply.get("control"), dict):
+            state["control"] = dict(reply["control"], receivedAt=state["lastAttemptAt"])
 
 
-async def _build_checkin_entry() -> Optional[dict]:
+# The last venue id / VPU name this unit reported, set by the scheduled monitor
+# (monitor_once.py) from its post record. The identity collector can come back
+# "ok" without its Pixellot part while Pixellot rewrites its config (lab-z2,
+# 2026-10-14 05:10Z), and with no hostname or serial a check-in without those
+# two can't be tied to any unit. Empty for an interactive launch.
+_CHECKIN_IDENTITY_FALLBACK: dict = {}
+
+
+async def _build_checkin_entry(dashboard: Optional[dict] = None, reason: str = "startup",
+                               delta: Optional[dict] = None,
+                               monitor: Optional[dict] = None,
+                               telemetry: Optional[dict] = None,
+                               heartbeat: bool = False, paused: bool = False) -> Optional[dict]:
+    """One check-in. `reason` is startup (an interactive launch) or, from the
+    scheduled monitor, periodic / state-change, which also carry the finding
+    transitions (`delta`) and the pass's own cost (`monitor`). `dashboard`
+    lets the monitor reuse the pass it already ran. `heartbeat` is the
+    monitor's hourly "still PASS, nothing changed" line: identity and status
+    only, built from that pass with no further collection.
+
+    No hostname or BIOS serial (Ian, 2026-10-13): units are identified by
+    their Pixellot venue id and VPU name."""
     import uuid
+    if paused:
+        # Fleet control has the monitor switched off: identity only, hourly,
+        # so the unit still shows as reachable and hears when it's back on.
+        known = _CHECKIN_IDENTITY_FALLBACK
+        return {"checkinId": str(uuid.uuid4()), "sentAt": _checkin_now(), "reason": "paused",
+                "venueId": known.get("venueId"), "vpuName": known.get("vpuName"),
+                "pulseVersion": APP_VERSION}
+    if heartbeat:
+        ident = (dashboard or {}).get("identity") or {}
+        return {"checkinId": str(uuid.uuid4()), "sentAt": _checkin_now(), "reason": "heartbeat",
+                "venueId": ident.get("venueId") or _CHECKIN_IDENTITY_FALLBACK.get("venueId"),
+                "vpuName": ident.get("vpuName") or _CHECKIN_IDENTITY_FALLBACK.get("vpuName"),
+                "status": "PASS"}
     ident = await run_ps("Get-SystemIdentity.ps1")
     if not isinstance(ident, dict) or ident.get("error"):
         return None
@@ -6615,13 +6680,23 @@ async def _build_checkin_entry() -> Optional[dict]:
     entry = {
         "checkinId":    str(uuid.uuid4()),
         "sentAt":       _checkin_now(),
-        "venueId":      px.get("venueId"),
-        "vpuName":      px.get("vpuName"),
+        "venueId":      px.get("venueId") or _CHECKIN_IDENTITY_FALLBACK.get("venueId"),
+        "vpuName":      px.get("vpuName") or _CHECKIN_IDENTITY_FALLBACK.get("vpuName"),
         "model":        cs.get("model"),
         "pulseVersion": APP_VERSION,
-        "channel":      _update_channel(),
-        "osBuild":      os_.get("buildNumber"),
+        "reason":       reason,
     }
+    if telemetry:
+        # A monitor check-in is the utilitarian payload: the verdict lives in
+        # `telemetry`, and channel / OS build wait for the troubleshooting tier.
+        if delta is not None:
+            entry["delta"] = _checkin_delta(delta)
+        if monitor:
+            entry["monitor"] = monitor
+        entry["telemetry"] = telemetry
+        return entry
+    entry["channel"] = _update_channel()
+    entry["osBuild"] = os_.get("buildNumber")
     # UBR tells an unpatched 17763.253 unit from a patched one; the build
     # number alone can't. Fail-open: the check-in goes out without it.
     try:
@@ -6634,7 +6709,7 @@ async def _build_checkin_entry() -> Optional[dict]:
     # Stream Readiness verdict on the beacon: a pre-game-readiness time series at
     # ~zero marginal cost. A readiness error never blocks the check-in.
     try:
-        dash = await _collect_dashboard()
+        dash = dashboard if dashboard is not None else await _collect_dashboard()
         verdict = (dash or {}).get("readiness") or {}
         if verdict:
             entry["readiness"] = {
@@ -6645,7 +6720,301 @@ async def _build_checkin_entry() -> Optional[dict]:
             }
     except Exception as e:
         _server_log.info("Check-in readiness skipped (%s)", e)
+    if delta is not None:
+        entry["delta"] = _checkin_delta(delta)
+    if monitor:
+        entry["monitor"] = monitor
     return entry
+
+
+def _checkin_delta(delta: dict) -> dict:
+    """The monitor's transitions, trimmed for the wire: codes and classes, not
+    the full finding copy (the sink caps a batch at 64 KB)."""
+    def slim(events):
+        return [{"code": e.get("code"), "class": e.get("class"), "title": e.get("title"),
+                 "since": e.get("since")} for e in (events or [])][:25]
+    return {
+        "status":     delta.get("status"),
+        "prevStatus": delta.get("prevStatus"),
+        "opened":     slim(delta.get("opened")),
+        "resolved":   slim(delta.get("resolved")),
+        "persisting": list(delta.get("persisting") or [])[:50],
+    }
+
+
+# ── Fleet-monitor telemetry (pulse.telemetry/v1) ─────────────────────────────
+# What the scheduled monitor reports: the utilitarian fields Ian chose for NFHS
+# Console on 2026-10-13 (verdict, blockers, streaming path, failed ports, the
+# internet adapter's IPv4 setup and MAC, cameras with per-port detail,
+# services down, scoreboard source, boots and power loss, versions). Oracle
+# already shows Pixellot's own live metrics (CPU, bandwidth, dark court), so
+# this carries what Pixellot can't see from outside the box. Troubleshooting
+# detail (full findings copy, every adapter, clock drift, PoE, GPUs, disks,
+# recordings) comes later. Kept small on purpose: Unity writes must be. D1
+# stores it as the proof of concept. Leaves out hostname, BIOS serial and
+# camera serials.
+_TELEMETRY_SCHEMA = "pulse.telemetry/v1"
+_PORT_NAMES = {
+    "Zixi Streaming": "Streaming (Zixi primary)",
+    "Zixi Backup":    "Streaming (Zixi backup)",
+    _RTMP_FALLBACK_PURPOSE: "Streaming (RTMP last resort)",
+}
+
+
+def _telemetry_ports(port_tests) -> Optional[list]:
+    if not isinstance(port_tests, dict) or port_tests.get("error"):
+        return None
+    out = []
+    for r in port_tests.get("results") or []:
+        purpose = r.get("purpose") or ""
+        out.append({
+            "name":     _PORT_NAMES.get(purpose, purpose),
+            "rule":     f"{(r.get('protocol') or '').upper()} {r.get('port')}".strip(),
+            "host":     r.get("host"),
+            "ok":       r.get("status") == "pass",
+            "optional": bool(r.get("optional")),
+        })
+    return out
+
+
+def _telemetry_streaming_path(port_tests) -> Optional[str]:
+    """Which rung of the Zixi UDP 2088 -> UDP 443 -> RTMP TCP 1935 chain a
+    stream would use now, or None if the port probe didn't run."""
+    if not isinstance(port_tests, dict) or port_tests.get("error"):
+        return None
+    ok = {r.get("purpose") for r in port_tests.get("results") or [] if r.get("status") == "pass"}
+    for purpose, name in (("Zixi Streaming", "zixi-2088"), ("Zixi Backup", "zixi-443"),
+                          (_RTMP_FALLBACK_PURPOSE, "rtmp-1935")):
+        if purpose in ok:
+            return name
+    return "blocked"
+
+
+def _telemetry_cameras(raw: dict) -> dict:
+    nics = raw.get("nics")
+    expectations = raw.get("expectations") or {}
+    expected = expectations.get("expectedMainCameras") if not expectations.get("error") else None
+    out = {"expected": expected if isinstance(expected, int) else None,
+           "detected": None, "systemType": expectations.get("systemType"), "ports": []}
+    if not isinstance(nics, dict) or nics.get("error"):
+        return out
+    probes = raw.get("probe_results") or {}
+    ports = _enrich_ports(nics, raw.get("pixellot_config"), probes)
+    _flag_uplink_ports(ports, raw.get("network_config"))
+    out["detected"] = _count_main_cameras(ports, probes)
+    for p in ports:
+        if p.get("hasInternetUplink"):
+            role = "internet cable"
+        elif not p.get("isUp"):
+            role = "no link"
+        elif p.get("isOcr"):
+            role = "scoreboard camera"
+        elif p.get("camerasDetected"):
+            role = "camera"
+        else:
+            role = "linked, no camera answering"
+        cams = p.get("camerasDetected") or []
+        out["ports"].append({
+            "port":          p.get("portLabel") or p.get("name"),
+            "portMac":       _norm_mac(p.get("mac")),
+            "state":         role,
+            "linkMbps":      p.get("linkSpeedMbps") if p.get("isUp") else None,
+            "expectedMbps":  p.get("expectedSpeedMbps"),
+            "slow":          bool(p.get("isDegraded")),
+            "cameraModel":   cams[0].get("model") if cams else None,
+            "cameraMac":     _norm_mac(cams[0].get("cgiMac") or cams[0].get("mac")) if cams else None,
+            "cameraFirmware": cams[0].get("firmwareVersion") if cams else None,
+        })
+    return out
+
+
+async def _collect_telemetry_extras(raw: dict, skip_intrusive: bool = False) -> None:
+    """Collectors the telemetry needs beyond the dashboard pass: boots and
+    power loss, and the scoreboard source. Fills `raw`; each part fails soft.
+    `skip_intrusive` is accepted for symmetry; neither collector probes the
+    network."""
+    del skip_intrusive
+    reboots, sc = await asyncio.gather(
+        run_ps("Get-RebootHistory.ps1", timeout=30),
+        # Straight to the collector, not _run_sc_status: that also appends to
+        # the ScoreConnect config history, which is the interactive tab's job.
+        run_ps("Get-ScoreConnectStatus.ps1", {"BaseUrl": sc3_base_url()}, timeout=15),
+        return_exceptions=True,
+    )
+    raw.update(reboots=reboots if isinstance(reboots, dict) and not reboots.get("error") else None,
+               scoreconnect=sc if isinstance(sc, dict) else None)
+
+
+def _prefix_to_mask(prefix) -> Optional[str]:
+    try:
+        n = int(prefix)
+    except (TypeError, ValueError):
+        return None
+    if not 0 <= n <= 32:
+        return None
+    bits = (0xFFFFFFFF << (32 - n)) & 0xFFFFFFFF if n else 0
+    return ".".join(str((bits >> sh) & 0xFF) for sh in (24, 16, 8, 0))
+
+
+def _norm_mac(v) -> Optional[str]:
+    """AA:BB:CC:DD:EE:FF, whatever separator the collector used."""
+    hexes = re.sub(r"[^0-9A-Fa-f]", "", str(v or ""))
+    if len(hexes) != 12:
+        return None
+    return ":".join(hexes[i:i + 2] for i in range(0, 12, 2)).upper()
+
+
+def _telemetry_adapters(network_config, uplink_alias) -> Optional[list]:
+    """Every adapter's IPv4 setup. The internet adapter is flagged; camera
+    ports usually sit on 169.254 link-local, flagged so a grid can hide them."""
+    if not isinstance(network_config, dict) or network_config.get("error"):
+        return None
+    macs = {a.get("interfaceIndex"): _norm_mac(a.get("macAddress"))
+            for a in network_config.get("adapters") or [] if a.get("interfaceIndex") is not None}
+    out = []
+    # The collector names it ipConfigurations; the dashboard payload, ipConfig.
+    for a in network_config.get("ipConfigurations") or network_config.get("ipConfig") or []:
+        ips = a.get("ipv4Address") or []
+        gws = a.get("ipv4DefaultGateway") or []
+        dns = [d for d in (a.get("dnsServers") or []) if ":" not in str(d)]  # IPv4 only
+        ip = ips[0] if ips else None
+        out.append({
+            "adapter":    a.get("interfaceAlias"),
+            "mac":        macs.get(a.get("interfaceIndex")),
+            "internet":   a.get("interfaceAlias") == uplink_alias,
+            "ip":         ip,
+            "subnetMask": _prefix_to_mask(a.get("prefixLength")),
+            "gateway":    gws[0] if gws else None,
+            "dns1":       dns[0] if len(dns) > 0 else None,
+            "dns2":       dns[1] if len(dns) > 1 else None,
+            "dhcp":       a.get("dhcpEnabled"),
+            "linkLocal":  bool(ip and str(ip).startswith("169.254.")),
+        })
+    return out
+
+
+def _telemetry_scoreboard(raw: dict) -> Optional[dict]:
+    sc = raw.get("scoreconnect")
+    nics = raw.get("nics")
+    ocr = "unknown"
+    if isinstance(nics, dict) and not nics.get("error"):
+        ports = _enrich_ports(nics, raw.get("pixellot_config"), raw.get("probe_results") or {})
+        _flag_uplink_ports(ports, raw.get("network_config"))
+        ocr = _scoreboard_camera_state(ports, raw.get("pixellot_config"))
+    if sc is None and ocr == "unknown":
+        return None
+    src = _scoreboard_source(sc, ocr)
+    out = {"source": src.get("source"), "ok": src.get("ok")}
+    # What `ok` doesn't say (it means "ScoreConnect is running" when there's
+    # no OCR camera): is the ScoreLink plugged in, is score data arriving, and
+    # which sport ScoreConnect decodes. 6493 read ok for a whole event with
+    # its ScoreLink missing (2026-10-14). Additive fields; `ok` keeps its v1
+    # meaning.
+    if isinstance(sc, dict) and not sc.get("error"):
+        if isinstance(sc.get("scoreLinkConnected"), bool):
+            out["scoreLinkConnected"] = sc["scoreLinkConnected"]
+        ds = sc.get("dataStatus")
+        if isinstance(ds, str) and ds:
+            out["dataFlowing"] = ds.lower().startswith("data is present")
+            out["dataStatus"] = ds[:120]
+        sport = (sc.get("configuration") or {}).get("sport") if isinstance(sc.get("configuration"), dict) else None
+        if sport:
+            out["sport"] = str(sport)[:80]
+    return out
+
+
+def _services_down(services: dict, scoreboard: Optional[dict]) -> list:
+    """Services that are down AND should be up. vpu.exe only runs during an
+    event, so it's never "down"; ScoreConnect only matters when it is the
+    score source (an OCR camera makes it optional) and it is installed."""
+    down = []
+    for name, st in services.items():
+        key = name.lower()
+        if key == "vpu" or st == "Running":
+            continue
+        if key.startswith("scoreconnect"):
+            if st == "NotFound" or (scoreboard or {}).get("source") == "ocr":
+                continue
+        down.append(name)
+    return down
+
+
+def _telemetry_power(raw: dict) -> dict:
+    rb = raw.get("reboots") or {}
+    hist = rb.get("history") or []
+    unexpected = [h for h in hist if h.get("category") == "unexpected" or h.get("eventId") in (41, 6008)]
+    return {"lastBoot": rb.get("lastBoot") or None,
+            # Power cuts and hard crashes, from Get-RebootHistory's 7-day window.
+            "unexpectedShutdowns7d": len(unexpected) if rb else None}
+
+
+def _build_telemetry(dashboard: dict, raw: dict, status_since: Optional[str] = None,
+                     status: Optional[str] = None, open_codes=None) -> dict:
+    """The utilitarian payload. Fail-soft: a collector that errored leaves its
+    part null rather than guessing. `status` is the monitor's settled verdict
+    (a finding counts only after two passes see it) and `open_codes` the
+    findings it settled on; headline and blockers follow them, so a PASS
+    never carries an unconfirmed problem as its headline."""
+    verdict = (dashboard or {}).get("readiness") or {}
+    ident = (dashboard or {}).get("identity") or {}
+    blockers, risks = verdict.get("blockers") or [], verdict.get("risks") or []
+    if open_codes is not None:
+        keep = set(open_codes)
+        blockers = [b for b in blockers if b.get("code") in keep]
+        risks = [r for r in risks if r.get("code") in keep]
+
+    services = {}
+    for s in ((dashboard or {}).get("services") or {}).get("services") or []:
+        if s.get("name"):
+            services[s["name"]] = s.get("status")
+
+    net = (dashboard or {}).get("networkConfig") or {}
+    port_tests = raw.get("port_tests")
+    ports = _telemetry_ports(port_tests)
+    cameras = _telemetry_cameras(raw)
+    scoreboard = _telemetry_scoreboard(raw)
+    adapters = _telemetry_adapters(raw.get("network_config"),
+                                   (net.get("uplinkAdapter") or {}).get("interfaceAlias"))
+    inet = next((a for a in adapters or [] if a.get("internet")), None)
+    if inet:
+        inet = {k: inet.get(k) for k in ("adapter", "mac", "ip", "subnetMask", "gateway",
+                                         "dns1", "dns2", "dhcp")}
+    return {
+        "schema":          _TELEMETRY_SCHEMA,
+        "status":          status or verdict.get("status"),
+        "statusSince":     status_since,
+        "headline":        (blockers or risks or [{}])[0].get("title"),
+        "blockers":        [b.get("title") for b in blockers][:10],
+        "checkedAt":       verdict.get("timestamp"),
+        "pixellotVersion": ident.get("pixellotVersion"),
+        "network": {
+            "internetReachable": net.get("internetReachable"),
+            "streamingPath":     _telemetry_streaming_path(port_tests),
+            "portsFailed":       None if ports is None else
+                                 [f"{p['name']} ({p['rule']})" for p in ports if not p["ok"] and not p["optional"]],
+            "internet":          inet,
+        },
+        "cameras": {
+            "systemType": cameras.get("systemType"),
+            "expected":   cameras.get("expected"),
+            "detected":   cameras.get("detected"),
+            "slow":       sum(1 for p in cameras.get("ports") or [] if p.get("slow")),
+            "ports":      cameras.get("ports"),
+        },
+        "servicesDown": _services_down(services, scoreboard) if services else None,
+        "scoreboard":   scoreboard,
+        "power":        _telemetry_power(raw),
+    }
+
+
+def _telemetry_fingerprint(telemetry: dict, open_codes) -> str:
+    """What "the data changed" means for the post rules: everything in the
+    payload except when it was measured, plus the open blocker/risk codes (a
+    risk opening may not move any payload field). A change posts at once."""
+    import hashlib
+    t = {k: v for k, v in (telemetry or {}).items() if k not in ("checkedAt", "statusSince")}
+    body = json.dumps({"t": t, "open": sorted(open_codes or [])}, sort_keys=True, default=str)
+    return hashlib.sha1(body.encode("utf-8")).hexdigest()
 
 
 def _post_fallback_sync(url: str, body: dict) -> None:
@@ -6695,13 +7064,17 @@ def _checkin_configured(url: str) -> bool:
     return bool(url and url.startswith("https://") and "PASTE_" not in url)
 
 
-async def _send_checkin() -> None:
+async def _send_checkin(dashboard: Optional[dict] = None, delta: Optional[dict] = None,
+                        reason: str = "startup", monitor: Optional[dict] = None,
+                        telemetry: Optional[dict] = None, heartbeat: bool = False,
+                        paused: bool = False) -> None:
     if DEMO_MODE:
         return  # a dev/demo machine never reports
     url = (_os.environ.get("PULSE_CHECKIN_URL") or _CHECKIN_URL).strip()
     try:
         async with _checkin_lock:
-            entry = await _build_checkin_entry()
+            entry = await _build_checkin_entry(dashboard, reason, delta, monitor, telemetry,
+                                               heartbeat, paused)
             state = _load_checkin_state()
             if entry:
                 state["queue"].append(entry)
@@ -6711,7 +7084,10 @@ async def _send_checkin() -> None:
             if not _checkin_configured(url):
                 return
             await _flush_checkin_queue(state, url)
-            if state.get("lastError") and entry and any(
+            # Launches only: the monitor posts every few minutes, and the sheet
+            # keeps one row per unit with a run count, so monitor posts there
+            # would flood it and inflate the count.
+            if state.get("lastError") and entry and entry.get("reason") == "startup" and any(
                     e.get("checkinId") == entry["checkinId"] for e in state["queue"]):
                 await _send_fallback(entry, state)
             _save_checkin_state(state)

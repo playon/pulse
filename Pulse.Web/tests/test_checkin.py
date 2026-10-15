@@ -42,6 +42,10 @@ class FakeSink(BaseHTTPRequestHandler):
         elif FakeSink.mode == "ok":
             self._reply(200, {"ok": True, "results": [
                 {"checkinId": c["checkinId"], "status": "inserted"} for c in body["checkins"]]})
+        elif FakeSink.mode == "control-off":
+            self._reply(200, {"ok": True, "control": {"mode": "off", "skip": ["Get-S1Cameras.ps1"]},
+                              "results": [{"checkinId": c["checkinId"], "status": "inserted"}
+                                          for c in body["checkins"]]})
         elif FakeSink.mode == "invalid":
             self._reply(200, {"ok": True, "results": [
                 {"checkinId": c["checkinId"], "status": "invalid"} for c in body["checkins"]]})
@@ -109,9 +113,9 @@ class TestCheckinQueue(unittest.TestCase):
         main._checkin_now = lambda: self.clock
         self.n = 0
 
-        async def fake_entry():
+        async def fake_entry(dashboard=None, reason="startup", *args):
             self.n += 1
-            return {"checkinId": f"id-{self.n:08d}", "sentAt": self.clock,
+            return {"checkinId": f"id-{self.n:08d}", "sentAt": self.clock, "reason": reason,
                     "hostname": "PXLS2_10893", "pulseVersion": "1.4.0-dev"}
         main._build_checkin_entry = fake_entry
         FakeSink.mode = "ok"
@@ -260,6 +264,27 @@ class TestCheckinQueue(unittest.TestCase):
         FakeSink.mode = "ok"
         self.launch()
         self.assertEqual(self.state()["queue"], [])
+
+    def test_fleet_control_in_the_reply_is_kept(self):
+        FakeSink.mode = "control-off"
+        self.launch()
+        ctl = self.state()["control"]
+        self.assertEqual(ctl["mode"], "off")
+        self.assertEqual(ctl["skip"], ["Get-S1Cameras.ps1"])
+        # A later reply without control (an older Worker, or a failed lookup)
+        # leaves the last instruction in force.
+        FakeSink.mode = "ok"
+        self.launch()
+        self.assertEqual(self.state()["control"]["mode"], "off")
+
+    def test_monitor_posts_never_go_to_the_sheet(self):
+        # The sheet is one row per unit with a run count; a monitor post every
+        # few minutes there would flood it and inflate the count.
+        FakeSink.mode = "storage"
+        for reason in ("periodic", "state-change", "heartbeat"):
+            asyncio.run(main._send_checkin(reason=reason))
+        self.assertEqual(self.fallback_posts, [])
+        self.assertEqual(len(self.state()["queue"]), 3)   # still queued for D1
 
     def test_empty_fallback_url_turns_it_off(self):
         os.environ["PULSE_CHECKIN_FALLBACK_URL"] = ""

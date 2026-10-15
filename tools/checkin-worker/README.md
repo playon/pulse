@@ -71,6 +71,38 @@ per-IP rate limit, the size caps and field-by-field validation, and the ingest
 Worker can't read anything back. Older builds still send a `secret` field; it
 is ignored and never stored. Real per-unit auth comes with the Unity transport.
 
+## Fleet control: switching the monitor off
+
+Every reply to a check-in carries `control`, read from the `monitor_control`
+table (migration 0011). The scheduled monitor obeys it within one tick (5 min)
+of its next post:
+
+- `mode = 'off'`: no checks at all. The unit sends only one identity-only
+  check-in an hour with `reason = 'paused'`, which is how it hears it's back on.
+- `skip`: a JSON list of collector scripts that never start; their part of the
+  report comes back null (unknown).
+
+The `fleet` row applies to every unit. A row whose `scope` is a venue id (or a
+VPU name, for a unit with none) decides that unit's mode, and the skip lists
+add up. If the lookup fails, the reply leaves `control` out and units keep the
+last instruction they had. Interactive Pulse launches ignore it.
+
+```bash
+# stop the monitor on every unit
+npx wrangler d1 execute pulse-checkins --remote --command "UPDATE monitor_control SET mode='off', note='why', updated_at=datetime('now') WHERE scope='fleet'"
+# stop one collector everywhere
+npx wrangler d1 execute pulse-checkins --remote --command "UPDATE monitor_control SET skip='[\"Get-S1Cameras.ps1\"]', updated_at=datetime('now') WHERE scope='fleet'"
+# stop the monitor on one unit
+npx wrangler d1 execute pulse-checkins --remote --command "INSERT OR REPLACE INTO monitor_control (scope, mode, note, updated_at) VALUES ('<venue id>', 'off', 'why', datetime('now'))"
+# back on
+npx wrangler d1 execute pulse-checkins --remote --command "UPDATE monitor_control SET mode='on', skip='[]', updated_at=datetime('now') WHERE scope='fleet'"
+```
+
+This is the lesson from Canopy Leaf's rollout: its memory leak took four months
+of hand-edited cron jobs to find (#leaf-deploy-coordination). Each monitor
+report also carries `monitor.memoryPeakMb`, stored as `monitor_memory_peak_mb`,
+so a heavier pass shows up in the data before it shows up on a VPU.
+
 ## One-time setup
 
 Run everything from this folder.

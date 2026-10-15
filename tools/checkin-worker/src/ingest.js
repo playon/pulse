@@ -1,3 +1,4 @@
+import { updateLatest } from "./latest.js";
 // No write key (Ian, 2026-10-13). Pulse ships from a public repo, so any key in
 // it was readable by anyone and only looked like protection (Snyk flagged it,
 // PR #229). What protects the table is what this file enforces: the per-IP rate
@@ -12,7 +13,15 @@ const MAX_CODES = 50;
 const FUTURE_SKEW_MS = 10 * 60 * 1000;
 const CHECKIN_ID_RE = /^[A-Za-z0-9-]{8,64}$/;
 const MAX_EVENTS = 25;
-const REASONS = new Set(["startup", "periodic", "state-change", "heartbeat"]);
+// "paused": the hourly identity-only line from a monitor that fleet control
+// has switched off (monitor_control below).
+// "event-start" / "event-update" / "event-end": the monitor's in-event reader
+// (event_watch.py), which reads Pixellot's own logs while VPU.exe runs.
+const REASONS = new Set(["startup", "periodic", "state-change", "heartbeat", "paused",
+                         "event-start", "event-update", "event-end"]);
+const EVENT_SCHEMA = "pulse.event/v1";
+const MAX_EVENT_BYTES = 4 * 1024;
+const EVENT_STATES = new Set(["on-air", "connecting", "stream-failing", "restart-loop", "camera-link-down", "camera-degraded", "ended"]);
 const PASSES = new Set(["full", "partial"]);
 const STATUSES = new Set(["PASS", "WARN", "FAIL"]);
 const PATHS = new Set(["zixi-2088", "zixi-443", "rtmp-1935", "blocked"]);
@@ -34,11 +43,13 @@ INSERT INTO checkins (
   tel_subnet_mask, tel_gateway, tel_dns1, tel_dns2, tel_dhcp, tel_last_boot,
   tel_unexpected_7d, tel_reboot_pending, tel_poe_draw_w, tel_clock_offset_s,
   tel_mac, tel_camera_macs, tel_internet_reachable,
-  monitor_cpu_seconds, monitor_cpu_percent, monitor_processes
+  monitor_cpu_seconds, monitor_cpu_percent, monitor_processes, monitor_memory_peak_mb,
+  event_id, event_state, event_reason, event_on_air, event
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?)
 ON CONFLICT (checkin_id) DO NOTHING`;
 
 export async function handleIngest(request, env) {
@@ -82,6 +93,7 @@ export async function handleIngest(request, env) {
   const results = [];
   const statements = [];
   const slots = [];
+  let unit = null;
 
   for (const item of body.checkins) {
     const row = normalize(item, receivedAt);
@@ -89,6 +101,7 @@ export async function handleIngest(request, env) {
       results.push({ checkinId: idOf(item), status: "invalid" });
       continue;
     }
+    unit = unit || row.venueId || row.vpuName;
     slots.push(results.length);
     results.push({ checkinId: row.checkinId, status: null });
     statements.push(
@@ -109,7 +122,8 @@ export async function handleIngest(request, env) {
         row.tel.dns1, row.tel.dns2, row.tel.dhcp, row.tel.lastBoot,
         row.tel.unexpected7d, row.tel.rebootPending, row.tel.poeDrawW,
         row.tel.clockOffsetS, row.tel.mac, row.tel.cameraMacs, row.tel.internetReachable,
-        row.monitorCpuSeconds, row.monitorCpuPercent, row.monitorProcesses,
+        row.monitorCpuSeconds, row.monitorCpuPercent, row.monitorProcesses, row.monitorMemoryPeakMb,
+        row.ev.id, row.ev.state, row.ev.reason, row.ev.onAir, row.ev.json,
       ),
     );
   }
@@ -126,9 +140,44 @@ export async function handleIngest(request, env) {
       const changed = res && res.meta && res.meta.changes;
       results[slots[i]].status = changed ? "inserted" : "duplicate";
     });
+    // Only newly stored check-ins move unit_latest: a duplicate (a replay of
+    // one already stored) must not count twice.
+    await updateLatest(env, results.filter((r) => r.status === "inserted").map((r) => r.checkinId));
   }
 
-  return Response.json({ ok: true, results });
+  const control = await controlFor(env, unit);
+  return Response.json(control ? { ok: true, results, control } : { ok: true, results });
+}
+
+// Fleet control for the scheduled monitor: the remote off switch, from
+// Canopy Leaf's rollout (#leaf-deploy-coordination). Its memory leak took four
+// months of hand-edited cron jobs to find; here one row stops the monitor, or
+// one collector, on a unit or the whole fleet. A unit's own row decides its
+// mode; skip lists add up. Any failure leaves control out of the reply, and
+// Pulse then keeps the last instruction it had.
+async function controlFor(env, unit) {
+  try {
+    const { results } = await env.DB.prepare(
+      "SELECT scope, mode, skip FROM monitor_control WHERE scope = 'fleet' OR scope = ?",
+    ).bind(unit || "").all();
+    if (!results || !results.length) return { mode: "on", skip: [] };
+    const fleet = results.find((r) => r.scope === "fleet");
+    const own = results.find((r) => r.scope !== "fleet");
+    const mode = (own || fleet).mode === "off" ? "off" : "on";
+    const skip = new Set();
+    for (const r of [fleet, own]) {
+      if (!r) continue;
+      try {
+        for (const name of JSON.parse(r.skip || "[]")) if (typeof name === "string" && name) skip.add(name);
+      } catch {
+        // a malformed skip list in one row never blocks the reply
+      }
+    }
+    return { mode, skip: [...skip].slice(0, 50) };
+  } catch (e) {
+    console.error("control lookup failed", e && e.message);
+    return null;
+  }
 }
 
 function normalize(item, receivedAt) {
@@ -168,8 +217,10 @@ function normalize(item, receivedAt) {
     monitorCpuSeconds: mon ? num(mon.cpuSeconds, 0, 3600) : null,
     monitorCpuPercent: mon ? num(mon.cpuPercent, 0, 100) : null,
     monitorProcesses: mon ? int(mon.processes, 0, 100000) : null,
+    monitorMemoryPeakMb: mon ? num(mon.memoryPeakMb, 0, 65536) : null,
     eventLive: mon && typeof mon.eventLive === "boolean" ? (mon.eventLive ? 1 : 0) : null,
     tel: telemetry(item.telemetry),
+    ev: eventDoc(item.event),
   };
   clean.raw = JSON.stringify({
     checkinId: clean.checkinId,
@@ -204,6 +255,7 @@ function normalize(item, receivedAt) {
       cpuSeconds: clean.monitorCpuSeconds,
       cpuPercent: clean.monitorCpuPercent,
       processes: clean.monitorProcesses,
+      memoryPeakMb: clean.monitorMemoryPeakMb,
       eventLive: clean.eventLive === null ? null : clean.eventLive === 1,
     },
   });
@@ -238,6 +290,25 @@ const NO_TELEMETRY = {
 const MAC_RE = /^([0-9A-F]{2}:){5}[0-9A-F]{2}$/;
 const SYSTEM_TYPES = new Set(["S1", "S2", "S2S"]);
 const SCORE_SOURCES = new Set(["ocr", "scoreconnect"]);
+
+const NO_EVENT = { id: null, state: null, reason: null, onAir: null, json: null };
+
+// The in-event reader's summary, stored whole like telemetry (pulse.event/v1).
+// eventId is Pixellot's; Unity resolves it to the NFHS game and broadcast.
+function eventDoc(e) {
+  if (!e || typeof e !== "object" || Array.isArray(e) || e.schema !== EVENT_SCHEMA) return NO_EVENT;
+  const json = JSON.stringify(e);
+  if (new TextEncoder().encode(json).length > MAX_EVENT_BYTES) return NO_EVENT;
+  const id = str(e.eventId, 64);
+  const state = str(e.state);
+  return {
+    id: id && /^[0-9A-Za-z]{8,40}$/.test(id) ? id : null,
+    state: EVENT_STATES.has(state) ? state : null,
+    reason: str(e.reason),
+    onAir: typeof e.wentOnAir === "boolean" ? (e.wentOnAir ? 1 : 0) : null,
+    json,
+  };
+}
 
 function telemetry(t) {
   if (!t || typeof t !== "object" || Array.isArray(t) || t.schema !== TELEMETRY_SCHEMA) return NO_TELEMETRY;

@@ -542,3 +542,110 @@ test("a unit whose clock runs slow still reads as seen now", async () => {
   assert.equal(s.last_kind, "heartbeat");                       // ordering still follows sent_at
   assert.equal(s.last_full_report, "2026-09-01T10:00:00.000Z");
 });
+
+test("every reply carries fleet control, on by default", async () => {
+  const body = await (await post({ checkins: [checkin()] })).json();
+  assert.deepEqual(body.control, { mode: "on", skip: [] });
+});
+
+test("fleet control: a unit's row decides its mode, skip lists add up", async () => {
+  env.DB.raw.exec(`UPDATE monitor_control SET skip = '["Get-S1Cameras.ps1"]' WHERE scope = 'fleet'`);
+  env.DB.raw.exec(`INSERT INTO monitor_control (scope, mode, skip) VALUES ('V42', 'off', '["Get-PoePower.ps1"]')`);
+  let body = await (await post({ checkins: [checkin()] })).json();           // venueId V42
+  assert.equal(body.control.mode, "off");
+  assert.deepEqual(body.control.skip.sort(), ["Get-PoePower.ps1", "Get-S1Cameras.ps1"]);
+
+  body = await (await post({ checkins: [checkin({ checkinId: "aaaaaaaa-0000-0000-0000-00000000000b",
+                                                  venueId: "V99" })] })).json();
+  assert.equal(body.control.mode, "on");                                   // only the fleet row applies
+  assert.deepEqual(body.control.skip, ["Get-S1Cameras.ps1"]);
+
+  env.DB.raw.exec(`UPDATE monitor_control SET mode = 'off' WHERE scope = 'fleet'`);
+  body = await (await post({ checkins: [checkin({ checkinId: "aaaaaaaa-0000-0000-0000-00000000000c",
+                                                  venueId: "V99" })] })).json();
+  assert.equal(body.control.mode, "off");
+});
+
+test("a failed control lookup leaves control out and still stores the check-in", async () => {
+  env.DB.raw.exec("DROP TABLE monitor_control");
+  const body = await (await post({ checkins: [checkin()] })).json();
+  assert.equal(body.ok, true);
+  assert.equal(body.results[0].status, "inserted");
+  assert.equal(body.control, undefined);
+});
+
+test("the monitor's peak memory is stored, and a paused line is accepted", async () => {
+  await post({ checkins: [checkin({ reason: "periodic", monitor: { pass: "full", cpuSeconds: 4.4, memoryPeakMb: 61.5 } })] });
+  assert.equal(env.DB.raw.prepare("SELECT monitor_memory_peak_mb m FROM checkins").get().m, 61.5);
+  await post({ checkins: [{ checkinId: "aaaaaaaa-0000-0000-0000-00000000000d", sentAt: "2026-09-20T14:00:00Z",
+                            reason: "paused", venueId: "V42", vpuName: "Main Gym", pulseVersion: "1.5.0" }] });
+  const row = env.DB.raw.prepare("SELECT reason FROM checkins WHERE checkin_id = 'aaaaaaaa-0000-0000-0000-00000000000d'").get();
+  assert.equal(row.reason, "paused");
+  const u = env.DB.raw.prepare("SELECT run_count, monitor_posts FROM units WHERE venue_id = 'V42'").get();
+  assert.equal(u.run_count, 0);           // neither a launch nor a monitor report
+});
+
+test("an in-event post stores its event document, and the events view has one row per event", async () => {
+  const base = { venueId: "V42", vpuName: "Main Gym", pulseVersion: "1.5.0" };
+  const ev = (state, extra = {}) => ({ schema: "pulse.event/v1", eventId: "6ad018b2ec5d0313d04118a6",
+                                       state, wentOnAir: state === "on-air", fails: 0, ...extra });
+  await post({ checkins: [
+    { ...base, checkinId: "eeeeeeee-0000-0000-0000-000000000001", sentAt: "2026-10-14T20:10:00Z",
+      reason: "event-start", event: ev("connecting") },
+    { ...base, checkinId: "eeeeeeee-0000-0000-0000-000000000002", sentAt: "2026-10-14T20:20:00Z",
+      reason: "event-update", event: ev("on-air") },
+    { ...base, checkinId: "eeeeeeee-0000-0000-0000-000000000003", sentAt: "2026-10-14T22:15:00Z",
+      reason: "event-end", event: ev("ended", { wentOnAir: true, onAirSeconds: 7200 }) },
+  ] });
+  const rows = env.DB.raw.prepare("SELECT * FROM events").all();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].state, "ended");
+  assert.equal(rows[0].went_on_air, 1);
+  assert.equal(rows[0].on_air_seconds, 7200);
+  assert.equal(rows[0].started_at, "2026-10-14T20:10:00.000Z");
+  const u = env.DB.raw.prepare("SELECT run_count, monitor_posts FROM units WHERE venue_id = 'V42'").get();
+  assert.equal(u.run_count, 0);       // event posts are neither launches nor reports
+});
+
+test("an event document with a bad schema, id or size is dropped, the check-in kept", async () => {
+  await post({ checkins: [
+    { checkinId: "eeeeeeee-0000-0000-0000-000000000011", reason: "event-start", venueId: "V1",
+      event: { schema: "nope", eventId: "6ad018b2ec5d0313d04118a6" } },
+    { checkinId: "eeeeeeee-0000-0000-0000-000000000012", reason: "event-start", venueId: "V1",
+      event: { schema: "pulse.event/v1", eventId: "../../etc", state: "on-air" } },
+    { checkinId: "eeeeeeee-0000-0000-0000-000000000013", reason: "event-start", venueId: "V1",
+      event: { schema: "pulse.event/v1", eventId: "6ad018b2ec5d0313d04118a6", pad: "x".repeat(5000) } },
+  ] });
+  const rows = env.DB.raw.prepare("SELECT event_id, event FROM checkins ORDER BY checkin_id").all();
+  assert.equal(rows.length, 3);
+  assert.equal(rows[0].event, null);
+  assert.equal(rows[1].event_id, null);
+  assert.equal(rows[2].event, null);
+});
+
+test("0013: unit_status carries the scoreboard detail, events carry schedule, off-air time and warnings", async () => {
+  await post({ checkins: [checkin({
+    checkinId: "eeeeeeee-0000-0000-0000-000000000021", reason: "periodic",
+    telemetry: { schema: "pulse.telemetry/v1", status: "PASS",
+                 scoreboard: { source: "scoreconnect", ok: true, scoreLinkConnected: false, dataFlowing: false,
+                               sport: "Fairplay Basketball Code 1" } } })] });
+  const u = env.DB.raw.prepare("SELECT scoreboard_ok, score_link_connected, scoreboard_data_flowing, scoreconnect_sport FROM unit_status").get();
+  assert.equal(u.scoreboard_ok, 1);
+  assert.equal(u.score_link_connected, 0);
+  assert.equal(u.scoreboard_data_flowing, 0);
+  assert.equal(u.scoreconnect_sport, "Fairplay Basketball Code 1");
+
+  await post({ checkins: [{ checkinId: "eeeeeeee-0000-0000-0000-000000000022", sentAt: "2026-10-14T21:55:00Z",
+    reason: "event-end", venueId: "V42", vpuName: "Main Gym",
+    event: { schema: "pulse.event/v1", eventId: "6ad018b2ec5d0313d04118a6", state: "ended", wentOnAir: true,
+             eventName: "gam894328ce3f Middle School Boys Football Sample", nfhsGameKey: "gam894328ce3f",
+             scheduledEnd: "2026-10-15T02:14:00.000Z", offAirSeconds: 175, path: "zixi-2088", kind: "event",
+             scoreboard: { sportMatch: false, scoreConnectSport: "Fairplay Basketball Code 1" },
+             warnings: ["scoreboard-sport-mismatch", "off-air-gaps"] } }] });
+  const e = env.DB.raw.prepare("SELECT state, nfhs_game_key, off_air_seconds, scoreboard_sport_match, warnings FROM events").get();
+  assert.equal(e.state, "ended");
+  assert.equal(e.nfhs_game_key, "gam894328ce3f");
+  assert.equal(e.off_air_seconds, 175);
+  assert.equal(e.scoreboard_sport_match, 0);
+  assert.deepEqual(JSON.parse(e.warnings), ["scoreboard-sport-mismatch", "off-air-gaps"]);
+});
