@@ -93,6 +93,7 @@ Code flows `dev` → `main`. Each branch has CI builds; tags create releases on 
 | App | Dev tag | Production tag |
 |-----|---------|----------------|
 | Pulse.Web | `web-dev-v*` | `web-v*` |
+| Fleet agent | (none) | `agent-v*` (`agent-release.yml`; never deleted, never latest) |
 
 Dev tags create pre-releases. Production tags create full releases.
 
@@ -119,7 +120,9 @@ Pulse.Web uses semver (`MAJOR.MINOR.PATCH`) with a two-channel pipeline. Dev sta
 
 **Version source of truth:** `Pulse.Web/VERSION`.
 
-**The fleet agent versions on its own** (PV-49): `Pulse.Web/app/pulse_agent/VERSION`, with its own `pulse_agent/CHANGELOG.md`. The agent is the scheduled monitor, its check-in and its telemetry. Every post it makes carries `agentVersion`. A change to what the agent collects, decides or posts goes in the agent changelog, and that includes engine changes in `main.py` (findings, readiness, collectors). The agent still ships inside each Pulse.Web build until its own release path lands.
+**The fleet agent versions on its own** (PV-49): `Pulse.Web/app/pulse_agent/VERSION`, with its own `pulse_agent/CHANGELOG.md`. The agent is the scheduled monitor, its check-in and its telemetry. Every post it makes carries `agentVersion`. A change to what the agent collects, decides or posts goes in the agent changelog, and that includes engine changes in `main.py` (findings, readiness, collectors).
+
+**Releasing the agent:** bump `pulse_agent/VERSION`, rename the changelog's `[Unreleased]` to that version, merge, then push `agent-v<version>` on that commit. `.github/workflows/agent-release.yml` runs the tests, builds `pulse-agent-<version>.zip` with `tools/agent-release/build_agent_zip.py` (reproducible: rebuild from the tag to check the hash) and publishes it with its SHA-256 and the SQL to pin it. Publishing moves no unit. Units move only when fleet control pins the version and hash (`tools/checkin-worker/README.md`). A released version is never replaced: the workflow refuses an existing tag. The runner builds the download URL from the tag pattern and asset name, so don't change either without changing the agent's runner (`pulse_agent/runner.py`, PV-49 slice 4).
 
 #### Promotion workflow
 

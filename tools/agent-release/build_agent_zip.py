@@ -1,0 +1,145 @@
+"""Build the fleet agent's release zip (PV-49).
+
+    python tools/agent-release/build_agent_zip.py <version> <out-dir>
+
+Writes <out-dir>/pulse-agent-<version>.zip and a .sha256 file beside it. The
+zip is what the agent's runner unpacks into a slot on the VPU: the Pulse.Web
+tree the monitor runs (app, scripts, deploy, VERSION), without the embedded
+Python runtime, which stays on the unit, shared by both slots. The engine in
+app/main.py ships inside it, frozen at this tag.
+
+The zip is reproducible: entries are sorted, every timestamp and mode is
+fixed, and nothing is compressed (deflate output differs between zlib
+builds; compressing saves only 8.2 MB -> 6.7 MB). So anyone can rebuild it
+from the tag, on any machine, and get the SHA-256 that fleet control pins.
+
+Refuses to build unless <version> matches Pulse.Web/app/pulse_agent/VERSION,
+so a tag can't publish a zip that reports another version.
+"""
+
+import hashlib
+import os
+import re
+import sys
+import zipfile
+
+VERSION_RE = re.compile(r"^\d{1,4}\.\d{1,4}\.\d{1,6}$")
+# The parts of Pulse.Web the monitor runs. Everything else (tests, docs, the
+# launchers, the changelog) stays out.
+INCLUDE = ("app", "scripts", "deploy", "VERSION")
+# The embedded runtime lives on the unit, outside the slots.
+SKIP_DIRS = {"__pycache__", ".pytest_cache"}
+SKIP_PATHS = {"app/python"}
+# 1980-01-01, the earliest time a zip can hold.
+FIXED_TIME = (1980, 1, 1, 0, 0, 0)
+
+
+def agent_version(web_root: str) -> str:
+    with open(os.path.join(web_root, "app", "pulse_agent", "VERSION"), "r", encoding="utf-8") as fh:
+        return fh.read().strip()
+
+
+def collect(web_root: str) -> list:
+    """The files to ship, as sorted paths relative to web_root with / separators."""
+    files = []
+    for top in INCLUDE:
+        path = os.path.join(web_root, top)
+        if os.path.isfile(path):
+            files.append(top)
+            continue
+        for dirpath, dirnames, names in os.walk(path):
+            rel_dir = os.path.relpath(dirpath, web_root).replace(os.sep, "/")
+            dirnames[:] = sorted(d for d in dirnames
+                                 if d not in SKIP_DIRS and f"{rel_dir}/{d}" not in SKIP_PATHS)
+            for name in names:
+                if name.endswith((".pyc", ".pyo")) or name.startswith("."):
+                    continue
+                files.append(f"{rel_dir}/{name}")
+    return sorted(files)
+
+
+def build(web_root: str, version: str, out_dir: str) -> tuple:
+    """Write the zip and its .sha256; return (zip path, sha256 hex)."""
+    if not VERSION_RE.match(version):
+        raise ValueError(f"{version!r} isn't N.N.N")
+    found = agent_version(web_root)
+    if found != version:
+        raise ValueError(f"the tag says {version} but Pulse.Web/app/pulse_agent/VERSION says {found}")
+    files = collect(web_root)
+    for required in ("app/monitor_once.py", "app/pulse_agent/VERSION", "app/main.py", "app/requirements.txt"):
+        if required not in files:
+            raise ValueError(f"{required} is missing from the build")
+    os.makedirs(out_dir, exist_ok=True)
+    zip_path = os.path.join(out_dir, f"pulse-agent-{version}.zip")
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as zf:
+        for rel in files:
+            info = zipfile.ZipInfo(rel, date_time=FIXED_TIME)
+            info.compress_type = zipfile.ZIP_STORED
+            info.external_attr = 0o644 << 16
+            info.create_system = 3          # the same on every build machine
+            with open(os.path.join(web_root, rel), "rb") as fh:
+                zf.writestr(info, fh.read())
+    h = hashlib.sha256()
+    with open(zip_path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    sha = h.hexdigest()
+    with open(zip_path + ".sha256", "w", encoding="utf-8") as fh:
+        fh.write(f"{sha}  {os.path.basename(zip_path)}\n")
+    with open(os.path.join(out_dir, "RELEASE_NOTES.md"), "w", encoding="utf-8") as fh:
+        fh.write(release_notes(web_root, version, sha))
+    return zip_path, sha
+
+
+def changelog_section(web_root: str, version: str) -> str:
+    """The `## [version]` section of the agent changelog, without its heading."""
+    with open(os.path.join(web_root, "app", "pulse_agent", "CHANGELOG.md"), "r", encoding="utf-8") as fh:
+        text = fh.read()
+    m = re.search(rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)", text, re.S | re.M)
+    return m.group(1).strip() if m else ""
+
+
+def release_notes(web_root: str, version: str, sha: str) -> str:
+    notes = changelog_section(web_root, version) or "_No changelog section for this version._"
+    return f"""Fleet agent {version} (PV-49). Units move to it only when fleet control pins it.
+
+{notes}
+
+**SHA-256** of `pulse-agent-{version}.zip`:
+
+```
+{sha}
+```
+
+Pin it (check-in Worker README, "which agent build a unit runs"):
+
+```sql
+-- one unit first
+INSERT INTO monitor_control (scope, agent_version, agent_sha256, note, updated_at)
+VALUES ('<venue id>', '{version}', '{sha}', 'canary', datetime('now'))
+ON CONFLICT (scope) DO UPDATE SET agent_version = excluded.agent_version,
+  agent_sha256 = excluded.agent_sha256, note = excluded.note, updated_at = excluded.updated_at;
+-- then the fleet
+UPDATE monitor_control SET agent_version = '{version}', agent_sha256 = '{sha}',
+  updated_at = datetime('now') WHERE scope = 'fleet';
+```
+"""
+
+
+def main(argv) -> int:
+    if len(argv) != 2:
+        print(__doc__.strip().splitlines()[2].strip(), file=sys.stderr)
+        return 2
+    version, out_dir = argv
+    web_root = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "Pulse.Web")
+    try:
+        zip_path, sha = build(web_root, version, out_dir)
+    except (ValueError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(f"{zip_path}\n{sha}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
