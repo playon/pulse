@@ -600,7 +600,7 @@ def _demo_poe_power():
         "supported": True,
         "available": True,
         "nicModel": "I210",
-        "cardLabel": "ADLINK GIE74P (Intel I210 x4)",
+        "cardLabel": "ADLINK GIE74-series (Intel I210 x4)",
         "reason": "",
         "dllPath": r"C:\Program Files\ADLINK\GIE Series\Library\Dll\x64\SmartPoE.dll",
         "budget": {

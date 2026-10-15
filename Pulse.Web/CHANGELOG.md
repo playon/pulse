@@ -26,6 +26,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 ### Added
 - ScoreConnect tab: a **Reinstall ScoreConnect III** button. It stops the service, deletes the whole Sportzcast LLC program folder, and installs a fresh copy, with progress shown in Pulse. Saved settings and logs are kept. Use it when ScoreConnect III won't start or keeps failing.
 
+### Fixed
+- Camera Connectivity: an Intel I210 camera card is now labelled "ADLINK GIE74-series" instead of always "GIE74P". Pulse can't tell a GIE74 from a GIE74P, and it had been calling GIE74 cards GIE74P.
+- Camera Connectivity: when the PoE card won't report its power budget, the message no longer blames only the driver. It now says the card's PoE controller may not be responding, and tells you to check the card's Molex power lead first. If cameras still get no power after that, treat it as a card fault.
+
 ## [1.4.1] - 2026-10-13
 
 ### Changed
