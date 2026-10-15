@@ -75,11 +75,25 @@ const GROUPS = [
 
 // Columns added after 0015 shipped. 0015 is generated from this file, so it
 // must keep emitting the table as it was; each later migration adds its own
-// (PV-51: 0016 adds ev_type). `legacy` leaves them out.
+// (PV-51: 0016 adds ev_type; PV-49: 0017 adds the agent groups). `legacy`
+// leaves them out.
 const LATER = {
   ev: { ev_type: "CASE WHEN json_extract(c.event, '$.kind') = 'daily-test' THEN 'daily-test' ELSE 'event' END" },
 };
-const groups = (legacy) => GROUPS.map((g) => (legacy || !LATER[g.name] ? g : { ...g, cols: { ...g.cols, ...LATER[g.name] } }));
+const LATER_GROUPS = [
+  // The version the unit's fleet agent last reported, from any of its posts.
+  { name: "agent", when: "c.agent_version IS NOT NULL", cols: { agent_version: "c.agent_version" } },
+  // How its newest update attempt went.
+  {
+    name: "agent_update", when: "c.agent_update_status IS NOT NULL",
+    cols: { agent_update_status: "c.agent_update_status", agent_update_version: "c.agent_update_version",
+            agent_update_error: "c.agent_update_error" },
+  },
+];
+const groups = (legacy) => [
+  ...GROUPS.map((g) => (legacy || !LATER[g.name] ? g : { ...g, cols: { ...g.cols, ...LATER[g.name] } })),
+  ...(legacy ? [] : LATER_GROUPS),
+];
 
 // Running totals and extremes over every check-in of the unit.
 const AGG = {

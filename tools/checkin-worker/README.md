@@ -92,11 +92,41 @@ last instruction they had. Interactive Pulse launches ignore it.
 npx wrangler d1 execute pulse-checkins --remote --command "UPDATE monitor_control SET mode='off', note='why', updated_at=datetime('now') WHERE scope='fleet'"
 # stop one collector everywhere
 npx wrangler d1 execute pulse-checkins --remote --command "UPDATE monitor_control SET skip='[\"Get-S1Cameras.ps1\"]', updated_at=datetime('now') WHERE scope='fleet'"
-# stop the monitor on one unit
-npx wrangler d1 execute pulse-checkins --remote --command "INSERT OR REPLACE INTO monitor_control (scope, mode, note, updated_at) VALUES ('<venue id>', 'off', 'why', datetime('now'))"
+# stop the monitor on one unit (an upsert, not INSERT OR REPLACE: REPLACE
+# rewrites the whole row and would wipe the unit's agent pin, below)
+npx wrangler d1 execute pulse-checkins --remote --command "INSERT INTO monitor_control (scope, mode, note, updated_at) VALUES ('<venue id>', 'off', 'why', datetime('now')) ON CONFLICT (scope) DO UPDATE SET mode=excluded.mode, note=excluded.note, updated_at=excluded.updated_at"
 # back on
 npx wrangler d1 execute pulse-checkins --remote --command "UPDATE monitor_control SET mode='on', skip='[]', updated_at=datetime('now') WHERE scope='fleet'"
 ```
+
+## Fleet control: which agent build a unit runs
+
+The reply's `control` also names the fleet agent build a unit should run
+(migration 0017, PV-49), as `agent: { version, sha256 }`. It comes from the
+`agent_version` and `agent_sha256` columns: a unit's own row wins when it sets a
+version (a canary, or a unit held back), otherwise the `fleet` row's applies.
+With no version set, `agent` is left out and units stay on what they run. A
+unit row with a version but no valid hash gets no target, never the fleet's,
+so a held-back unit isn't moved by a typo.
+
+The agent builds the download URL itself (`playon/pulse` release
+`agent-v<version>`) and refuses a zip whose SHA-256 differs, so this table can
+only choose among published releases. The columns refuse anything but
+`N.N.N` and 64 lowercase hex characters.
+
+```bash
+# move the fleet to 0.2.0 (sha256 of that release's zip)
+npx wrangler d1 execute pulse-checkins --remote --command "UPDATE monitor_control SET agent_version='0.2.0', agent_sha256='<64 hex>', note='why', updated_at=datetime('now') WHERE scope='fleet'"
+# one unit first, or one unit held back
+npx wrangler d1 execute pulse-checkins --remote --command "INSERT INTO monitor_control (scope, agent_version, agent_sha256, note, updated_at) VALUES ('<venue id>', '0.2.0', '<64 hex>', 'why', datetime('now')) ON CONFLICT (scope) DO UPDATE SET agent_version=excluded.agent_version, agent_sha256=excluded.agent_sha256, note=excluded.note, updated_at=excluded.updated_at"
+# stop moving anyone (a rollback is setting the old version back)
+npx wrangler d1 execute pulse-checkins --remote --command "UPDATE monitor_control SET agent_version=NULL, agent_sha256=NULL, updated_at=datetime('now') WHERE scope='fleet'"
+```
+
+What each unit runs and how its last update went are in `unit_latest`
+(`agent_version`, `agent_update_status`, `agent_update_version`,
+`agent_update_error`). Apply migration 0017 before deploying this Worker: it
+writes those columns.
 
 This is the lesson from Canopy Leaf's rollout: its memory leak took four months
 of hand-edited cron jobs to find (#leaf-deploy-coordination). Each monitor

@@ -649,3 +649,102 @@ test("0013: unit_status carries the scoreboard detail, events carry schedule, of
   assert.equal(e.scoreboard_sport_match, 0);
   assert.deepEqual(JSON.parse(e.warnings), ["scoreboard-sport-mismatch", "off-air-gaps"]);
 });
+
+// ── The fleet agent's version, update outcome and pinned target (PV-49) ──────
+
+const SHA_A = "a".repeat(64);
+const SHA_B = "0123456789abcdef".repeat(4);
+
+test("agentVersion and agentUpdate are stored, and kept in raw", async () => {
+  await post({ checkins: [checkin({ reason: "periodic", agentVersion: "0.2.0",
+                                    agentUpdate: { status: "rolled-back", version: "0.3.0",
+                                                   error: "no post within 3 ticks" } })] });
+  const row = env.DB.raw.prepare("SELECT * FROM checkins").get();
+  assert.equal(row.agent_version, "0.2.0");
+  assert.equal(row.agent_update_status, "rolled-back");
+  assert.equal(row.agent_update_version, "0.3.0");
+  assert.equal(row.agent_update_error, "no post within 3 ticks");
+  const raw = JSON.parse(row.raw);
+  assert.equal(raw.agentVersion, "0.2.0");
+  assert.deepEqual(raw.agentUpdate, { status: "rolled-back", version: "0.3.0", error: "no post within 3 ticks" });
+});
+
+test("a launch check-in has no agent version, and junk agentUpdate is dropped", async () => {
+  await post({ checkins: [checkin({ reason: "startup" })] });
+  let row = env.DB.raw.prepare("SELECT * FROM checkins").get();
+  assert.equal(row.agent_version, null);
+  assert.equal(JSON.parse(row.raw).agentUpdate, undefined);
+  for (const [i, junk] of [{ status: "exploded", version: "0.3.0" }, "applied", ["applied"], { version: "0.3.0" }].entries()) {
+    const id = `aaaaaaaa-0000-0000-0000-00000000010${i}`;
+    await post({ checkins: [checkin({ checkinId: id, reason: "periodic", agentVersion: "0.2.0", agentUpdate: junk })] });
+    row = env.DB.raw.prepare("SELECT * FROM checkins WHERE checkin_id = ?").get(id);
+    assert.equal(row.agent_version, "0.2.0");                 // the check-in still lands
+    assert.equal(row.agent_update_status, null, JSON.stringify(junk));
+  }
+  await post({ checkins: [checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000110", reason: "periodic",
+                                    agentVersion: "x".repeat(200),
+                                    agentUpdate: { status: "failed", error: "e".repeat(400) } })] });
+  row = env.DB.raw.prepare("SELECT * FROM checkins WHERE checkin_id = 'aaaaaaaa-0000-0000-0000-000000000110'").get();
+  assert.equal(row.agent_version.length, 64);
+  assert.equal(row.agent_update_error.length, 256);
+});
+
+test("unit_latest keeps the agent's newest version and update outcome", async () => {
+  const at = (n) => `2026-10-15T1${n}:00:00Z`;
+  await post({ checkins: [
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000201", sentAt: at(1), reason: "periodic", agentVersion: "0.1.0" }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000202", sentAt: at(3), reason: "heartbeat", agentVersion: "0.2.0",
+              agentUpdate: { status: "applied", version: "0.2.0" } }),
+    // A replayed older post never outranks the newer one.
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000203", sentAt: at(2), reason: "periodic", agentVersion: "0.1.0",
+              agentUpdate: { status: "failed", version: "0.2.0", error: "hash mismatch" } }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000204", sentAt: at(4), reason: "startup" }),
+  ] });
+  const l = env.DB.raw.prepare("SELECT * FROM unit_latest WHERE unit_key = 'V42'").get();
+  assert.equal(l.agent_version, "0.2.0");                    // a launch after it doesn't clear it
+  assert.equal(l.agent_at, "2026-10-15T13:00:00.000Z");
+  assert.deepEqual([l.agent_update_status, l.agent_update_version, l.agent_update_error], ["applied", "0.2.0", null]);
+});
+
+test("no agent target unless one is set", async () => {
+  const body = await (await post({ checkins: [checkin()] })).json();
+  assert.equal(body.control.agent, undefined);
+});
+
+test("agent target: the fleet's pin, a unit's own pin wins, a unit row without one gets the fleet's", async () => {
+  env.DB.raw.exec(`UPDATE monitor_control SET agent_version = '0.2.0', agent_sha256 = '${SHA_A}' WHERE scope = 'fleet'`);
+  env.DB.raw.exec(`INSERT INTO monitor_control (scope, agent_version, agent_sha256) VALUES ('V42', '0.3.0', '${SHA_B}')`);
+  env.DB.raw.exec(`INSERT INTO monitor_control (scope, mode) VALUES ('V7', 'off')`);
+  const reply = async (venueId, n) => (await (await post({ checkins: [checkin({
+    checkinId: `aaaaaaaa-0000-0000-0000-00000000030${n}`, venueId })] })).json()).control;
+  assert.deepEqual((await reply("V42", 1)).agent, { version: "0.3.0", sha256: SHA_B });   // canary
+  assert.deepEqual((await reply("V99", 2)).agent, { version: "0.2.0", sha256: SHA_A });   // no row of its own
+  const v7 = await reply("V7", 3);
+  assert.equal(v7.mode, "off");
+  assert.deepEqual(v7.agent, { version: "0.2.0", sha256: SHA_A });                         // its row sets no version
+});
+
+test("a unit pin without its hash means no target, never the fleet's", async () => {
+  env.DB.raw.exec(`UPDATE monitor_control SET agent_version = '0.2.0', agent_sha256 = '${SHA_A}' WHERE scope = 'fleet'`);
+  env.DB.raw.exec(`INSERT INTO monitor_control (scope, agent_version) VALUES ('V42', '0.1.0')`);
+  const body = await (await post({ checkins: [checkin()] })).json();
+  assert.equal(body.control.agent, undefined);
+  assert.equal(body.control.mode, "on");
+});
+
+test("monitor_control refuses a malformed pin", () => {
+  const bad = [`agent_version = 'v0.2.0'`, `agent_version = '0.2'`, `agent_sha256 = '${SHA_A.toUpperCase()}'`,
+               `agent_sha256 = 'abc'`];
+  for (const set of bad) {
+    assert.throws(() => env.DB.raw.exec(`UPDATE monitor_control SET ${set} WHERE scope = 'fleet'`), /CHECK constraint/, set);
+  }
+});
+
+test("switching a unit off the way the README says keeps its agent pin", async () => {
+  env.DB.raw.exec(`INSERT INTO monitor_control (scope, agent_version, agent_sha256) VALUES ('V42', '0.1.0', '${SHA_B}')`);
+  env.DB.raw.exec(`INSERT INTO monitor_control (scope, mode, note, updated_at) VALUES ('V42', 'off', 'why', datetime('now'))
+                   ON CONFLICT (scope) DO UPDATE SET mode=excluded.mode, note=excluded.note, updated_at=excluded.updated_at`);
+  const body = await (await post({ checkins: [checkin()] })).json();
+  assert.equal(body.control.mode, "off");
+  assert.deepEqual(body.control.agent, { version: "0.1.0", sha256: SHA_B });
+});
