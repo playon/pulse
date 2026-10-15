@@ -219,10 +219,11 @@ class RealLinesTest(unittest.TestCase):
 
 
 class MidEventTest(RealLinesTest):
-    def test_a_reader_that_starts_mid_event_trusts_the_status_line_and_counts_the_next_restart(self):
+    def test_a_status_line_alone_is_not_on_air_and_the_next_restart_still_counts(self):
         status_only = self.REAL.splitlines(True)[-1]
-        ev = self.run_on(status_only)                         # no session or connect line seen
-        self.assertEqual(event_watch.verdict(ev, T0 + 3000), "on-air")
+        ev = self.run_on(status_only)                         # no session or connect line anywhere
+        # Encoder FPS is not delivery (6493 read 25 fps through an outage).
+        self.assertNotEqual(event_watch.verdict(ev, T0 + 3000), "on-air")
         ev = self.run_on(self.REAL.splitlines(True)[0], ev)   # then VPU.exe restarts
         self.assertEqual(ev["restarts"], 1)
 
@@ -241,3 +242,60 @@ class EventFolderTest(unittest.TestCase):
             self.assertEqual(event_watch.newest_event_id(d, since=time.time()), "6ad018b2ec5d0313d04118a6")
             os.utime(os.path.join(live, "x_hd.mkv"), (hour_ago,) * 2)
             self.assertIsNone(event_watch.newest_event_id(d, since=time.time()))   # nothing live
+
+
+class CatchUpTest(RealLinesTest):
+    def test_a_mid_event_start_recovers_the_session_from_far_back(self):
+        old = event_watch.MAX_READ_BYTES
+        event_watch.MAX_READ_BYTES = 2048
+        try:
+            status = self.REAL.splitlines(True)[-1]
+            with open(self.vpu, "a", encoding="utf-8") as fh:
+                fh.write(self.DAILY)                       # an earlier session today
+                fh.write(self.REAL)                        # this event's session
+                fh.write(status * 200)                     # long past the read window
+            ev = {"startedAt": T0}
+            event_watch.observe(ev, "1", T0 + 3000, log_dir=self.logs, events_dir=self.tmp.name)
+        finally:
+            event_watch.MAX_READ_BYTES = old
+        s = event_watch.summary(ev, T0 + 3000, ended=False)
+        self.assertEqual(s["eventId"], "6ad018b2ec5d0313d04118a6")   # not the daily test's
+        self.assertFalse(s["calibrated"])
+        self.assertEqual(s["restarts"], 0)
+        self.assertEqual(event_watch.verdict(ev, T0 + 3000), "on-air")
+        self.assertTrue(ev["caughtUp"])
+
+
+class OutageTest(RealLinesTest):
+    """6493, 2026-10-14 21:00-21:04: every UDP path blocked by firewall rules."""
+
+    OUTAGE = (
+        "Info\t| 2026-10-14 20:58:55.717 |ZixiStreams\t|x(1)\t|x\t|Created Zixi stream: HD_Writer0_Stream0\n"
+        "Error\t| 2026-10-14 21:01:30.969 |ZixiStreams\t|x(1)\t|x\t|Failed connecting to zixi://pxltd-100-62-83-36.pixellot.stream:443/0_hd_2000, because Failed to open Zixi stream: HD_Writer0_Stream0, return value: -2\n"
+        "Info\t| 2026-10-14 21:02:01.261 |AVWriter\t|x(1)\t|x\t|onStreamDisconnect: zixi://pxltd-100-62-83-36.pixellot.stream:443/0_hd_2000 failed, move to zixi://100.1.2.3:2088/0_hd_2000\n"
+        "Error\t| 2026-10-14 21:03:32.125 |ZixiStreams\t|x(1)\t|x\t|Failed connecting to zixi://100.1.2.3:443/0_hd_2000, because Failed to open Zixi stream: HD_Writer0_Stream0, return value: -2\n"
+        "Info\t| 2026-10-14 21:03:40.000 |StatusReporter\t|StatusReporter.cpp(694)\t|StatusReporter::reportStatus\t|VPU:|HD_Writer0_Stream0_FPS:Lst=25.00   |HD_Writer0_Stream0_Fails:Lst=1     |HD_Writer0_Stream0_UrlPort:Lst=443.00 |\n"
+    )
+    RTMP = (
+        "Info\t| 2026-10-14 21:04:02.395 |AVWriter\t|x(1)\t|x\t|onStreamDisconnect: zixi://100.1.2.3:443/0_hd_2000 failed, move to rtmp://pxltd-100-62-83-36.pixellot.stream:1935/live/0_hd_2000\n"
+        "Alert\t| 2026-10-14 21:04:07.803 |FFMPEGStreams\t|x(1)\t|x\t|Video Connection rtmp://pxltd-100-62-83-36.pixellot.stream:1935/live/0_hd_2000 Created Successfuly\n"
+        "Info\t| 2026-10-14 21:04:18.000 |StatusReporter\t|StatusReporter.cpp(694)\t|StatusReporter::reportStatus\t|VPU:|HD_Writer0_Stream0_FPS:Lst=25.13   |HD_Writer0_Stream0_Fails:Lst=0     |HD_Writer0_Stream0_UrlPort:Lst=1935.00 |\n"
+    )
+
+    def test_encoder_fps_during_an_outage_is_not_on_air(self):
+        ev = self.run_on(self.REAL + self.OUTAGE)
+        self.assertNotEqual(event_watch.verdict(ev, T0 + 3000), "on-air")
+
+    def test_the_rtmp_fallback_is_on_air_and_flagged(self):
+        ev = self.run_on(self.REAL + self.OUTAGE + self.RTMP)
+        self.assertEqual(event_watch.verdict(ev, T0 + 3000), "on-air")
+        s = event_watch.summary(ev, T0 + 3000, ended=False)
+        self.assertEqual(s["path"], "rtmp-1935")
+        self.assertTrue(s["fallback"])
+        self.assertEqual(s["live"]["port"], 1935)
+
+    def test_the_first_choice_path_is_not_a_fallback(self):
+        ev = self.run_on(self.REAL)
+        s = event_watch.summary(ev, T0 + 3000, ended=False)
+        self.assertEqual(s["path"], "zixi-2088")
+        self.assertFalse(s["fallback"])

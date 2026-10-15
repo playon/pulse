@@ -45,6 +45,7 @@ from typing import Optional
 LOG_DIR = r"C:\Pixellot\Data\Log"
 EVENTS_DIR = r"D:\recordedEvents"
 MAX_READ_BYTES = 4 * 1024 * 1024    # per tick; a busier log is skipped to its tail
+CATCH_UP_BYTES = 96 * 1024 * 1024   # once, when the monitor starts mid-event
 BENCH_TAIL_BYTES = 16 * 1024        # ~40 rows of AgentBenchmarks
 FAILING_AFTER_SECONDS = 120         # failed tries for this long with no connect
 RESTART_LOOP_COUNT = 2              # VPU.exe restarts within one event
@@ -119,6 +120,45 @@ def _read_new(path: str, offset: int, size: int):
     return data[:end + 1].decode("utf-8", "replace"), start + end + 1, skipped
 
 
+def _catch_up(path: str, size: int):
+    """For a reader that starts mid-event (the monitor was installed or
+    updated during a game): the marker lines of VPU.exe's current session,
+    from its START NEW LOG SESSION line to now, without the per-second status
+    lines. One pass, at most CATCH_UP_BYTES, done once per such event.
+    Returns (text, offset to continue from)."""
+    marker = b"START NEW LOG SESSION"
+    start = None
+    try:
+        with open(path, "rb") as fh:
+            pos = size
+            floor = max(0, size - CATCH_UP_BYTES)
+            chunk = 1024 * 1024
+            while pos > floor and start is None:
+                lo = max(floor, pos - chunk)
+                fh.seek(lo)
+                buf = fh.read(pos - lo + len(marker))
+                i = buf.rfind(marker)
+                if i >= 0:
+                    start = lo + i
+                pos = lo
+            fh.seek(start if start is not None else floor)
+            keep = []
+            for raw in fh:
+                if fh.tell() > size:
+                    break
+                if b"StatusReporter::reportStatus" in raw:
+                    continue
+                keep.append(raw.decode("utf-8", "replace"))
+    except OSError:
+        return "", size
+    # Back to the line start of the session marker.
+    text = "".join(keep)
+    j = text.find("START NEW LOG SESSION")
+    if j > 0:
+        text = text[text.rfind("\n", 0, j) + 1:]
+    return text, size
+
+
 def parse_status(line: str) -> dict:
     """The kept values from one StatusReporter::reportStatus line."""
     out = {}
@@ -166,7 +206,8 @@ def parse_vpu_lines(text: str) -> list:
         elif "Created Zixi stream" in line:
             out.append({"t": t, "kind": "connected", "via": "zixi"})
         elif "Created Successfuly" in line and "rtmp://" in line:
-            out.append({"t": t, "kind": "connected", "via": "rtmp"})
+            m = re.search(r"(rtmp://\S+) Created Successfuly", line)
+            out.append({"t": t, "kind": "connected", "via": "rtmp", "path": _path_of(m.group(1) if m else None)})
         elif "CloseUnit" in line:
             m = re.search(r'Reason: "([^"]*)"', line)
             out.append({"t": t, "kind": "close", "reason": m.group(1) if m else None})
@@ -275,6 +316,16 @@ def newest_event_id(events_dir: str = EVENTS_DIR, since: Optional[float] = None)
     return best[0] if best else None
 
 
+def _path_of(url) -> Optional[str]:
+    """zixi://host:2088/... -> "zixi-2088", the streamingPath vocabulary of
+    the pre-event check (pulse.telemetry/v1)."""
+    m = re.match(r"(zixi|rtmp)://[^/:]+(?::(\d+))?", url or "")
+    if not m:
+        return None
+    port = m.group(2) or ("1935" if m.group(1) == "rtmp" else "2088")
+    return f"{m.group(1)}-{port}"
+
+
 def _round(v):
     return None if v is None else round(v, 1)
 
@@ -287,15 +338,13 @@ def verdict(ev: dict, now: float) -> str:
     if down:
         return "camera-link-down"
     st = ev.get("status") or {}
-    # The newest status line is the ground truth for "now": frames leaving
-    # the stream writer on a known port means it's on air, whatever the
-    # log lines before it said (and a reader that started mid-event may
-    # never have seen the connect line).
-    if (st.get("HD_Writer0_Stream0_FPS") or 0) > 0 and st.get("HD_Writer0_Stream0_UrlPort"):
-        return "on-air"
+    # On air = the log's newest connect line has no failed attempt after it.
+    # The status line's stream FPS is NOT proof: it counts frames leaving the
+    # encoder, and read 25 fps through a 2.5-minute outage on 6493 with every
+    # UDP path blocked (2026-10-14). Its Fails counter does veto.
     conn = ev.get("connectedAt")
     last_fail = ev.get("lastFailAt")
-    if conn and (not last_fail or last_fail <= conn) and not st:
+    if conn and (not last_fail or last_fail <= conn) and not (st.get("HD_Writer0_Stream0_Fails") or 0):
         return "on-air"
     first_fail = ev.get("failingSince")
     if first_fail and now - first_fail >= FAILING_AFTER_SECONDS:
@@ -323,12 +372,21 @@ def observe(ev: dict, vpu_pid: Optional[str], now: float,
             ev["logFile"], ev["offset"] = path, (max(0, size - MAX_READ_BYTES) if first_look else 0)
             if first_look:
                 ev["midEventStart"] = True
+        caught = ""
+        if ev.get("midEventStart") and not ev.get("caughtUp"):
+            ev["caughtUp"] = True                 # once per event, found or not
+            caught, _ = _catch_up(path, max(0, size - MAX_READ_BYTES))
+            cost["catchUp"] = len(caught)
+            if caught:
+                ev.pop("midEventStart", None)    # its session line was found
         text, ev["offset"], skipped = _read_new(path, ev.get("offset") or 0, size)
         cost["bytes"], cost["skipped"] = len(text), skipped
+        text = caught + text
         for e in parse_vpu_lines(text):
             k, t = e["kind"], e.get("t") or now
             if k == "chain":
                 ev["chain"] = e["urls"]
+                ev["pendingPath"] = _path_of(e["urls"][0] if e["urls"] else None)
             elif k == "fail":
                 ev["fails"] = (ev.get("fails") or 0) + 1
                 ev["lastFailAt"] = t
@@ -338,9 +396,11 @@ def observe(ev: dict, vpu_pid: Optional[str], now: float,
                     ev.setdefault("failingSince", t)
             elif k == "move":
                 ev["failovers"] = (ev.get("failovers") or 0) + 1
+                ev["pendingPath"] = _path_of(e.get("to"))
             elif k == "connected":
                 ev["connectedAt"] = t
                 ev["via"] = e["via"]
+                ev["path"] = e.get("path") or ev.get("pendingPath")
                 ev.setdefault("firstConnectedAt", t)
                 ev.pop("failingSince", None)
             elif k == "close":
@@ -361,9 +421,6 @@ def observe(ev: dict, vpu_pid: Optional[str], now: float,
             elif k == "status":
                 ev["status"] = e["values"]
                 ev["statusAt"] = t
-                if (e["values"].get("HD_Writer0_Stream0_FPS") or 0) > 0 and e["values"].get("HD_Writer0_Stream0_UrlPort"):
-                    ev.setdefault("firstConnectedAt", t)
-                    ev.setdefault("via", "zixi" if e["values"]["HD_Writer0_Stream0_UrlPort"] in (2088, 443) else "rtmp")
     if ev.pop("midEventStart", False) and not ev.get("sessions"):
         # Started reading mid-event, past the session line: VPU.exe is in a
         # session we didn't see begin, so the next one is a restart.
@@ -422,6 +479,10 @@ def summary(ev: dict, now: float, ended: bool) -> dict:
         "wentOnAir": bool(first),
         "onAirSeconds": on_air,
         "via": ev.get("via"),
+        "path": ev.get("path"),
+        # On air, but not on the chain's first choice: the venue is blocking
+        # the preferred path (UDP 2088 first, then UDP 443, then RTMP 1935).
+        "fallback": bool(ev.get("path") and ev.get("chain") and _path_of(ev["chain"][0]) != ev.get("path")),
         "fails": ev.get("fails") or 0,
         "failovers": ev.get("failovers") or 0,
         "lastFailUrl": ev.get("lastFailUrl"),
