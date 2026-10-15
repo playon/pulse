@@ -1,3 +1,4 @@
+import { updateLatest } from "./latest.js";
 // No write key (Ian, 2026-10-13). Pulse ships from a public repo, so any key in
 // it was readable by anyone and only looked like protection (Snyk flagged it,
 // PR #229). What protects the table is what this file enforces: the per-IP rate
@@ -139,6 +140,9 @@ export async function handleIngest(request, env) {
       const changed = res && res.meta && res.meta.changes;
       results[slots[i]].status = changed ? "inserted" : "duplicate";
     });
+    // Only newly stored check-ins move unit_latest: a duplicate (a replay of
+    // one already stored) must not count twice.
+    await updateLatest(env, results.filter((r) => r.status === "inserted").map((r) => r.checkinId));
   }
 
   const control = await controlFor(env, unit);
