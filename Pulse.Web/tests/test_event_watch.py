@@ -318,3 +318,16 @@ class CameraDegradedTest(RealLinesTest):
         self.assertEqual(s["poeResets"], 1)
         self.assertEqual(s["cameraResets"], 1)
         self.assertEqual(s["live"]["health"], 0.63)
+
+
+class CameraUnreachableTest(RealLinesTest):
+    def test_the_unreachable_camera_is_named_by_its_stream_ip(self):
+        lost = "Error\t| 2026-10-14 21:12:50.904 |Cameras\t|x(1)\t|x\t|Couldn't get response from camera rtsp://169.254.16.51/h264\n"
+        ev = self.run_on(self.REAL + lost)
+        ev["lastReadAt"] = time.mktime((2026, 10, 14, 21, 14, 0, 0, 0, -1))
+        s = event_watch.summary(ev, ev["lastReadAt"], ended=False)
+        self.assertEqual(s["camerasUnreachable"], ["169.254.16.51"])
+        ev["lastReadAt"] += 600                                   # it came back
+        s = event_watch.summary(ev, ev["lastReadAt"], ended=True)
+        self.assertEqual(s["camerasUnreachable"], [])
+        self.assertEqual(s["camerasLost"], ["169.254.16.51"])

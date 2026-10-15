@@ -186,6 +186,7 @@ def parse_vpu_lines(text: str) -> list:
                 and "Created Successfuly" not in line and "START NEW LOG SESSION" not in line
                 and "CloseUnit" not in line and "LEAKY BUCKET" not in line
                 and "Request to disable the Poe" not in line and "Camera reset happened" not in line
+                and "Couldn't get response from camera rtsp" not in line
                 and "recordedEvents" not in line):
             continue
         t = _line_time(line)
@@ -219,6 +220,9 @@ def parse_vpu_lines(text: str) -> list:
             out.append({"t": t, "kind": "poeReset"})
         elif "Camera reset happened" in line:
             out.append({"t": t, "kind": "cameraReset"})
+        elif "Couldn't get response from camera rtsp" in line:
+            m = re.search(r"rtsp://([0-9.]+)", line)
+            out.append({"t": t, "kind": "cameraUnreachable", "ip": m.group(1) if m else None})
         elif "cannot find needed calibration for" in line:
             m = re.search(r"cannot find needed calibration for (\S+?)\.", line)
             out.append({"t": t, "kind": "uncalibrated", "sport": m.group(1) if m else None})
@@ -432,6 +436,8 @@ def observe(ev: dict, vpu_pid: Optional[str], now: float,
                 ev["poeResets"] = (ev.get("poeResets") or 0) + 1
             elif k == "cameraReset":
                 ev["cameraResets"] = (ev.get("cameraResets") or 0) + 1
+            elif k == "cameraUnreachable" and e.get("ip"):
+                ev.setdefault("unreachable", {})[e["ip"]] = t
             elif k == "uncalibrated":
                 ev["calibrated"] = False
                 ev["sport"] = e.get("sport")
@@ -513,6 +519,11 @@ def summary(ev: dict, now: float, ended: bool) -> dict:
         "camerasDown": len(ev.get("nicsDown") or []),
         "camerasSlow": slow_cameras(ev),
         "poeResets": ev.get("poeResets") or 0,
+        # Cameras Pixellot couldn't reach in the last 5 minutes (by stream IP),
+        # and every one it couldn't reach at some point this event.
+        "camerasUnreachable": sorted(ip for ip, t in (ev.get("unreachable") or {}).items()
+                                     if t and (ev.get("lastReadAt") or now) - t <= 300),
+        "camerasLost": sorted((ev.get("unreachable") or {}).keys()),
         "cameraResets": ev.get("cameraResets") or 0,
         "closeReason": ev.get("closeReason"),
         "calibrated": ev.get("calibrated", True) if ev.get("sessions") else ev.get("calibrated"),
