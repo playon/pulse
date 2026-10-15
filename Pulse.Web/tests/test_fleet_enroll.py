@@ -71,6 +71,17 @@ class Fingerprint(unittest.TestCase):
                 fh.write("x = 2\n")
             self.assertNotEqual(fe.fingerprint(d), a)
 
+    def test_changes_with_the_agent_package(self):
+        with tempfile.TemporaryDirectory() as d:
+            _build(d)
+            os.makedirs(os.path.join(d, "app", "pulse_agent"))
+            with open(os.path.join(d, "app", "pulse_agent", "checkin.py"), "w") as fh:
+                fh.write("x = 1\n")
+            a = fe.fingerprint(d)
+            with open(os.path.join(d, "app", "pulse_agent", "checkin.py"), "w") as fh:
+                fh.write("x = 2\n")
+            self.assertNotEqual(fe.fingerprint(d), a)
+
     def test_no_monitor(self):
         with tempfile.TemporaryDirectory() as d:
             os.makedirs(os.path.join(d, "app"))

@@ -83,8 +83,8 @@ def vpu_running() -> bool:
 
 def fingerprint(root: str) -> Optional[str]:
     """Which build a folder holds: a hash of the monitor's code (app\\*.py,
-    scripts, deploy, VERSION). The Python runtime and static UI don't change
-    what the monitor does, so they're left out, which keeps this fast. Dev
+    the agent package app\\pulse_agent, scripts, deploy, VERSION). The Python
+    runtime and static UI don't change what the monitor does, so they're left out, which keeps this fast. Dev
     builds all say 1.5.0-dev in VERSION, so the version alone can't tell."""
     files = []
     app = os.path.join(root, "app")
@@ -93,7 +93,7 @@ def fingerprint(root: str) -> Optional[str]:
     for name in os.listdir(app):
         if name.endswith(".py"):
             files.append(os.path.join("app", name))
-    for d in ("scripts", "deploy"):
+    for d in (os.path.join("app", "pulse_agent"), "scripts", "deploy"):
         base = os.path.join(root, d)
         for dirpath, dirnames, names in os.walk(base):
             dirnames[:] = [x for x in dirnames if x != "__pycache__"]

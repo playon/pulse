@@ -119,6 +119,8 @@ Pulse.Web uses semver (`MAJOR.MINOR.PATCH`) with a two-channel pipeline. Dev sta
 
 **Version source of truth:** `Pulse.Web/VERSION`.
 
+**The fleet agent versions on its own** (PV-49): `Pulse.Web/app/pulse_agent/VERSION`, with its own `pulse_agent/CHANGELOG.md`. The agent is the scheduled monitor, its check-in and its telemetry. Every post it makes carries `agentVersion`. A change to what the agent collects, decides or posts goes in the agent changelog, and that includes engine changes in `main.py` (findings, readiness, collectors). The agent still ships inside each Pulse.Web build until its own release path lands.
+
 #### Promotion workflow
 
 1. **Validate on dev.** The dev launcher tracks the branch tip, so exercise the change on a real VPU from `dev` before promoting. This is the step the beta cycle used to be.
@@ -157,9 +159,10 @@ The fleet dashboard Pulse Vitals (`playon/pulse-vitals`, private) is built on wh
 
 | What | Where |
 |---|---|
-| Check-in envelope and client queue | `Pulse.Web/app/main.py` (`_build_checkin_entry`, `_flush_checkin_queue`) |
-| Telemetry document `pulse.telemetry/v1` | `_build_telemetry` in `Pulse.Web/app/main.py` |
-| When the monitor posts | `Pulse.Web/app/monitor.py` (`plan_tick`, `plan_post`) |
+| Check-in envelope and client queue | `Pulse.Web/app/pulse_agent/checkin.py` (`_build_checkin_entry`, `_flush_checkin_queue`) |
+| Telemetry document `pulse.telemetry/v1` | `_build_telemetry` in `Pulse.Web/app/pulse_agent/telemetry.py` |
+| When the monitor posts | `Pulse.Web/app/pulse_agent/monitor.py` (`plan_tick`, `plan_post`) |
+| The findings and readiness verdict the agent reports | `Pulse.Web/app/main.py` (the engine, shared with Diagnostics) |
 | Ingest validation and storage | `tools/checkin-worker/src/ingest.js` |
 | Schema and the views Vitals reads | `tools/checkin-worker/migrations/` |
 

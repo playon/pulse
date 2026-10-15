@@ -12,6 +12,8 @@ if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
 import main  # noqa: E402
+from pulse_agent import checkin as agent_checkin  # noqa: E402
+from pulse_agent import telemetry as agent_telemetry  # noqa: E402
 import powershell  # noqa: E402
 
 MAC = re.compile(r"^([0-9A-F]{2}:){5}[0-9A-F]{2}$")
@@ -25,8 +27,8 @@ class TestBuildTelemetry(unittest.TestCase):
         powershell._PS_SEMAPHORE = None
         cls.raw = {}
         cls.dash = asyncio.run(main._collect_dashboard(raw_out=cls.raw))
-        asyncio.run(main._collect_telemetry_extras(cls.raw))
-        cls.t = main._build_telemetry(cls.dash, cls.raw, "2026-10-13T19:00:00Z")
+        asyncio.run(agent_telemetry._collect_telemetry_extras(cls.raw))
+        cls.t = agent_telemetry._build_telemetry(cls.dash, cls.raw, "2026-10-13T19:00:00Z")
 
     def test_the_fields_ian_kept(self):
         t = self.t
@@ -46,17 +48,17 @@ class TestBuildTelemetry(unittest.TestCase):
     def test_status_matches_the_verdict(self):
         self.assertEqual(self.t["status"], self.dash["readiness"]["status"])
         self.assertEqual(self.t["statusSince"], "2026-10-13T19:00:00Z")
-        settled = main._build_telemetry(self.dash, self.raw, status="PASS")
+        settled = agent_telemetry._build_telemetry(self.dash, self.raw, status="PASS")
         self.assertEqual(settled["status"], "PASS")
 
     def test_headline_follows_the_settled_findings(self):
         v = self.dash["readiness"]
         first = (v["blockers"] or v["risks"])
         self.assertTrue(first, "demo verdict should carry a blocker or risk")
-        unconfirmed = main._build_telemetry(self.dash, self.raw, status="PASS", open_codes=[])
+        unconfirmed = agent_telemetry._build_telemetry(self.dash, self.raw, status="PASS", open_codes=[])
         self.assertIsNone(unconfirmed["headline"])
         self.assertEqual(unconfirmed["blockers"], [])
-        confirmed = main._build_telemetry(self.dash, self.raw, open_codes=[first[0]["code"]])
+        confirmed = agent_telemetry._build_telemetry(self.dash, self.raw, open_codes=[first[0]["code"]])
         self.assertEqual(confirmed["headline"], first[0]["title"])
 
     def test_internet_adapter_setup(self):
@@ -85,13 +87,13 @@ class TestBuildTelemetry(unittest.TestCase):
             self.assertNotIn(gone, text)
 
     def test_skipped_port_probe_is_null_not_blocked(self):
-        n = main._build_telemetry(self.dash, dict(self.raw, port_tests=None))["network"]
+        n = agent_telemetry._build_telemetry(self.dash, dict(self.raw, port_tests=None))["network"]
         self.assertIsNone(n["portsFailed"])
         self.assertIsNone(n["streamingPath"])
 
     def test_failed_collectors_leave_parts_null(self):
         raw = {"nics": {"error": True}, "port_tests": {"error": True}}
-        t = main._build_telemetry(self.dash, raw)
+        t = agent_telemetry._build_telemetry(self.dash, raw)
         self.assertIsNone(t["cameras"]["detected"])
         self.assertIsNone(t["network"]["portsFailed"])
         self.assertIsNone(t["power"]["unexpectedShutdowns7d"])
@@ -102,29 +104,29 @@ class TestBuildTelemetry(unittest.TestCase):
     def test_services_down_ignores_idle_vpu_and_unneeded_scoreconnect(self):
         svc = {"agent": "Running", "coordinator": "Stopped", "vpu": "Stopped",
                "keepagentup": "Running", "ScoreConnectIII": "Stopped", "LogMeIn": "Running"}
-        self.assertEqual(main._services_down(svc, {"source": "ocr"}), ["coordinator"])
-        self.assertEqual(main._services_down(svc, {"source": "scoreconnect"}),
+        self.assertEqual(agent_telemetry._services_down(svc, {"source": "ocr"}), ["coordinator"])
+        self.assertEqual(agent_telemetry._services_down(svc, {"source": "scoreconnect"}),
                          ["coordinator", "ScoreConnectIII"])
-        self.assertEqual(main._services_down(dict(svc, ScoreConnectIII="NotFound"),
+        self.assertEqual(agent_telemetry._services_down(dict(svc, ScoreConnectIII="NotFound"),
                                              {"source": "scoreconnect"}), ["coordinator"])
 
     def test_fingerprint_ignores_timestamps_but_not_changes(self):
-        fp = main._telemetry_fingerprint(self.t, ["nic-slow"])
+        fp = agent_telemetry._telemetry_fingerprint(self.t, ["nic-slow"])
         later = dict(self.t, checkedAt="2099-01-01T00:00:00Z", statusSince="2099-01-01T00:00:00Z")
-        self.assertEqual(main._telemetry_fingerprint(later, ["nic-slow"]), fp)
-        self.assertNotEqual(main._telemetry_fingerprint(self.t, []), fp)
+        self.assertEqual(agent_telemetry._telemetry_fingerprint(later, ["nic-slow"]), fp)
+        self.assertNotEqual(agent_telemetry._telemetry_fingerprint(self.t, []), fp)
         moved = json.loads(json.dumps(self.t))
         moved["network"]["streamingPath"] = "blocked"
-        self.assertNotEqual(main._telemetry_fingerprint(moved, ["nic-slow"]), fp)
+        self.assertNotEqual(agent_telemetry._telemetry_fingerprint(moved, ["nic-slow"]), fp)
 
     def test_prefix_to_mask(self):
-        self.assertEqual(main._prefix_to_mask(24), "255.255.255.0")
-        self.assertEqual(main._prefix_to_mask(23), "255.255.254.0")
-        self.assertIsNone(main._prefix_to_mask(33))
+        self.assertEqual(agent_telemetry._prefix_to_mask(24), "255.255.255.0")
+        self.assertEqual(agent_telemetry._prefix_to_mask(23), "255.255.254.0")
+        self.assertIsNone(agent_telemetry._prefix_to_mask(33))
 
     def test_norm_mac(self):
-        self.assertEqual(main._norm_mac("a0-36-9f-11-22-33"), "A0:36:9F:11:22:33")
-        self.assertIsNone(main._norm_mac("not a mac"))
+        self.assertEqual(agent_telemetry._norm_mac("a0-36-9f-11-22-33"), "A0:36:9F:11:22:33")
+        self.assertIsNone(agent_telemetry._norm_mac("not a mac"))
 
 
 class TestCheckinEntries(unittest.TestCase):
@@ -133,13 +135,13 @@ class TestCheckinEntries(unittest.TestCase):
 
     def test_heartbeat_is_one_line(self):
         dash = {"identity": {"venueId": "V1", "vpuName": "PXLS2_1 Test", "hostname": "VPU"}}
-        e = asyncio.run(main._build_checkin_entry(dash, heartbeat=True))
+        e = asyncio.run(agent_checkin._build_checkin_entry(dash, heartbeat=True))
         self.assertEqual(set(e), {"checkinId", "sentAt", "reason", "venueId", "vpuName", "status"})
         self.assertEqual((e["reason"], e["status"]), ("heartbeat", "PASS"))
 
     def test_no_hostname_or_serial_in_any_check_in(self):
-        launch = asyncio.run(main._build_checkin_entry())
-        mon = asyncio.run(main._build_checkin_entry(telemetry={"schema": "pulse.telemetry/v1"},
+        launch = asyncio.run(agent_checkin._build_checkin_entry())
+        mon = asyncio.run(agent_checkin._build_checkin_entry(telemetry={"schema": "pulse.telemetry/v1"},
                                                     reason="periodic"))
         for e in (launch, mon):
             self.assertNotIn("hostname", e)
@@ -147,19 +149,39 @@ class TestCheckinEntries(unittest.TestCase):
             self.assertIn("model", e)
 
     def test_lost_identity_falls_back_to_the_last_known(self):
-        saved = dict(main._CHECKIN_IDENTITY_FALLBACK)
+        saved = dict(agent_checkin._CHECKIN_IDENTITY_FALLBACK)
         try:
-            main._CHECKIN_IDENTITY_FALLBACK = {"venueId": "V-known", "vpuName": "PXLS2_1 Known"}
-            beat = asyncio.run(main._build_checkin_entry({"identity": {}}, heartbeat=True))
+            agent_checkin._CHECKIN_IDENTITY_FALLBACK = {"venueId": "V-known", "vpuName": "PXLS2_1 Known"}
+            beat = asyncio.run(agent_checkin._build_checkin_entry({"identity": {}}, heartbeat=True))
             self.assertEqual((beat["venueId"], beat["vpuName"]), ("V-known", "PXLS2_1 Known"))
-            fresh = asyncio.run(main._build_checkin_entry(
+            fresh = asyncio.run(agent_checkin._build_checkin_entry(
                 {"identity": {"venueId": "V-new", "vpuName": "PXLS2_2 New"}}, heartbeat=True))
             self.assertEqual(fresh["venueId"], "V-new")      # a good read always wins
         finally:
-            main._CHECKIN_IDENTITY_FALLBACK = saved
+            agent_checkin._CHECKIN_IDENTITY_FALLBACK = saved
+
+    def test_agent_version_only_on_the_agents_posts(self):
+        import pulse_agent
+        self.assertRegex(pulse_agent.AGENT_VERSION, r"^\d+\.\d+\.\d+$")
+        launch = asyncio.run(agent_checkin._build_checkin_entry())
+        self.assertNotIn("agentVersion", launch)            # Diagnostics' launch check-in
+        saved = (agent_checkin._AGENT_VERSION, dict(agent_checkin._CHECKIN_IDENTITY_FALLBACK))
+        try:
+            agent_checkin._AGENT_VERSION = "9.8.7"
+            agent_checkin._CHECKIN_IDENTITY_FALLBACK = {"venueId": "V1"}
+            posts = [
+                asyncio.run(agent_checkin._build_checkin_entry(telemetry={"schema": "pulse.telemetry/v1"},
+                                                               reason="periodic")),
+                asyncio.run(agent_checkin._build_checkin_entry({"identity": {}}, heartbeat=True)),
+                asyncio.run(agent_checkin._build_checkin_entry(reason="paused", paused=True)),
+            ]
+            for e in posts:
+                self.assertEqual(e["agentVersion"], "9.8.7", e["reason"])
+        finally:
+            agent_checkin._AGENT_VERSION, agent_checkin._CHECKIN_IDENTITY_FALLBACK = saved
 
     def test_monitor_entry_is_utilitarian(self):
-        mon = asyncio.run(main._build_checkin_entry(telemetry={"schema": "pulse.telemetry/v1"},
+        mon = asyncio.run(agent_checkin._build_checkin_entry(telemetry={"schema": "pulse.telemetry/v1"},
                                                     reason="periodic"))
         for later in ("channel", "osBuild", "ubr", "readiness"):
             self.assertNotIn(later, mon)
@@ -175,7 +197,7 @@ class TestScoreboardDetail(unittest.TestCase):
     def test_scorelink_data_and_sport_ride_along_without_changing_ok(self):
         sc = {"reachable": True, "scoreLinkConnected": False, "dataStatus": "No Scoreboard data is being received",
               "configuration": {"sport": "Fairplay Basketball Code 1"}}
-        out = main._telemetry_scoreboard({"scoreconnect": sc, "nics": None})
+        out = agent_telemetry._telemetry_scoreboard({"scoreconnect": sc, "nics": None})
         self.assertEqual(out["source"], "scoreconnect")
         self.assertTrue(out["ok"])                       # v1 meaning unchanged
         self.assertFalse(out["scoreLinkConnected"])
