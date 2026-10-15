@@ -416,7 +416,7 @@ def plan_tick(state: dict, wall_now: float, event_live: bool) -> Optional[str]:
 
 
 def read_control(queue_state) -> dict:
-    """The fleet control the Worker last sent (main._flush_checkin_queue keeps
+    """The fleet control the Worker last sent (checkin._flush_checkin_queue keeps
     it in the monitor's queue file): {"mode": "on" | "off", "skip": [script]}.
 
     The remote off switch from the Leaf lessons (#leaf-deploy-coordination):

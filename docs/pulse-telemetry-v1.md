@@ -191,6 +191,7 @@ D1 database `pulse-checkins` (Cloudflare account ian.moore@playonsports.com):
 - `transitions`: every finding opened or resolved
 - `checkins`: every check-in
 
-Source: `Pulse.Web/app/main.py` (`_build_telemetry`), `Pulse.Web/app/monitor.py`
-(`plan_tick`, `plan_post`), `Pulse.Web/app/monitor_once.py`,
+Source: `Pulse.Web/app/pulse_agent/telemetry.py` (`_build_telemetry`),
+`Pulse.Web/app/pulse_agent/monitor.py` (`plan_tick`, `plan_post`),
+`Pulse.Web/app/monitor_once.py`,
 `tools/checkin-worker/` (ingest and migrations).

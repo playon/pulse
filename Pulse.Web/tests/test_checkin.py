@@ -27,6 +27,7 @@ if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
 import main  # noqa: E402
+from pulse_agent import checkin as agent_checkin  # noqa: E402
 
 
 class FakeSink(BaseHTTPRequestHandler):
@@ -90,14 +91,14 @@ class TestCheckinQueue(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.state_path = os.path.join(self._tmp.name, "pulse-checkin-queue.json")
-        self._saved = (main.DEMO_MODE, main._CHECKIN_STATE_PATH, main._build_checkin_entry,
-                       main._checkin_configured, main._checkin_now, main._post_fallback_sync,
+        self._saved = (main.DEMO_MODE, agent_checkin._CHECKIN_STATE_PATH, agent_checkin._build_checkin_entry,
+                       agent_checkin._checkin_configured, agent_checkin._checkin_now, agent_checkin._post_fallback_sync,
                        os.environ.get("PULSE_CHECKIN_URL"),
                        os.environ.get("PULSE_CHECKIN_FALLBACK_URL"))
         main.DEMO_MODE = False
-        main._CHECKIN_STATE_PATH = self.state_path
+        agent_checkin._CHECKIN_STATE_PATH = self.state_path
         # The fake sink is plain http on loopback; production requires https.
-        main._checkin_configured = lambda url: True
+        agent_checkin._checkin_configured = lambda url: True
         os.environ["PULSE_CHECKIN_URL"] = self.url
         # Never reach the real sheet from a test: record what would be sent.
         os.environ["PULSE_CHECKIN_FALLBACK_URL"] = "https://fallback.test/exec"
@@ -108,22 +109,22 @@ class TestCheckinQueue(unittest.TestCase):
             self.fallback_posts.append(body)
             if self.fallback_mode != "ok":
                 raise RuntimeError("fallback did not acknowledge")
-        main._post_fallback_sync = fake_fallback
+        agent_checkin._post_fallback_sync = fake_fallback
         self.clock = "2026-09-20T12:00:00Z"
-        main._checkin_now = lambda: self.clock
+        agent_checkin._checkin_now = lambda: self.clock
         self.n = 0
 
         async def fake_entry(dashboard=None, reason="startup", *args):
             self.n += 1
             return {"checkinId": f"id-{self.n:08d}", "sentAt": self.clock, "reason": reason,
                     "hostname": "PXLS2_10893", "pulseVersion": "1.4.0-dev"}
-        main._build_checkin_entry = fake_entry
+        agent_checkin._build_checkin_entry = fake_entry
         FakeSink.mode = "ok"
         FakeSink.requests = []
 
     def tearDown(self):
-        (main.DEMO_MODE, main._CHECKIN_STATE_PATH, main._build_checkin_entry,
-         main._checkin_configured, main._checkin_now, main._post_fallback_sync,
+        (main.DEMO_MODE, agent_checkin._CHECKIN_STATE_PATH, agent_checkin._build_checkin_entry,
+         agent_checkin._checkin_configured, agent_checkin._checkin_now, agent_checkin._post_fallback_sync,
          url, fallback) = self._saved
         for key, val in (("PULSE_CHECKIN_URL", url),
                          ("PULSE_CHECKIN_FALLBACK_URL", fallback)):
@@ -134,7 +135,7 @@ class TestCheckinQueue(unittest.TestCase):
         self._tmp.cleanup()
 
     def launch(self):
-        asyncio.run(main._send_checkin())
+        asyncio.run(agent_checkin._send_checkin())
 
     def state(self):
         with open(self.state_path, encoding="utf-8") as fh:
@@ -189,7 +190,7 @@ class TestCheckinQueue(unittest.TestCase):
 
     def test_large_queue_goes_in_batches(self):
         queue = [{"checkinId": f"old-{i:08d}", "sentAt": self.clock} for i in range(120)]
-        main._save_checkin_state({"queue": queue})
+        agent_checkin._save_checkin_state({"queue": queue})
         self.launch()
         self.assertEqual([len(r["checkins"]) for r in FakeSink.requests], [50, 50, 21])
         self.assertEqual(self.state()["queue"], [])
@@ -198,7 +199,7 @@ class TestCheckinQueue(unittest.TestCase):
         # 60 full monitor reports at ~2 KB: 50 of them would be a 413 every time.
         queue = [{"checkinId": f"full-{i:08d}", "sentAt": self.clock, "telemetry": {"pad": "x" * 2000}}
                  for i in range(60)]
-        main._save_checkin_state({"queue": queue})
+        agent_checkin._save_checkin_state({"queue": queue})
         self.launch()
         sizes = [len(json.dumps(r).encode()) for r in FakeSink.requests]
         self.assertTrue(all(n <= 64 * 1024 for n in sizes), sizes)
@@ -208,7 +209,7 @@ class TestCheckinQueue(unittest.TestCase):
 
     def test_a_checkin_too_big_to_send_is_dropped_not_blocking(self):
         huge = {"checkinId": "huge-00000001", "sentAt": self.clock, "telemetry": {"pad": "x" * 70000}}
-        main._save_checkin_state({"queue": [huge]})
+        agent_checkin._save_checkin_state({"queue": [huge]})
         self.launch()
         sent = [c["checkinId"] for r in FakeSink.requests for c in r["checkins"]]
         self.assertEqual(sent, ["id-00000001"])
@@ -222,11 +223,11 @@ class TestCheckinQueue(unittest.TestCase):
     def test_queue_is_capped_and_ages_out(self):
         old = [{"checkinId": "ancient-0001", "sentAt": "2026-07-01T00:00:00Z"}]
         many = [{"checkinId": f"q-{i:08d}", "sentAt": self.clock} for i in range(250)]
-        main._save_checkin_state({"queue": old + many})
+        agent_checkin._save_checkin_state({"queue": old + many})
         FakeSink.mode = "storage"
         self.launch()
         ids = [e["checkinId"] for e in self.state()["queue"]]
-        self.assertEqual(len(ids), main._CHECKIN_MAX_QUEUED)
+        self.assertEqual(len(ids), agent_checkin._CHECKIN_MAX_QUEUED)
         self.assertNotIn("ancient-0001", ids)
         self.assertEqual(ids[-1], "id-00000001")
 
@@ -282,7 +283,7 @@ class TestCheckinQueue(unittest.TestCase):
         # few minutes there would flood it and inflate the count.
         FakeSink.mode = "storage"
         for reason in ("periodic", "state-change", "heartbeat"):
-            asyncio.run(main._send_checkin(reason=reason))
+            asyncio.run(agent_checkin._send_checkin(reason=reason))
         self.assertEqual(self.fallback_posts, [])
         self.assertEqual(len(self.state()["queue"]), 3)   # still queued for D1
 
@@ -306,7 +307,7 @@ class TestCheckinQueue(unittest.TestCase):
         self.assertFalse(os.path.exists(self.state_path))
 
     def test_unconfigured_build_queues_but_does_not_send(self):
-        main._checkin_configured = lambda url: False
+        agent_checkin._checkin_configured = lambda url: False
         self.launch()
         self.assertEqual(FakeSink.requests, [])
         self.assertEqual(len(self.state()["queue"]), 1)
@@ -322,51 +323,51 @@ class TestCheckinQueue(unittest.TestCase):
 class TestCheckinStatus(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self._saved = (main.DEMO_MODE, main._CHECKIN_STATE_PATH, main._checkin_now, main._CHECKIN_URL)
+        self._saved = (main.DEMO_MODE, agent_checkin._CHECKIN_STATE_PATH, agent_checkin._checkin_now, agent_checkin._CHECKIN_URL)
         main.DEMO_MODE = False
-        main._CHECKIN_STATE_PATH = os.path.join(self._tmp.name, "q.json")
-        main._checkin_now = lambda: "2026-09-23T12:00:00Z"
-        main._CHECKIN_URL = "https://pulse-checkin.example.workers.dev/checkin"
+        agent_checkin._CHECKIN_STATE_PATH = os.path.join(self._tmp.name, "q.json")
+        agent_checkin._checkin_now = lambda: "2026-09-23T12:00:00Z"
+        agent_checkin._CHECKIN_URL = "https://pulse-checkin.example.workers.dev/checkin"
         os.environ.pop("PULSE_CHECKIN_URL", None)
 
     def tearDown(self):
-        main.DEMO_MODE, main._CHECKIN_STATE_PATH, main._checkin_now, main._CHECKIN_URL = self._saved
+        main.DEMO_MODE, agent_checkin._CHECKIN_STATE_PATH, agent_checkin._checkin_now, agent_checkin._CHECKIN_URL = self._saved
         self._tmp.cleanup()
 
     def test_fresh_install_has_never_sent(self):
-        self.assertEqual(main._checkin_status()["status"], "never")
+        self.assertEqual(agent_checkin._checkin_status()["status"], "never")
 
     def test_placeholder_url_reads_not_configured(self):
-        main._CHECKIN_URL = "PASTE_WORKER_URL_HERE"
-        self.assertEqual(main._checkin_status()["status"], "not-configured")
+        agent_checkin._CHECKIN_URL = "PASTE_WORKER_URL_HERE"
+        self.assertEqual(agent_checkin._checkin_status()["status"], "not-configured")
 
     def test_unconfigured_build_never_claims_a_failed_send(self):
-        main._CHECKIN_URL = "PASTE_WORKER_URL_HERE"
-        main._save_checkin_state({"queue": [{"checkinId": "a-00000001", "sentAt": "2026-09-01T09:00:00Z"}]})
-        st = main._checkin_status()
+        agent_checkin._CHECKIN_URL = "PASTE_WORKER_URL_HERE"
+        agent_checkin._save_checkin_state({"queue": [{"checkinId": "a-00000001", "sentAt": "2026-09-01T09:00:00Z"}]})
+        st = agent_checkin._checkin_status()
         self.assertEqual((st["status"], st["queued"], st["notice"]), ("not-configured", 1, False))
 
     def test_demo_mode_with_no_state(self):
         main.DEMO_MODE = True
-        self.assertEqual(main._checkin_status()["status"], "demo")
+        self.assertEqual(agent_checkin._checkin_status()["status"], "demo")
 
     def test_sent(self):
-        main._save_checkin_state({"queue": [], "lastSentAt": "2026-09-23T10:00:00Z"})
-        st = main._checkin_status()
+        agent_checkin._save_checkin_state({"queue": [], "lastSentAt": "2026-09-23T10:00:00Z"})
+        st = agent_checkin._checkin_status()
         self.assertEqual((st["status"], st["notice"]), ("sent", False))
 
     def test_recent_failure_is_queued_without_a_notice(self):
-        main._save_checkin_state({"queue": [{"checkinId": "a-00000001", "sentAt": "2026-09-23T02:00:00Z"}],
+        agent_checkin._save_checkin_state({"queue": [{"checkinId": "a-00000001", "sentAt": "2026-09-23T02:00:00Z"}],
                                   "lastError": "HTTP 500: storage"})
-        st = main._checkin_status()
+        st = agent_checkin._checkin_status()
         self.assertEqual((st["status"], st["queued"], st["notice"]), ("queued", 1, False))
 
     def test_failure_older_than_a_day_raises_the_notice(self):
-        main._save_checkin_state({"queue": [
+        agent_checkin._save_checkin_state({"queue": [
             {"checkinId": "b-00000002", "sentAt": "2026-09-22T09:00:00Z"},
             {"checkinId": "a-00000001", "sentAt": "2026-09-20T09:00:00Z"},
         ], "lastSentAt": "2026-09-19T09:00:00Z"})
-        st = main._checkin_status()
+        st = agent_checkin._checkin_status()
         self.assertEqual(st["status"], "queued")
         self.assertEqual(st["oldestQueued"], "2026-09-20T09:00:00Z")
         self.assertTrue(st["notice"])
@@ -378,7 +379,7 @@ class TestCheckinEntryShape(unittest.TestCase):
     def test_no_hostname_or_serial(self):
         # Ian, 2026-10-13: a unit is its venue id and VPU name.
         powershell_sem_reset()
-        e = asyncio.run(main._build_checkin_entry())
+        e = asyncio.run(agent_checkin._build_checkin_entry())
         self.assertIsNotNone(e)
         self.assertNotIn("hostname", e)
         self.assertNotIn("serialNumber", e)

@@ -11,7 +11,7 @@ _APP_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
-import event_watch  # noqa: E402
+from pulse_agent import event_watch  # noqa: E402
 
 T0 = time.mktime((2026, 10, 14, 20, 10, 0, 0, 0, -1))
 

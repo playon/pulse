@@ -21,7 +21,7 @@ _APP_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
-import monitor  # noqa: E402
+from pulse_agent import monitor  # noqa: E402
 
 
 def _verdict(status="PASS", blockers=(), risks=(), info=()):
@@ -465,6 +465,13 @@ class TestEventEndGrace(unittest.TestCase):
         self.assertTrue(note.startswith("event-end"))
         self.assertEqual(self.sent[0]["reason"], "event-end")
         self.assertIsNone(self.mo._event_end(2600.0))      # forgotten after the end
+
+    def test_event_posts_carry_the_agent_version(self):
+        import pulse_agent
+        self.mo._event_end(2000.0)
+        self.mo._event_end(2300.0)
+        self.assertTrue(pulse_agent.AGENT_VERSION)
+        self.assertEqual(self.sent[0]["agentVersion"], pulse_agent.AGENT_VERSION)
 
     def test_vpu_back_clears_the_pending_end(self):
         self.assertEqual(self.mo._event_end(2000.0), "pending")

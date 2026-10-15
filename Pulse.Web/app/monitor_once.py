@@ -37,9 +37,8 @@ _web_root = os.path.dirname(_app_dir)
 if _app_dir not in sys.path:
     sys.path.insert(0, _app_dir)
 
-import monitor  # noqa: E402  (light: stdlib only)
-import event_watch  # noqa: E402  (light: stdlib only)
-import checkin_lite  # noqa: E402  (light: stdlib only)
+from pulse_agent import AGENT_VERSION  # noqa: E402  (light: stdlib only)
+from pulse_agent import monitor, event_watch, checkin_lite  # noqa: E402  (light: stdlib only)
 from typing import Optional  # noqa: E402
 
 STATE_PATH = os.path.join(_web_root, "pulse-monitor-state.json")
@@ -270,6 +269,15 @@ def _app_version() -> str:
         return ""
 
 
+def _agent_checkin():
+    """The check-in module, pointed at the monitor's own queue and stamping
+    this agent's version on every post. Import main first: it binds the engine."""
+    from pulse_agent import checkin
+    checkin._CHECKIN_STATE_PATH = QUEUE_PATH
+    checkin._AGENT_VERSION = AGENT_VERSION
+    return checkin
+
+
 def _event_entry(reason: str, ev: dict, tick_wall: float, ended: bool) -> dict:
     import uuid
     posts = monitor.load_posts(POSTS_PATH)
@@ -277,7 +285,7 @@ def _event_entry(reason: str, ev: dict, tick_wall: float, ended: bool) -> dict:
     return {"checkinId": str(uuid.uuid4()),
             "sentAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(tick_wall)),
             "reason": reason, "venueId": ident.get("venueId"), "vpuName": ident.get("vpuName"),
-            "pulseVersion": _app_version(),
+            "pulseVersion": _app_version(), "agentVersion": AGENT_VERSION,
             "event": event_watch.summary(ev, tick_wall, ended)}
 
 
@@ -384,15 +392,15 @@ async def _paused_post(tick_wall: float) -> str:
     os.environ["PULSE_SERVER_LOG_NAME"] = LOG_NAME
     os.environ["PULSE_SERVER_LOG_APPEND"] = "1"
     _rotate(os.path.join(_web_root, LOG_NAME))
-    import main
-    main._CHECKIN_STATE_PATH = QUEUE_PATH
+    import main  # noqa: F401  (binds the engine the check-in runs on)
+    checkin = _agent_checkin()
     posts = monitor.load_posts(POSTS_PATH)
     known = dict(posts.get("identity") or {})
     if not (known.get("venueId") or known.get("vpuName")):
         # Never posted, so it can't have been told to pause; nothing to name it by.
         return "none"
-    main._CHECKIN_IDENTITY_FALLBACK = known
-    await main._send_checkin(reason="paused", paused=True)
+    checkin._CHECKIN_IDENTITY_FALLBACK = known
+    await checkin._send_checkin(reason="paused", paused=True)
     posts["lastPausedAt"] = tick_wall
     monitor.save_posts(POSTS_PATH, posts)
     return "paused"
@@ -411,7 +419,8 @@ async def _pass(plan: str, dry_run: bool, force: bool, tick_wall: float,
                                     disk_cache_ttls=SLOW_COLLECTOR_TTLS,
                                     skip_scripts=skip)
     import main
-    main._CHECKIN_STATE_PATH = QUEUE_PATH
+    checkin = _agent_checkin()
+    from pulse_agent import telemetry as agent_telemetry
     # No batch override: the client cuts each request at the Worker's 64 KB
     # body cap as well as by count (#236), so a replayed backlog of full
     # reports (~2-8 KB each) drains a few per request on its own.
@@ -438,12 +447,12 @@ async def _pass(plan: str, dry_run: bool, force: bool, tick_wall: float,
         open_codes = [c for c, f in (st.get("open") or {}).items()
                       if (f or {}).get("class") in ("blocker", "risk")]
         try:
-            telemetry = main._build_telemetry(dashboard, raw, st.get("statusSince"),
+            telemetry = agent_telemetry._build_telemetry(dashboard, raw, st.get("statusSince"),
                                               status=status, open_codes=open_codes)
         except Exception as e:  # never let the detail block the check-in itself
             main._server_log.warning("Telemetry skipped (%s)", e)
             telemetry = None
-        fingerprint = main._telemetry_fingerprint(telemetry, open_codes)
+        fingerprint = agent_telemetry._telemetry_fingerprint(telemetry, open_codes)
         posts = monitor.load_posts(posts_path)
         # Keep the unit's name if this read lost it; remember it when it didn't.
         ident = (dashboard or {}).get("identity") or {}
@@ -451,7 +460,7 @@ async def _pass(plan: str, dry_run: bool, force: bool, tick_wall: float,
         for k in ("venueId", "vpuName"):
             if ident.get(k):
                 known[k] = ident[k]
-        main._CHECKIN_IDENTITY_FALLBACK = known
+        checkin._CHECKIN_IDENTITY_FALLBACK = known
         if known:
             posts["identity"] = known
         kind = "full" if force else monitor.plan_post(posts, fingerprint, status, tick_wall)
@@ -462,12 +471,12 @@ async def _pass(plan: str, dry_run: bool, force: bool, tick_wall: float,
         reason = "state-change" if fingerprint != posts.get("fingerprint") else "periodic"
         heartbeat = kind == "heartbeat"
         if dry_run:
-            entry = await main._build_checkin_entry(
+            entry = await checkin._build_checkin_entry(
                 dashboard, reason, None if heartbeat else delta, None if heartbeat else stats,
                 None if heartbeat else telemetry, heartbeat)
             print(json.dumps(entry, indent=2, default=str))
         else:
-            await main._send_checkin(
+            await checkin._send_checkin(
                 dashboard=dashboard, reason=reason,
                 delta=None if heartbeat else delta, monitor=None if heartbeat else stats,
                 telemetry=None if heartbeat else telemetry, heartbeat=heartbeat)
@@ -478,7 +487,7 @@ async def _pass(plan: str, dry_run: bool, force: bool, tick_wall: float,
     async def _collect(skip):
         dashboard = await main._collect_dashboard(skip_intrusive=skip, raw_out=raw)
         try:
-            await main._collect_telemetry_extras(raw, skip_intrusive=skip)
+            await agent_telemetry._collect_telemetry_extras(raw, skip_intrusive=skip)
         except Exception as e:
             main._server_log.warning("Telemetry extras skipped (%s)", e)
         return dashboard

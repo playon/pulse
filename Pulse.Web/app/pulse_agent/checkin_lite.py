@@ -1,13 +1,14 @@
 """The check-in address, and a sender light enough to run during an event.
 
-main.py's client is the real one (queue, batching, the sheet fallback, About
-page status) but importing main loads FastAPI and the whole app, about a
-second of CPU, which the monitor never spends while VPU.exe is running. This
-sends one small event check-in with the standard library only, into the same
-queue file main.py's client uses: if the post fails, the entry stays queued
-and the next full pass after the event sends it.
+checkin.py's client is the real one (queue, batching, the sheet fallback,
+About page status) but it runs on main.py's engine, and importing main loads
+FastAPI and the whole app, about a second of CPU, which the monitor never
+spends while VPU.exe is running. This sends one small event check-in with the
+standard library only, into the same queue file checkin.py's client uses: if
+the post fails, the entry stays queued and the next full pass after the event
+sends it.
 
-CHECKIN_URL is the one place the address lives; main.py reads it from here.
+CHECKIN_URL is the one place the address lives; checkin.py reads it from here.
 """
 
 import json
