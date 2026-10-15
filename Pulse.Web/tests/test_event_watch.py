@@ -1,5 +1,6 @@
 """The in-event reader (event_watch.py): files only, stdlib only."""
 
+import json
 import os
 import sys
 import tempfile
@@ -347,3 +348,65 @@ class ScoreboardTest(RealLinesTest):
         self.assertEqual(s["live"]["scoreboardDataPerSecond"], 0.0)
         self.assertFalse(s["scoreConnectRunning"])
         self.assertTrue(s["scoreConnectWasDown"])
+
+
+class GapsTest(OutageTest):
+    START = ("Info\t| 2026-10-14 20:06:21.100 |Main Agent\t|x(1)\t|x\t|Start Reason:  event command. Event: "
+             "Name[ gam894328ce3f Middle School Boys Football Sample ] _id[6ad018b2ec5d0313d04118a6] "
+             "venue[5d6bdbe845b8870789141191] startDate[2026-10-15T00:11:00.000Z] endDate[2026-10-15T02:14:00.000Z]\n"
+             "Info\t| 2026-10-14 20:06:33.000 |DEFAULT_MODULE\t|x(1)\t|x\t|ReplayManager::init(americanfootball)\n")
+
+    def sc3_file(self, sport):
+        path = os.path.join(self.tmp.name, "settings.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"slot": 0, "parms": [{"sbvendorname": sport, "bot_online": False, "ConfigurationStatus": 2,
+                                             "ConfigurationStatusMessage": "Unable to find bot over USB/Serial interface."}]}, fh)
+        return path
+
+    def run_with_sc3(self, text, sport):
+        old = event_watch.SC3_SETTINGS
+        event_watch.SC3_SETTINGS = self.sc3_file(sport)
+        try:
+            with open(self.vpu, "a", encoding="utf-8") as fh:
+                fh.write(text)
+            ev = {"startedAt": T0}
+            event_watch.observe(ev, "1", T0 + 3000, log_dir=self.logs, events_dir=self.tmp.name,
+                                images={"vpu.exe", "scoreconnectiii.exe"})
+            return ev
+        finally:
+            event_watch.SC3_SETTINGS = old
+
+    def test_the_start_line_names_the_game_sport_and_schedule(self):
+        ev = self.run_with_sc3(self.START + self.REAL, "Fairplay Football Code 23")
+        s = event_watch.summary(ev, T0 + 3000, ended=False)
+        self.assertEqual(s["nfhsGameKey"], "gam894328ce3f")
+        self.assertEqual(s["scheduledEnd"], "2026-10-15T02:14:00.000Z")
+        self.assertEqual(s["sport"], "americanfootball")
+        self.assertTrue(s["scoreboard"]["sportMatch"])
+        self.assertNotIn("scoreboard-sport-mismatch", s["warnings"])
+        self.assertIn("scorelink-offline", s["warnings"])
+        self.assertIn("uncalibrated", s["warnings"])
+
+    def test_a_basketball_code_on_a_football_game_is_flagged(self):
+        ev = self.run_with_sc3(self.START + self.REAL, "Fairplay Basketball Code 1")
+        s = event_watch.summary(ev, T0 + 3000, ended=False)
+        self.assertFalse(s["scoreboard"]["sportMatch"])
+        self.assertEqual(s["warnings"][0], "scoreboard-sport-mismatch")
+
+    def test_on_air_time_leaves_out_the_outage(self):
+        ev = self.run_with_sc3(self.START + self.REAL + self.OUTAGE + self.RTMP, "Fairplay Football Code 23")
+        ev["closedAt"] = time.mktime((2026, 10, 14, 21, 49, 44, 0, 0, -1))
+        s = event_watch.summary(ev, T0 + 3000, ended=True)
+        first = time.mktime((2026, 10, 14, 20, 7, 35, 0, 0, -1))
+        outage = (time.mktime((2026, 10, 14, 21, 4, 7, 0, 0, -1)) - time.mktime((2026, 10, 14, 21, 1, 30, 0, 0, -1)))
+        self.assertAlmostEqual(s["offAirSeconds"], int(outage), delta=1)
+        self.assertAlmostEqual(s["onAirSeconds"], int(ev["closedAt"] - first - outage), delta=1)
+        self.assertIn("off-air-gaps", s["warnings"])
+        self.assertIn("stream-fallback", s["warnings"])
+        self.assertIn("ended-early", s["warnings"])          # 21:49 vs a 22:14 scheduled end
+
+    def test_the_summary_fits_the_workers_4kb_cap(self):
+        ev = self.run_with_sc3(self.START + self.REAL + self.OUTAGE + self.RTMP, "Fairplay Football Code 23")
+        ev["unreachable"] = {f"169.254.16.{i}": T0 + 2990 for i in range(50, 56)}
+        s = event_watch.summary(ev, T0 + 3000, ended=True)
+        self.assertLess(len(json.dumps(s)), 4096)

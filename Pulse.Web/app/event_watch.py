@@ -51,6 +51,11 @@ FAILING_AFTER_SECONDS = 120         # failed tries for this long with no connect
 RESTART_LOOP_COUNT = 2              # VPU.exe restarts within one event
 CAMERA_SLOW_FPS = 15.0              # a camera below this is degrading the picture
 SCHEMA = "pulse.event/v1"
+SC3_SETTINGS = r"C:\ProgramData\Sportzcast LLC\ScoreConnectIII\Files\settings.json"
+ENDED_EARLY_SECONDS = 600           # closed this long before the scheduled end
+SCOREBUG_STALE_SECONDS = 600        # scorebug unchanged this long, with no data
+SPORT_WORDS = ("baseball", "basketball", "football", "hockey", "lacrosse", "soccer", "softball",
+               "volleyball", "wrestling", "swimming", "waterpolo", "rodeo")
 
 _TIME_RE = re.compile(r"(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})")
 _EVENT_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_p_([0-9A-Za-z]{8,40})$")
@@ -164,6 +169,52 @@ def _catch_up(path: str, size: int):
     return text, size
 
 
+_START_RE = re.compile(r"Event: Name\[\s*(.*?)\s*\]\s*_id\[(\w+)\]\s*venue\[(\w*)\]\s*"
+                       r"startDate\[([^\]]*)\]\s*endDate\[([^\]]*)\]")
+
+
+def sport_word(name) -> Optional[str]:
+    """'americanfootball', 'Fairplay Football Code 23', 'Middle School Boys
+    Football' -> 'football'. None if no known sport is named."""
+    n = (name or "").lower().replace(" ", "")
+    for w in SPORT_WORDS:
+        if w in n:
+            return w
+    return None
+
+
+def _iso_time(v) -> Optional[float]:
+    if not v:
+        return None
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})", v)
+    if not m:
+        return None
+    import calendar
+    return float(calendar.timegm(tuple(int(x) for x in m.groups()) + (0, 0, 0)))
+
+
+def read_sc3(path: Optional[str] = None) -> Optional[dict]:
+    """ScoreConnect III's saved setup, from its own settings file (a few KB,
+    no call to its API): the sport it decodes, whether its ScoreLink is
+    online, and its status message."""
+    try:
+        import json
+        with open(path or SC3_SETTINGS, "r", encoding="utf-8-sig", errors="replace") as fh:
+            j = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    parms = j.get("parms")
+    if isinstance(parms, list):
+        slot = j.get("slot") if isinstance(j.get("slot"), int) else 0
+        parms = parms[slot] if 0 <= slot < len(parms) and isinstance(parms[slot], dict) else None
+    if not isinstance(parms, dict):
+        return None
+    return {"sport": parms.get("sbvendorname"),
+            "botOnline": parms.get("bot_online") if isinstance(parms.get("bot_online"), bool) else None,
+            "status": parms.get("ConfigurationStatus"),
+            "statusMessage": (parms.get("ConfigurationStatusMessage") or None)}
+
+
 def parse_status(line: str) -> dict:
     """The kept values from one StatusReporter::reportStatus line."""
     out = {}
@@ -191,6 +242,7 @@ def parse_vpu_lines(text: str) -> list:
                 and "CloseUnit" not in line and "LEAKY BUCKET" not in line
                 and "Request to disable the Poe" not in line and "Camera reset happened" not in line
                 and "Couldn't get response from camera rtsp" not in line
+                and "Start Reason:" not in line and "ReplayManager::init(" not in line
                 and "recordedEvents" not in line):
             continue
         t = _line_time(line)
@@ -227,6 +279,18 @@ def parse_vpu_lines(text: str) -> list:
         elif "Couldn't get response from camera rtsp" in line:
             m = re.search(r"rtsp://([0-9.]+)", line)
             out.append({"t": t, "kind": "cameraUnreachable", "ip": m.group(1) if m else None})
+        elif "Start Reason:" in line and "Event: Name[" in line:
+            m = _START_RE.search(line)
+            if m:
+                name = m.group(1)
+                g = re.search(r"\b(gam[0-9a-f]{6,})\b", name)
+                out.append({"t": t, "kind": "start", "name": name, "id": m.group(2),
+                            "gameKey": g.group(1) if g else None,
+                            "scheduledStart": m.group(4), "scheduledEnd": m.group(5)})
+        elif "ReplayManager::init(" in line:
+            m = re.search(r"ReplayManager::init\((\w+)\)", line)
+            if m:
+                out.append({"t": t, "kind": "sport", "sport": m.group(1)})
         elif "cannot find needed calibration for" in line:
             m = re.search(r"cannot find needed calibration for (\S+?)\.", line)
             out.append({"t": t, "kind": "uncalibrated", "sport": m.group(1) if m else None})
@@ -416,6 +480,8 @@ def observe(ev: dict, vpu_pid: Optional[str], now: float,
                 ev["pendingPath"] = _path_of(e["urls"][0] if e["urls"] else None)
             elif k == "fail":
                 ev["fails"] = (ev.get("fails") or 0) + 1
+                if ev.get("connectedAt") and not ev.get("downSince"):
+                    ev["downSince"] = t          # an outage starts at the first failed try after a connect
                 ev["lastFailAt"] = t
                 ev["lastFailUrl"] = e.get("url")
                 ev["lastFailCode"] = e.get("returnValue")
@@ -425,6 +491,8 @@ def observe(ev: dict, vpu_pid: Optional[str], now: float,
                 ev["failovers"] = (ev.get("failovers") or 0) + 1
                 ev["pendingPath"] = _path_of(e.get("to"))
             elif k == "connected":
+                if ev.get("downSince"):
+                    ev["offAirSeconds"] = (ev.get("offAirSeconds") or 0) + max(0, t - ev.pop("downSince"))
                 ev["connectedAt"] = t
                 ev["via"] = e["via"]
                 ev["path"] = e.get("path") or ev.get("pendingPath")
@@ -437,6 +505,8 @@ def observe(ev: dict, vpu_pid: Optional[str], now: float,
                 ev["drops"] = (ev.get("drops") or 0) + 1
             elif k == "session":
                 ev["sessions"] = (ev.get("sessions") or 0) + 1
+                if ev.get("connectedAt") and not ev.get("downSince"):
+                    ev["downSince"] = t          # VPU.exe restarted while on air
                 ev["vpuVersion"] = e.get("version")
             elif k == "poeReset":
                 ev["poeResets"] = (ev.get("poeResets") or 0) + 1
@@ -444,9 +514,17 @@ def observe(ev: dict, vpu_pid: Optional[str], now: float,
                 ev["cameraResets"] = (ev.get("cameraResets") or 0) + 1
             elif k == "cameraUnreachable" and e.get("ip"):
                 ev.setdefault("unreachable", {})[e["ip"]] = t
+            elif k == "start":
+                ev["eventName"] = e["name"]
+                ev["nfhsGameKey"] = e.get("gameKey")
+                ev["scheduledStart"] = e.get("scheduledStart")
+                ev["scheduledEnd"] = e.get("scheduledEnd")
+                ev["eventId"] = e["id"]
+            elif k == "sport":
+                ev["sport"] = e["sport"]
             elif k == "uncalibrated":
                 ev["calibrated"] = False
-                ev["sport"] = e.get("sport")
+                ev.setdefault("sport", e.get("sport"))
             elif k == "eventId":
                 # The newest session's folder names the event. A restart
                 # mid-event logs the same id again.
@@ -489,6 +567,9 @@ def observe(ev: dict, vpu_pid: Optional[str], now: float,
             nics = summ.get("cameraNics") or {}
             linked = ev.setdefault("nicsLinked", [n for n, v in nics.items() if v and v > 0])
             ev["nicsDown"] = [n for n in linked if nics.get(n) == 0]
+    sc3 = read_sc3()
+    if sc3:
+        ev["sc3"] = sc3
     if images is not None:
         sc = any(n.startswith("scoreconnect") for n in images)
         ev["scoreConnectRunning"] = sc
@@ -502,9 +583,12 @@ def summary(ev: dict, now: float, ended: bool) -> dict:
     """The event as posted: `pulse.event/v1`."""
     first = ev.get("firstConnectedAt")
     on_air = None
+    off_air = None
     if first:
         end = ev.get("closedAt") or ev.get("lastReadAt") or now
-        on_air = max(0, int(end - first))
+        # Outages (failed tries after a connect, VPU.exe restarts) don't count.
+        off_air = (ev.get("offAirSeconds") or 0) + (max(0, end - ev["downSince"]) if ev.get("downSince") else 0)
+        on_air = max(0, int(end - first - off_air))
     v = verdict(ev, now)
     eid = ev.get("eventId")
     st = ev.get("status") or {}
@@ -516,6 +600,11 @@ def summary(ev: dict, now: float, ended: bool) -> dict:
         "startedAt": _iso(ev.get("startedAt")),
         "wentOnAir": bool(first),
         "onAirSeconds": on_air,
+        "offAirSeconds": int(off_air) if off_air is not None else None,
+        "eventName": ev.get("eventName"),
+        "nfhsGameKey": ev.get("nfhsGameKey"),
+        "scheduledStart": ev.get("scheduledStart"),
+        "scheduledEnd": ev.get("scheduledEnd"),
         "via": ev.get("via"),
         "path": ev.get("path"),
         # On air, but not on the chain's first choice: the venue is blocking
@@ -558,6 +647,37 @@ def summary(ev: dict, now: float, ended: bool) -> dict:
             "at": _iso(ev.get("statusAt")),
         } if st else None,
     }
+    sc3 = ev.get("sc3") or {}
+    vpu_sport, sc_sport = sport_word(ev.get("sport")), sport_word(sc3.get("sport"))
+    out["scoreboard"] = {
+        "scoreConnectSport": sc3.get("sport"),
+        "sportMatch": (vpu_sport == sc_sport) if (vpu_sport and sc_sport) else None,
+        "scoreLinkOnline": sc3.get("botOnline"),
+        "scoreConnectMessage": sc3.get("statusMessage"),
+    } if sc3 else None
+    # Things worth a look even when the event aired, most actionable first.
+    warn = []
+    if out["scoreboard"] and out["scoreboard"]["sportMatch"] is False:
+        warn.append("scoreboard-sport-mismatch")   # e.g. a basketball code on a football game
+    if out["scoreboard"] and out["scoreboard"]["scoreLinkOnline"] is False and ev.get("scoreConnectRunning"):
+        warn.append("scorelink-offline")
+    lv = out.get("live") or {}
+    if (lv.get("scorebugAgeSeconds") or 0) >= SCOREBUG_STALE_SECONDS and not lv.get("scoreboardDataPerSecond"):
+        warn.append("scorebug-stale")
+    if out.get("calibrated") is False:
+        warn.append("uncalibrated")
+    if out.get("fallback"):
+        warn.append("stream-fallback")
+    if (out.get("offAirSeconds") or 0) >= 60:
+        warn.append("off-air-gaps")
+    if out.get("restarts"):
+        warn.append("vpu-restarted")
+    if out.get("camerasLost"):
+        warn.append("camera-lost")
+    sched_end = _iso_time(ev.get("scheduledEnd"))
+    if ended and sched_end and (ev.get("closedAt") or now) < sched_end - ENDED_EARLY_SECONDS:
+        warn.append("ended-early")
+    out["warnings"] = warn
     if ended:
         out["endedAt"] = _iso(ev.get("closedAt") or now)
         # Why it never aired, in the order a tech would rule things out.

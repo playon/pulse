@@ -6904,7 +6904,23 @@ def _telemetry_scoreboard(raw: dict) -> Optional[dict]:
     if sc is None and ocr == "unknown":
         return None
     src = _scoreboard_source(sc, ocr)
-    return {"source": src.get("source"), "ok": src.get("ok")}
+    out = {"source": src.get("source"), "ok": src.get("ok")}
+    # What `ok` doesn't say (it means "ScoreConnect is running" when there's
+    # no OCR camera): is the ScoreLink plugged in, is score data arriving, and
+    # which sport ScoreConnect decodes. 6493 read ok for a whole event with
+    # its ScoreLink missing (2026-10-14). Additive fields; `ok` keeps its v1
+    # meaning.
+    if isinstance(sc, dict) and not sc.get("error"):
+        if isinstance(sc.get("scoreLinkConnected"), bool):
+            out["scoreLinkConnected"] = sc["scoreLinkConnected"]
+        ds = sc.get("dataStatus")
+        if isinstance(ds, str) and ds:
+            out["dataFlowing"] = ds.lower().startswith("data is present")
+            out["dataStatus"] = ds[:120]
+        sport = (sc.get("configuration") or {}).get("sport") if isinstance(sc.get("configuration"), dict) else None
+        if sport:
+            out["sport"] = str(sport)[:80]
+    return out
 
 
 def _services_down(services: dict, scoreboard: Optional[dict]) -> list:

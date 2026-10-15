@@ -36,7 +36,11 @@ class TestBuildTelemetry(unittest.TestCase):
             self.assertIn(key, t)
         self.assertEqual(set(t["network"]), {"internetReachable", "streamingPath", "portsFailed", "internet"})
         self.assertEqual(set(t["cameras"]), {"systemType", "expected", "detected", "slow", "ports"})
-        self.assertEqual(set(t["scoreboard"]), {"source", "ok"})
+        # source and ok are Ian's v1 fields; the rest are additive detail
+        # (2026-10-14: ok read true all event with 6493's ScoreLink missing).
+        self.assertTrue({"source", "ok"} <= set(t["scoreboard"]))
+        self.assertTrue(set(t["scoreboard"]) <= {"source", "ok", "scoreLinkConnected", "dataFlowing",
+                                                  "dataStatus", "sport"})
         self.assertEqual(set(t["power"]), {"lastBoot", "unexpectedShutdowns7d"})
 
     def test_status_matches_the_verdict(self):
@@ -163,3 +167,17 @@ class TestCheckinEntries(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestScoreboardDetail(unittest.TestCase):
+    """6493, 2026-10-14: scoreboard ok (ScoreConnect running) all event with no ScoreLink."""
+
+    def test_scorelink_data_and_sport_ride_along_without_changing_ok(self):
+        sc = {"reachable": True, "scoreLinkConnected": False, "dataStatus": "No Scoreboard data is being received",
+              "configuration": {"sport": "Fairplay Basketball Code 1"}}
+        out = main._telemetry_scoreboard({"scoreconnect": sc, "nics": None})
+        self.assertEqual(out["source"], "scoreconnect")
+        self.assertTrue(out["ok"])                       # v1 meaning unchanged
+        self.assertFalse(out["scoreLinkConnected"])
+        self.assertFalse(out["dataFlowing"])
+        self.assertEqual(out["sport"], "Fairplay Basketball Code 1")

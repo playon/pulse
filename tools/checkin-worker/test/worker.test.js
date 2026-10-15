@@ -622,3 +622,30 @@ test("an event document with a bad schema, id or size is dropped, the check-in k
   assert.equal(rows[1].event_id, null);
   assert.equal(rows[2].event, null);
 });
+
+test("0013: unit_status carries the scoreboard detail, events carry schedule, off-air time and warnings", async () => {
+  await post({ checkins: [checkin({
+    checkinId: "eeeeeeee-0000-0000-0000-000000000021", reason: "periodic",
+    telemetry: { schema: "pulse.telemetry/v1", status: "PASS",
+                 scoreboard: { source: "scoreconnect", ok: true, scoreLinkConnected: false, dataFlowing: false,
+                               sport: "Fairplay Basketball Code 1" } } })] });
+  const u = env.DB.raw.prepare("SELECT scoreboard_ok, score_link_connected, scoreboard_data_flowing, scoreconnect_sport FROM unit_status").get();
+  assert.equal(u.scoreboard_ok, 1);
+  assert.equal(u.score_link_connected, 0);
+  assert.equal(u.scoreboard_data_flowing, 0);
+  assert.equal(u.scoreconnect_sport, "Fairplay Basketball Code 1");
+
+  await post({ checkins: [{ checkinId: "eeeeeeee-0000-0000-0000-000000000022", sentAt: "2026-10-14T21:55:00Z",
+    reason: "event-end", venueId: "V42", vpuName: "Main Gym",
+    event: { schema: "pulse.event/v1", eventId: "6ad018b2ec5d0313d04118a6", state: "ended", wentOnAir: true,
+             eventName: "gam894328ce3f Middle School Boys Football Sample", nfhsGameKey: "gam894328ce3f",
+             scheduledEnd: "2026-10-15T02:14:00.000Z", offAirSeconds: 175, path: "zixi-2088", kind: "event",
+             scoreboard: { sportMatch: false, scoreConnectSport: "Fairplay Basketball Code 1" },
+             warnings: ["scoreboard-sport-mismatch", "off-air-gaps"] } }] });
+  const e = env.DB.raw.prepare("SELECT state, nfhs_game_key, off_air_seconds, scoreboard_sport_match, warnings FROM events").get();
+  assert.equal(e.state, "ended");
+  assert.equal(e.nfhs_game_key, "gam894328ce3f");
+  assert.equal(e.off_air_seconds, 175);
+  assert.equal(e.scoreboard_sport_match, 0);
+  assert.deepEqual(JSON.parse(e.warnings), ["scoreboard-sport-mismatch", "off-air-gaps"]);
+});
