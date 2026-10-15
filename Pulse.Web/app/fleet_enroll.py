@@ -276,14 +276,42 @@ def _robocopy(src: str, dst: str) -> Optional[str]:
     return None
 
 
+def _readable(root: str) -> bool:
+    for rel in (os.path.join("app", "monitor_once.py"),
+                os.path.join("deploy", "Install-PulseMonitor.ps1")) + STATE_FILES:
+        p = os.path.join(root, rel)
+        if os.path.exists(p):
+            try:
+                with open(p, "rb") as fh:
+                    fh.read(1)
+            except OSError:
+                return False
+    return True
+
+
 def _lock_down(root: str) -> Optional[str]:
     """SYSTEM and Administrators can change the folder; everyone else can read
-    it. The task runs this code as SYSTEM."""
+    it. The task runs this code as SYSTEM.
+
+    The grant goes on the folder only, and everything inside is reset to
+    inherit it. Granting with /T instead strips each file's inherited entries
+    and adds none (the (OI)(CI) flags don't apply to a file), which left every
+    file unreadable, even to admins, on 6493. A file nobody can open (from that,
+    or written by SYSTEM with no entries) is taken over by Administrators first."""
     r = _run(["icacls", root, "/inheritance:r",
               "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F",
-              "*S-1-5-32-545:(OI)(CI)RX", "/T", "/C", "/Q"], timeout=120)
+              "*S-1-5-32-545:(OI)(CI)RX", "/Q"], timeout=60)
     if r.returncode != 0:
         return "Setting folder permissions failed: " + (r.stdout or r.stderr or "").strip()[-300:]
+    reset = ["icacls", os.path.join(root, "*"), "/reset", "/T", "/C", "/Q"]
+    r = _run(reset, timeout=300)
+    # icacls /C exits 0 even when files failed, and its messages are localized:
+    # check by opening the files that matter.
+    if r.returncode != 0 or not _readable(root):
+        _run(["takeown", "/F", root, "/R", "/A", "/D", "Y"], timeout=300)
+        r = _run(reset, timeout=300)
+        if r.returncode != 0 or not _readable(root):
+            return "Resetting file permissions failed: " + (r.stdout or r.stderr or "").strip()[-300:]
     return None
 
 
@@ -292,6 +320,8 @@ def _run_installer(args) -> tuple:
     r = _run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script,
               "-InstallDir", MONITOR_ROOT] + list(args), timeout=120)
     lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+    if r.returncode != 0:
+        lines += [ln.strip() for ln in (r.stderr or "").splitlines() if ln.strip()][:3]
     return r.returncode, lines
 
 
