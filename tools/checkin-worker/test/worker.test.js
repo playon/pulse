@@ -607,6 +607,30 @@ test("an in-event post stores its event document, and the events view has one ro
   assert.equal(u.run_count, 0);       // event posts are neither launches nor reports
 });
 
+test("a head-setup run is stored by its reason, and stays out of the events view (PV-48)", async () => {
+  const base = { venueId: "V42", vpuName: "Main Gym", pulseVersion: "1.5.0" };
+  const doc = (state) => ({ schema: "pulse.event/v1", eventId: null, kind: "setup", state, wentOnAir: false,
+                            startReason: "start recorder in manual mode was pressed" });
+  await post({ checkins: [
+    { ...base, checkinId: "eeeeeeee-0000-0000-0000-000000000031", sentAt: "2026-10-14T14:43:30Z",
+      reason: "setup-start", event: doc("setup") },
+    { ...base, checkinId: "eeeeeeee-0000-0000-0000-000000000032", sentAt: "2026-10-14T15:43:30Z",
+      reason: "setup-update", event: doc("setup") },
+  ] });
+  const rows = env.DB.raw.prepare("SELECT reason, event_id, event_state, event FROM checkins ORDER BY sent_at").all();
+  assert.deepEqual(rows.map((r) => r.reason), ["setup-start", "setup-update"]);
+  assert.equal(rows[0].event_id, null);
+  assert.equal(rows[0].event_state, "setup");
+  assert.equal(JSON.parse(rows[0].event).kind, "setup");
+  assert.equal(env.DB.raw.prepare("SELECT COUNT(*) n FROM events").get().n, 0);
+  const u = env.DB.raw.prepare("SELECT run_count, monitor_posts FROM units WHERE venue_id = 'V42'").get();
+  assert.equal(u.run_count, 0);           // neither a launch nor a monitor report
+  assert.equal(u.monitor_posts, 0);
+  const latest = env.DB.raw.prepare("SELECT last_kind, ev_id FROM unit_latest WHERE unit_key = 'V42'").get();
+  assert.equal(latest.last_kind, "setup-update");
+  assert.equal(latest.ev_id, null);
+});
+
 test("an event document with a bad schema, id or size is dropped, the check-in kept", async () => {
   await post({ checkins: [
     { checkinId: "eeeeeeee-0000-0000-0000-000000000011", reason: "event-start", venueId: "V1",
