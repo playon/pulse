@@ -30,6 +30,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   unverified: not yet seen populated on a unit with live score data, and null
   when ScoreConnect III does not report them. `source` and `ok` are unchanged.
   A change in any of these posts on the next full pass.
+- Each full report now carries `telemetry.calibration`: the primary sport,
+  each calibrated sport with when it was calibrated (newest first, at most
+  20), and whether the scoreboard (OCR) camera is calibrated. It is read from
+  the Pixellot calibration folders by a new local collector,
+  `Get-CalibrationStatus.ps1`, once per monitor pass; no camera is probed. A
+  recalibration posts on the next pass; an unchanged unit posts nothing extra.
+  `calibration` is null when the calibration folder can't be read, and
+  `sports: []` means it was read and no sport is calibrated (PV-57).
 
 ### Fixed
 - A unit whose Pixellot dependency folders are on its user's PATH no longer

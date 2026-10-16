@@ -399,6 +399,22 @@ test("utilitarian telemetry lands as unit_status columns", async () => {
   assert.equal(port.m, "00:D0:89:19:71:57");
 });
 
+test("telemetry.calibration (PV-57) is kept whole in unit_status", async () => {
+  const calibration = {
+    primary: "football",
+    sports: [{ name: "football", at: "2026-08-20T15:02:11-04:00" }, { name: "soccer", at: null }],
+    ocr: { calibrated: false, at: null },
+  };
+  await post({ secret: SECRET, checkins: [checkin({ telemetry: telemetryDoc({ calibration }) })] });
+  const u = env.DB.raw.prepare("SELECT telemetry FROM unit_status").get();
+  assert.deepEqual(JSON.parse(u.telemetry).calibration, calibration);
+  // Unknown stays null, not dropped.
+  env.DB.raw.exec("DELETE FROM checkins");
+  await post({ secret: SECRET, checkins: [checkin({ telemetry: telemetryDoc({ calibration: null }) })] });
+  const n = env.DB.raw.prepare("SELECT telemetry FROM unit_status").get();
+  assert.equal(JSON.parse(n.telemetry).calibration, null);
+});
+
 test("a heartbeat moves last_seen but keeps the last full reading", async () => {
   const full = checkin({ reason: "state-change", telemetry: telemetryDoc({ status: "PASS", blockers: [] }) });
   const beat = { checkinId: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", sentAt: "2026-09-20T15:00:00Z",

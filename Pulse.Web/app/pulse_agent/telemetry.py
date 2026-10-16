@@ -104,19 +104,24 @@ def _telemetry_cameras(raw: dict) -> dict:
 
 async def _collect_telemetry_extras(raw: dict, skip_intrusive: bool = False) -> None:
     """Collectors the telemetry needs beyond the dashboard pass: boots and
-    power loss, and the scoreboard source. Fills `raw`; each part fails soft.
-    `skip_intrusive` is accepted for symmetry; neither collector probes the
+    power loss, the scoreboard source, and calibration. Fills `raw`; each part
+    fails soft.
+    `skip_intrusive` is accepted for symmetry; none of them probes the
     network."""
     del skip_intrusive
-    reboots, sc = await asyncio.gather(
+    reboots, sc, calib = await asyncio.gather(
         engine.run_ps("Get-RebootHistory.ps1", timeout=30),
         # Straight to the collector, not _run_sc_status: that also appends to
         # the ScoreConnect config history, which is the interactive tab's job.
         engine.run_ps("Get-ScoreConnectStatus.ps1", {"BaseUrl": engine.sc3_base_url()}, timeout=15),
+        # Two folders and a few file times. Not Get-PixellotConfig: that also
+        # probes every camera over CGI.
+        engine.run_ps("Get-CalibrationStatus.ps1", timeout=15),
         return_exceptions=True,
     )
     raw.update(reboots=reboots if isinstance(reboots, dict) and not reboots.get("error") else None,
-               scoreconnect=sc if isinstance(sc, dict) else None)
+               scoreconnect=sc if isinstance(sc, dict) else None,
+               calibration=calib if isinstance(calib, dict) and not calib.get("error") else None)
 
 
 def _prefix_to_mask(prefix) -> Optional[str]:
@@ -281,6 +286,86 @@ def _telemetry_power(raw: dict) -> dict:
             "unexpectedShutdowns7d": len(unexpected) if rb else None}
 
 
+# Calibration (PV-57). Static data: the block is a pure function of two
+# folders, ordered deterministically, so an unchanged unit fingerprints the
+# same every pass and a recalibration (a sport's time moves, a sport appears)
+# changes the fingerprint and posts on the next full pass.
+CALIBRATION_MAX_SPORTS = 20
+CALIBRATION_NAME_MAX = 40
+_STAMP = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.\d+)?(Z|[+-]\d\d:\d\d)$")
+
+
+def _calibration_stamp(v) -> Optional[str]:
+    """ISO time with its offset and no fraction, like power.lastBoot. A time
+    without an offset is unknown: a local time with no zone misleads."""
+    m = _STAMP.match(str(v or "").strip())
+    return m.group(1) + m.group(2) if m else None
+
+
+def _calibration_name(v) -> Optional[str]:
+    name = str(v or "").replace("\ufeff", "").strip()[:CALIBRATION_NAME_MAX].strip()
+    return name or None
+
+
+def _calibration_read(section: dict, key: str) -> Optional[dict]:
+    """The section's read, or None when it gave no answer. A folder missing
+    under a readable Configuration folder IS an answer (nothing calibrated);
+    a folder that is there but unreadable, or no readable Configuration
+    folder at all, is not."""
+    part = section.get(key)
+    if not isinstance(part, dict):
+        return None
+    if part.get("exists"):
+        return part if part.get("readable") else None
+    return part if section.get("configRootReadable") else None
+
+
+def _calibration_sports(ms: dict) -> dict:
+    rows = ms.get("sports") or []
+    if isinstance(rows, dict):   # a one-item array can arrive unrolled
+        rows = [rows]
+    seen = {}
+    for r in rows if isinstance(rows, list) else []:
+        name = _calibration_name(r.get("name")) if isinstance(r, dict) else None
+        if name and name.lower() not in seen:   # Windows folder names ignore case
+            seen[name.lower()] = {"name": name, "at": _calibration_stamp(r.get("at"))}
+    sports = sorted(seen.values(), key=lambda s: s["name"].lower())
+    sports.sort(key=lambda s: s["at"] or "", reverse=True)   # newest first, undated last
+    primary = _calibration_name(ms.get("primary"))
+    mine = seen.get((primary or "").lower())
+    if mine:
+        primary = mine["name"]   # the folder's own spelling
+    if len(sports) > CALIBRATION_MAX_SPORTS:
+        sports = sports[:CALIBRATION_MAX_SPORTS]
+        if mine and mine not in sports:
+            sports[-1] = mine
+    # A primary.txt naming a sport with no folder is sent as read and not
+    # added to `sports`: a name in a text file is not a calibration.
+    return {"primary": primary, "sports": sports}
+
+
+def _telemetry_calibration(raw: dict) -> Optional[dict]:
+    """Which sports, and the scoreboard (OCR/PiP) camera, are calibrated.
+    Unknown is null: the whole block is null when the sports folder gave no
+    answer, and `sports: []` only ever means it was read and holds no sport.
+    `ocr` is null when the PiP folder gave no answer; a unit with no OCR
+    camera normally reads calibrated false, which is what it is."""
+    section = raw.get("calibration")
+    if not isinstance(section, dict) or section.get("error"):
+        return None
+    ms = _calibration_read(section, "multisport")
+    if ms is None:
+        return None
+    out = _calibration_sports(ms)
+    pip = _calibration_read(section, "pip")
+    if pip is None:
+        out["ocr"] = None
+    else:
+        done = bool(pip.get("hasEnhancedPip")) and bool(pip.get("hasInnerObjects"))
+        out["ocr"] = {"calibrated": done, "at": _calibration_stamp(pip.get("at")) if done else None}
+    return out
+
+
 def _build_telemetry(dashboard: dict, raw: dict, status_since: Optional[str] = None,
                      status: Optional[str] = None, open_codes=None) -> dict:
     """The utilitarian payload. Fail-soft: a collector that errored leaves its
@@ -337,6 +422,7 @@ def _build_telemetry(dashboard: dict, raw: dict, status_since: Optional[str] = N
         "servicesDown": _services_down(services, scoreboard) if services else None,
         "scoreboard":   scoreboard,
         "power":        _telemetry_power(raw),
+        "calibration":  _telemetry_calibration(raw),
     }
 
 

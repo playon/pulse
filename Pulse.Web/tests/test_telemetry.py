@@ -34,7 +34,7 @@ class TestBuildTelemetry(unittest.TestCase):
         t = self.t
         self.assertEqual(t["schema"], "pulse.telemetry/v1")
         for key in ("status", "statusSince", "headline", "blockers", "checkedAt", "pixellotVersion",
-                    "network", "cameras", "servicesDown", "scoreboard", "power"):
+                    "network", "cameras", "servicesDown", "scoreboard", "power", "calibration"):
             self.assertIn(key, t)
         self.assertEqual(set(t["network"]), {"internetReachable", "streamingPath", "portsFailed", "internet"})
         self.assertEqual(set(t["cameras"]), {"systemType", "expected", "detected", "slow", "ports"})
@@ -44,6 +44,8 @@ class TestBuildTelemetry(unittest.TestCase):
         self.assertTrue(set(t["scoreboard"]) <= {"source", "ok", "scoreLinkConnected", "dataFlowing",
                                                   "dataStatus", "sport", "ocr", "scoreConnect"})
         self.assertEqual(set(t["power"]), {"lastBoot", "unexpectedShutdowns7d"})
+        self.assertEqual(set(t["calibration"]), {"primary", "sports", "ocr"})
+        self.assertEqual(t["calibration"]["primary"], "Football")
 
     def test_status_matches_the_verdict(self):
         self.assertEqual(self.t["status"], self.dash["readiness"]["status"])
@@ -351,6 +353,144 @@ class TestScoreboardDetailPV59(unittest.TestCase):
         out = _board(sc, _OCR_ON)
         self.assertTrue(all(len(v) == 80 for v in out["scoreConnect"].values()))
         self.assertLess(len(json.dumps(out).encode("utf-8")), 1536)
+
+
+def _calib(sports=None, primary=None, *, root=True, ms_exists=True, ms_readable=True,
+           pip_exists=True, pip_readable=True, enhanced=True, inner=True,
+           pip_at="2026-08-20T15:40:00.1234567-04:00"):
+    """A Get-CalibrationStatus.ps1 read, as the collector emits it."""
+    return {"calibration": {
+        "configRootReadable": root,
+        "multisport": {"exists": ms_exists, "readable": ms_readable, "primary": primary,
+                       "sports": sports if sports is not None else []},
+        "pip": {"exists": pip_exists, "readable": pip_readable, "hasEnhancedPip": enhanced,
+                "hasInnerObjects": inner, "at": pip_at},
+    }}
+
+
+def _sport(name, day):
+    return {"name": name, "at": f"2026-08-{day:02d}T15:02:11.5550000-04:00"}
+
+
+class TestCalibration(unittest.TestCase):
+    """PV-57: which sports and the scoreboard camera are calibrated. Unknown is null."""
+
+    cal = staticmethod(agent_telemetry._telemetry_calibration)
+
+    def test_folder_unreadable_is_null_not_empty(self):
+        self.assertIsNone(self.cal({}))                                   # collector never ran
+        self.assertIsNone(self.cal({"calibration": None}))                # collector failed
+        self.assertIsNone(self.cal({"calibration": {"error": True}}))
+        self.assertIsNone(self.cal(_calib(ms_readable=False)))            # there, but unreadable
+        self.assertIsNone(self.cal(_calib(root=False, ms_exists=False, ms_readable=False)))
+        # The PiP read alone does not make the block known.
+        self.assertIsNone(self.cal(_calib(ms_readable=False, pip_exists=True)))
+
+    def test_readable_and_empty_is_an_empty_list(self):
+        out = self.cal(_calib([]))
+        self.assertEqual(out["sports"], [])
+        self.assertIsNone(out["primary"])
+        # No multisportcalibration folder under a readable Configuration folder: read, none calibrated.
+        out = self.cal(_calib(ms_exists=False, ms_readable=False))
+        self.assertEqual(out["sports"], [])
+
+    def test_one_sport(self):
+        out = self.cal(_calib([_sport("football", 20)], "football\r\n"))
+        self.assertEqual(out, {
+            "primary": "football",
+            "sports": [{"name": "football", "at": "2026-08-20T15:02:11-04:00"}],
+            "ocr": {"calibrated": True, "at": "2026-08-20T15:40:00-04:00"},
+        })
+        # A one-item array that arrived unrolled into an object still reads.
+        raw = _calib(primary="football")
+        raw["calibration"]["multisport"]["sports"] = _sport("football", 20)
+        self.assertEqual(self.cal(raw)["sports"], out["sports"])
+
+    def test_many_sports_capped_newest_first_primary_kept(self):
+        sports = [_sport(f"sport{i:02d}", i) for i in range(1, 29)]       # 28 sports, day 1..28
+        out = self.cal(_calib(sports, "sport01"))                          # primary is the oldest
+        names = [s["name"] for s in out["sports"]]
+        self.assertEqual(len(names), 20)
+        self.assertEqual(names[0], "sport28")
+        self.assertEqual(names[:19], [f"sport{i:02d}" for i in range(28, 9, -1)])
+        self.assertEqual(names[-1], "sport01")
+        self.assertEqual(out["primary"], "sport01")
+        ats = [s["at"] for s in out["sports"][:19]]
+        self.assertEqual(ats, sorted(ats, reverse=True))
+
+    def test_names_trimmed_and_duplicates_dropped(self):
+        long = "x" * 60
+        out = self.cal(_calib([_sport(long, 3), _sport(long + "y", 2), _sport("Soccer", 1),
+                               _sport("SOCCER", 4), _sport("  ", 5), {"name": None}]))
+        names = [s["name"] for s in out["sports"]]
+        self.assertEqual(sorted(names), sorted(["x" * 40, "Soccer"]))
+        self.assertTrue(all(len(n) <= 40 for n in names))
+
+    def test_primary_missing(self):
+        # No primary.txt.
+        self.assertIsNone(self.cal(_calib([_sport("football", 20)]))["primary"])
+        # primary.txt names a sport with no folder: sent as read, not added to sports.
+        out = self.cal(_calib([_sport("football", 20)], "Soccer"))
+        self.assertEqual(out["primary"], "Soccer")
+        self.assertEqual([s["name"] for s in out["sports"]], ["football"])
+        # Case differs from the folder: the folder's spelling wins.
+        self.assertEqual(self.cal(_calib([_sport("Football", 20)], "FOOTBALL"))["primary"], "Football")
+
+    def test_ocr_present_and_absent(self):
+        self.assertEqual(self.cal(_calib([]))["ocr"], {"calibrated": True, "at": "2026-08-20T15:40:00-04:00"})
+        # One of the two files: not calibrated, no time.
+        self.assertEqual(self.cal(_calib([], inner=False))["ocr"], {"calibrated": False, "at": None})
+        # No pipdesign folder (normal with no OCR camera): read, not calibrated.
+        self.assertEqual(self.cal(_calib([], pip_exists=False, pip_readable=False, enhanced=False,
+                                         inner=False, pip_at=None))["ocr"],
+                         {"calibrated": False, "at": None})
+        # pipdesign there but unreadable: unknown.
+        self.assertIsNone(self.cal(_calib([], pip_readable=False))["ocr"])
+
+    def test_times_keep_the_offset_and_drop_the_fraction(self):
+        stamp = agent_telemetry._calibration_stamp
+        self.assertEqual(stamp("2026-08-20T15:02:11.1234567-04:00"), "2026-08-20T15:02:11-04:00")
+        self.assertEqual(stamp("2026-08-20T19:02:11Z"), "2026-08-20T19:02:11Z")
+        self.assertIsNone(stamp("2026-08-20T15:02:11"))                    # no offset: unknown
+        self.assertIsNone(stamp("yesterday"))
+        self.assertIsNone(self.cal(_calib([{"name": "football", "at": "nope"}]))["sports"][0]["at"])
+
+    def test_fingerprint_moves_on_recalibration_only(self):
+        fp = lambda raw: agent_telemetry._telemetry_fingerprint(  # noqa: E731
+            agent_telemetry._build_telemetry({}, raw), [])
+        base = _calib([_sport("football", 20), _sport("soccer", 21)], "football")
+        same = fp(base)
+        self.assertEqual(fp(json.loads(json.dumps(base))), same)
+        reordered = _calib([_sport("soccer", 21), _sport("football", 20)], "football")
+        self.assertEqual(fp(reordered), same)                              # folder listing order
+        self.assertNotEqual(fp(_calib([_sport("football", 25), _sport("soccer", 21)], "football")), same)
+        self.assertNotEqual(fp(_calib([_sport("football", 20), _sport("soccer", 21),
+                                       _sport("hockey", 1)], "football")), same)
+        self.assertNotEqual(fp(_calib([_sport("football", 20), _sport("soccer", 21)], "soccer")), same)
+        self.assertNotEqual(fp(_calib([_sport("football", 20), _sport("soccer", 21)], "football",
+                                      pip_at="2026-09-01T10:00:00-04:00")), same)
+
+    def test_worst_case_block_under_2kb(self):
+        sports = [_sport(f"{i:02d}" + "w" * 58, i) for i in range(1, 29)]
+        raw = _calib(sports, "01" + "w" * 58)
+        raw["calibration"]["multisport"]["sports"] = [
+            dict(s, at="2026-08-20T15:02:11.1234567-04:00") for s in sports]
+        block = self.cal(raw)
+        self.assertEqual(len(block["sports"]), 20)
+        # The client posts with json.dumps' default separators (the larger
+        # form); the Worker measures the compact re-serialization.
+        self.assertLess(len(json.dumps(block).encode("utf-8")), 2048)
+        self.assertLess(len(json.dumps(block, separators=(",", ":")).encode("utf-8")), 2048)
+
+    def test_collector_reads_only_the_calibration_folders(self):
+        # The monitor must not pay for Get-PixellotConfig's camera CGI probes.
+        src = open(os.path.join(os.path.dirname(_APP_DIR), "scripts", "Get-CalibrationStatus.ps1"),
+                   encoding="ascii").read().split("#>", 1)[1]   # code only, past the help block
+        self.assertIn("multisportcalibration", src)
+        self.assertIn("pipdesign", src)
+        for probe in ("Invoke-WebRequest", "WebClient", "HttpWebRequest", "Test-Connection",
+                      "Get-PixellotConfig", "camera.cfg"):
+            self.assertNotIn(probe, src)
 
 
 if __name__ == "__main__":

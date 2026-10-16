@@ -1156,6 +1156,23 @@ DEMO = {
             {"timeCreated": (datetime.now() - timedelta(hours=24)).isoformat(), "level": "Error", "source": "PixellotEncoder", "eventId": 2001, "message": "Hardware encoder init failed, falling back to software encoding"},
         ]
     },
+    # PV-57: what the fleet monitor reads for telemetry.calibration. Times
+    # carry the offset, as the collector writes them.
+    "Get-CalibrationStatus.ps1": lambda **kw: {
+        "configRootReadable": True,
+        "multisport": {
+            "exists": True, "readable": True, "primary": "Football",
+            "sports": [
+                {"name": "Football", "at": (datetime.now().astimezone() - timedelta(days=57)).replace(microsecond=0).isoformat()},
+                {"name": "Soccer", "at": (datetime.now().astimezone() - timedelta(days=40)).replace(microsecond=0).isoformat()},
+                {"name": "Basketball", "at": (datetime.now().astimezone() - timedelta(days=12)).replace(microsecond=0).isoformat()},
+            ],
+        },
+        "pip": {
+            "exists": True, "readable": True, "hasEnhancedPip": True, "hasInnerObjects": True,
+            "at": (datetime.now().astimezone() - timedelta(days=57, hours=-1)).replace(microsecond=0).isoformat(),
+        },
+    },
     "Get-RebootHistory.ps1": lambda **kw: {
         "pending": {
             "isPending": True,
