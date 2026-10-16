@@ -623,6 +623,21 @@ test("an event document with a bad schema, id or size is dropped, the check-in k
   assert.equal(rows[2].event, null);
 });
 
+test("PV-59: telemetry.scoreboard.ocr and .scoreConnect are stored with the document, not stripped", async () => {
+  const board = {
+    source: "scoreconnect", ok: true, scoreLinkConnected: true,
+    ocr: { configured: false, issue: null },
+    scoreConnect: { version: "1.4.2.2", firmware: "2.4.1", scoreLinkModel: "ScoreLinkII", scoreLinkPort: "COM5",
+                    serialPort: "COM3", eventType: "Live", botNumber: "02130" },
+  };
+  await post({ checkins: [checkin({
+    checkinId: "eeeeeeee-0000-0000-0000-000000000059", reason: "periodic",
+    telemetry: { schema: "pulse.telemetry/v1", status: "PASS", scoreboard: board } })] });
+  const u = env.DB.raw.prepare("SELECT telemetry, json_extract(telemetry, '$.scoreboard.scoreConnect.botNumber') AS bot FROM unit_status").get();
+  assert.deepEqual(JSON.parse(u.telemetry).scoreboard, board);
+  assert.equal(u.bot, "02130");
+});
+
 test("0013: unit_status carries the scoreboard detail, events carry schedule, off-air time and warnings", async () => {
   await post({ checkins: [checkin({
     checkinId: "eeeeeeee-0000-0000-0000-000000000021", reason: "periodic",

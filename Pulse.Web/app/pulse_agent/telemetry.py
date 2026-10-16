@@ -194,7 +194,66 @@ def _telemetry_scoreboard(raw: dict) -> Optional[dict]:
         sport = (sc.get("configuration") or {}).get("sport") if isinstance(sc.get("configuration"), dict) else None
         if sport:
             out["sport"] = str(sport)[:80]
+    out["ocr"] = _telemetry_scoreboard_ocr(ocr, src, raw.get("pixellot_config"))
+    out["scoreConnect"] = _telemetry_scoreconnect(sc)
     return out
+
+
+def _telemetry_scoreboard_ocr(ocr, src: dict, pixellot_config) -> Optional[dict]:
+    """PV-59: the OCR camera half of the source. None when the camera state
+    couldn't be read: the NICs failed, or Get-PixellotConfig did, which would
+    otherwise read as "no OCR entry in cameras.cfg" (never `configured: false`
+    by default). A read that found no OCR camera is a real answer.
+    `configured` is cameras.cfg's OCR role; an OCR camera seen live without
+    one makes `source` "ocr" with `configured` false. `issue` is the OCR
+    problem only, so it stays null when ScoreConnect is the source."""
+    if ocr == "unknown" or not isinstance(pixellot_config, dict) or pixellot_config.get("error"):
+        return None
+    return {"configured": bool(isinstance(ocr, dict) and ocr.get("configured")),
+            "issue": src.get("issue") if src.get("source") == "ocr" else None}
+
+
+def _tel_str(v) -> Optional[str]:
+    """A trimmed string capped at 80 chars, or None. Booleans and containers
+    are not values (str(True) would read as a setting)."""
+    if v is None or isinstance(v, (bool, dict, list, tuple)):
+        return None
+    s = str(v).strip()
+    return s[:80] if s else None
+
+
+def _telemetry_scoreconnect(sc) -> Optional[dict]:
+    """PV-59: what ScoreConnect is set up as, from the Get-ScoreConnectStatus
+    result the pass already has (the same fields the config history keeps, but
+    not gated on data flowing: a unit with no score data is exactly when this
+    matters). None only when the collector itself failed or didn't run (an
+    `error`, or no result). Otherwise the block is sent and each unknown value
+    is None. When SC III isn't answering (`reachable` false), its configuration
+    and bot status are null, so `firmware`, `serialPort`, `eventType` and
+    `botNumber` are None; `version` (the exe on disk) and the ScoreLink model
+    and port (the USB scan) can still be set.
+    `version` is the ScoreConnect III exe, so a legacy SC I/II unit reads null
+    (its detail is in the `sc2` slot, not reported). Unverified: `firmware`,
+    `serialPort` and `eventType` have not yet been seen populated on a unit with
+    live score data; the collector guesses SC III's key names (Pick-First over
+    get-current-configuration-extended), so they are null when SC III doesn't
+    report them under those names. The bot number is best-effort: SC III can
+    report a previous unit's number until its service restarts. No serials or
+    hostnames: the bot number is ScoreConnect's cloud id, not a device serial,
+    and botServerAddress and `device` are left out."""
+    if not isinstance(sc, dict) or sc.get("error"):
+        return None
+    cfg = sc.get("configuration") if isinstance(sc.get("configuration"), dict) else {}
+    bot = sc.get("botStatus") if isinstance(sc.get("botStatus"), dict) else {}
+    return {
+        "version":        _tel_str(sc.get("version")),
+        "firmware":       _tel_str(cfg.get("firmware")),
+        "scoreLinkModel": _tel_str(sc.get("scoreLinkModel")),
+        "scoreLinkPort":  _tel_str(sc.get("scoreLinkPort")),
+        "serialPort":     _tel_str(cfg.get("serialPort")),
+        "eventType":      _tel_str(cfg.get("eventType")),
+        "botNumber":      _tel_str(bot.get("scoreConnectId")),
+    }
 
 
 def _services_down(services: dict, scoreboard: Optional[dict]) -> list:

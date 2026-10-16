@@ -17,6 +17,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- The check-in's `scoreboard` block now says more about the score source
+  (PV-59). `ocr` is `{configured, issue}` for the scoreboard camera, or null
+  when the adapters or the Pixellot config couldn't be read. `scoreConnect`
+  carries the ScoreConnect III version, console firmware, ScoreLink model and
+  port, serial port, event type and bot number, each null when unknown. It is
+  null only when the ScoreConnect check itself failed or didn't run. When
+  ScoreConnect III isn't answering, the block is still sent: `version` and the
+  ScoreLink model and port can be set, and the rest are null. It is sent
+  whichever source is in use. `firmware`, `serialPort` and `eventType` are
+  unverified: not yet seen populated on a unit with live score data, and null
+  when ScoreConnect III does not report them. `source` and `ok` are unchanged.
+  A change in any of these posts on the next full pass.
+
 ### Fixed
 - A unit whose Pixellot dependency folders are on its user's PATH no longer
   reads FAIL with "VPU.exe can't start because ... are missing". The DLL
