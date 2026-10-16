@@ -12012,7 +12012,8 @@ function _renderFleetCard(el, st) {
       : '<span class="text-pulse-muted">Not yet</span>'));
     if (st.verdict) rows.push(kvRowHtml("Verdict it reported", statusBadge(st.verdict)));
     rows.push(kvRowHtml("Monitor build", esc(st.version || "unknown") +
-      (st.current === false ? ' <span class="text-pulse-muted">(older than this Pulse; it updates on the next launch, or opt in again)</span>' : "")));
+      (st.current === false ? ' <span class="text-pulse-muted">(older than this Pulse; it updates on the next launch, or opt in again)</span>' : "") +
+      (st.runner && st.slotMatchesThisBuild === false ? ' <span class="text-pulse-muted">(not this Pulse build, ' + esc(st.thisBuild || "unknown") + ")</span>" : "")));
   }
   let note = "";
   if (st.state === "broken") note = '<p class="text-sm mt-2"><strong>' + esc(st.problem || "The monitor isn’t running.") + "</strong> Opting in again reinstalls it.</p>";
@@ -12024,8 +12025,13 @@ function _renderFleetCard(el, st) {
 
   const enrolled = st.state === "on" || st.state === "paused" || st.state === "broken";
   const canInstall = st.admin && st.sourceHasMonitor;
-  const primary = st.state === "off" ? "Opt in this unit" : st.state === "elsewhere" ? "Move and opt in" : st.state === "broken" ? "Reinstall" : "Update monitor";
-  const showPrimary = st.state !== "on" || st.current === false;
+  // On the agent runner layout a launch never changes the monitor's build
+  // (fleet control picks it), so a running monitor on other code offers this
+  // build by hand. Opting out and in would also do it, but purges its history.
+  const reinstall = st.runner && st.slotMatchesThisBuild === false && (st.state === "on" || st.state === "paused");
+  const primary = st.state === "off" ? "Opt in this unit" : st.state === "elsewhere" ? "Move and opt in" : st.state === "broken" ? "Reinstall"
+    : reinstall ? "Reinstall this build" : "Update monitor";
+  const showPrimary = st.state !== "on" || st.current === false || reinstall;
   el.innerHTML = sectionTitle("activity", "Fleet Monitoring") +
     '<div class="flex items-center gap-2 mb-2">' + badge(w[0], w[1]) + "</div>" +
     '<p class="text-sm text-pulse-muted mb-3">' + esc(about) + "</p>" +
@@ -12064,8 +12070,12 @@ function _renderFleetCard(el, st) {
     }
   };
   document.getElementById("set-fleet-in")?.addEventListener("click", async () => {
-    const body = "Pulse copies this build to " + st.root + " and schedules the monitor there, as SYSTEM, every 5 minutes. " +
-      "A launch of another Pulse build doesn’t affect it.\n\nThe first check runs now, so the unit shows in Vitals within a few minutes.";
+    const body = reinstall
+      ? "Pulse puts this build (" + (st.thisBuild || "unknown") + ") in the monitor’s slot a, in place of " + (st.version || "the build it runs now") +
+        ", and runs it from there. The monitor keeps its history: its open findings and last reports.\n\n" +
+        "If fleet control in Vitals pins an agent build for this unit, the monitor goes back to that build within a few minutes."
+      : "Pulse copies this build to " + st.root + " and schedules the monitor there, as SYSTEM, every 5 minutes. " +
+        "A launch of another Pulse build doesn’t affect it.\n\nThe first check runs now, so the unit shows in Vitals within a few minutes.";
     if (!(await confirmAction({ title: primary + "?", body, confirmLabel: primary }))) return;
     run("/api/fleet-monitor/enroll", "Installing… the first copy takes up to a minute.", "Done. The first check is running now.");
   });
