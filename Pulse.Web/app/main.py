@@ -2129,6 +2129,14 @@ def _binary_findings(binaries) -> list:
             f"each one where Windows looks (the program's folder, System32, Windows and PATH). "
             f"Not found: {shown}."
         ]
+        if binaries.get("runAs") == "system" and not binaries.get("userPathsRead"):
+            # The fleet monitor runs as SYSTEM and reads each logged-in user's
+            # PATH; with nobody logged in there was none to read.
+            evidence.append(
+                "This check ran as SYSTEM (the fleet monitor) with no user logged in, so no user's "
+                "PATH could be searched: a file Pixellot finds through its user's PATH would show "
+                "as missing here."
+            )
         exe_popups = [p for p in popups if (p.get("exe") or "").lower() in
                       {e.get("name", "").lower() for e in broken}]
         evidence += [popup_line(p) for p in exe_popups]
