@@ -34,7 +34,7 @@ class TestBuildTelemetry(unittest.TestCase):
         t = self.t
         self.assertEqual(t["schema"], "pulse.telemetry/v1")
         for key in ("status", "statusSince", "headline", "blockers", "checkedAt", "pixellotVersion",
-                    "network", "cameras", "servicesDown", "scoreboard", "power"):
+                    "network", "cameras", "servicesDown", "scoreboard", "power", "vodProcessing"):
             self.assertIn(key, t)
         self.assertEqual(set(t["network"]), {"internetReachable", "streamingPath", "portsFailed", "internet"})
         self.assertEqual(set(t["cameras"]), {"systemType", "expected", "detected", "slow", "ports"})
@@ -97,6 +97,18 @@ class TestBuildTelemetry(unittest.TestCase):
         self.assertIsNone(t["cameras"]["detected"])
         self.assertIsNone(t["network"]["portsFailed"])
         self.assertIsNone(t["power"]["unexpectedShutdowns7d"])
+
+    def test_vod_processing_is_a_bool_from_the_cpu_sample(self):
+        self.assertIs(self.t["vodProcessing"], False)
+        busy = {"cpuAvgPercent": 99, "postProcess": {"processes": ["ffmpeg.exe"], "cpuPercent": 86.2}}
+        t = agent_telemetry._build_telemetry(self.dash, dict(self.raw, perf_sample=busy))
+        self.assertIs(t["vodProcessing"], True)
+        # Resident but idle, a game live, or no sample: not processing / unknown.
+        idle = {"postProcess": {"processes": ["PostProcess.exe"], "cpuPercent": 0.4}}
+        live = {"postProcess": dict(busy["postProcess"], vpuRunning=True)}
+        for sample, want in ((idle, False), (live, False), (None, None), ({"error": True}, None)):
+            t = agent_telemetry._build_telemetry(self.dash, dict(self.raw, perf_sample=sample))
+            self.assertIs(t["vodProcessing"], want)
 
     def test_small(self):
         self.assertLess(len(json.dumps(self.t)), 4000)

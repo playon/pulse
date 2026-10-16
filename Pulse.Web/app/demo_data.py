@@ -751,6 +751,7 @@ DEMO = {
         "memAvgPercent": round(59 + random.uniform(-4, 5), 1),
         "sampleCount": 3,
         "windowSeconds": 3,
+        "postProcess": {"processes": [], "cpuPercent": 0.0, "vpuRunning": False},
     },
     "Get-Services.ps1": lambda **kw: {
         # Core Pixellot components are PROCESSES in C:\Pixellot\Bin (kind=process),
