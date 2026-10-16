@@ -222,6 +222,18 @@ def _telemetry_power(raw: dict) -> dict:
             "unexpectedShutdowns7d": len(unexpected) if rb else None}
 
 
+def _telemetry_vod_processing(raw: dict) -> Optional[bool]:
+    """Whether Pixellot's post-event VOD tools (ffmpeg.exe, PostProcess.exe)
+    were working through the CPU sample, or None if the sample didn't run.
+    Vitals shows it as the unit's activity, so a busy CPU after a game reads
+    as the recording being processed. A bool, not the CPU share: the share
+    moves every pass and would post every pass (_telemetry_fingerprint)."""
+    sample = raw.get("perf_sample")
+    if not isinstance(sample, dict) or sample.get("error") or "postProcess" not in sample:
+        return None
+    return engine._vod_processing(sample) is not None
+
+
 def _build_telemetry(dashboard: dict, raw: dict, status_since: Optional[str] = None,
                      status: Optional[str] = None, open_codes=None) -> dict:
     """The utilitarian payload. Fail-soft: a collector that errored leaves its
@@ -278,6 +290,7 @@ def _build_telemetry(dashboard: dict, raw: dict, status_since: Optional[str] = N
         "servicesDown": _services_down(services, scoreboard) if services else None,
         "scoreboard":   scoreboard,
         "power":        _telemetry_power(raw),
+        "vodProcessing": _telemetry_vod_processing(raw),
     }
 
 

@@ -18,6 +18,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Fixed
+- A unit cutting and uploading its last event's recording no longer reads
+  Warning with "CPU sustained above 90%". After a game Pixellot's ffmpeg.exe
+  and PostProcess.exe can hold the CPU near 100% (Perry, 2026-10-15: ffmpeg
+  86%, PostProcess 8%). The CPU sample now measures their share; when the rest
+  of the box is at or under 90% and VPU.exe isn't running, readiness notes
+  `vod-processing` ("VOD being processed", info) instead of the risk. The
+  report carries `telemetry.vodProcessing` (additive), which Vitals shows as
+  the unit's activity, Processing VOD. Both clear on the first full pass after
+  the tools finish.
 - A unit whose Pixellot dependency folders are on its user's PATH no longer
   reads FAIL with "VPU.exe can't start because ... are missing". The DLL
   check runs as SYSTEM in the agent, and SYSTEM's user PATH is empty, so every

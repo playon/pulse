@@ -1063,6 +1063,34 @@ class TestReadinessPolicy(unittest.TestCase):
         )
         self.assertEqual(verdict["status"], "PASS")
 
+    def test_vod_processing_explains_a_busy_cpu(self):
+        """Perry, 2026-10-15: just after a game, ffmpeg 86% and PostProcess 8%
+        held the CPU at 100% cutting and uploading the recording. Expected
+        work, so it's noted, not a risk."""
+        post = {"processes": ["PostProcess.exe", "ffmpeg.exe"], "cpuPercent": 94.2}
+        verdict = main._compute_readiness([], perf_sample={"cpuAvgPercent": 100, "postProcess": post})
+        self.assertEqual(verdict["status"], "PASS")
+        self.assertEqual([i["code"] for i in verdict["info"]], ["vod-processing"])
+        self.assertEqual(verdict["info"][0]["title"], "VOD being processed")
+
+    def test_cpu_sustained_still_warns_when_vod_does_not_explain_it(self):
+        def codes(post):
+            v = main._compute_readiness([], perf_sample={"cpuAvgPercent": 98, "postProcess": post})
+            return v["status"], [r["code"] for r in v["risks"]], [i["code"] for i in v["info"]]
+        busy = {"processes": ["ffmpeg.exe"], "cpuPercent": 60}
+        # Something else holds 38%: still over the bar without ffmpeg.
+        self.assertEqual(codes({"processes": ["ffmpeg.exe"], "cpuPercent": 5}),
+                         ("WARN", ["cpu-sustained"], []))
+        # A game is live: the load competes with the broadcast.
+        self.assertEqual(codes(dict(busy, cpuPercent=95, vpuRunning=True)),
+                         ("WARN", ["cpu-sustained"], []))
+        # Resident but idle, unreadable CPU time, or an older collector.
+        self.assertEqual(codes({"processes": ["PostProcess.exe"], "cpuPercent": 0.2})[1], ["cpu-sustained"])
+        self.assertEqual(codes({"processes": ["ffmpeg.exe"], "cpuPercent": None})[1], ["cpu-sustained"])
+        self.assertEqual(codes(None)[1], ["cpu-sustained"])
+        # PowerShell 5.1 unwrapped a one-item array into a string.
+        self.assertEqual(codes({"processes": "ffmpeg.exe", "cpuPercent": 95})[2], ["vod-processing"])
+
     def test_every_critical_finding_code_is_classified(self):
         # `info` is the default for UNKNOWN codes, which is right for new or
         # unverifiable checks — but a code we ship as `critical` reaching that

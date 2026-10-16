@@ -3215,6 +3215,29 @@ def _disk_used_by_letter(disk_health, performance):
     return c_pct, d_pct
 
 
+# A post-event VOD tool counts as working, not just resident, at this share of
+# the host's CPU. ffmpeg cutting a recording uses far more; PostProcess.exe
+# uploading alone used 8% on Perry (2026-10-15).
+VOD_PROCESSING_MIN_CPU = 5.0
+
+
+def _vod_processing(perf_sample):
+    """Pixellot's post-event VOD tools (ffmpeg.exe, PostProcess.exe) as
+    Get-PerfSample measured them: `{processes, cpuPercent}` when they used
+    measurable CPU over the window and no game is live, else None. Their CPU
+    is a share of the whole host, the same scale as cpuAvgPercent."""
+    post = (perf_sample or {}).get("postProcess")
+    if not isinstance(post, dict) or post.get("vpuRunning"):
+        return None
+    cpu = post.get("cpuPercent")
+    procs = post.get("processes") or []
+    if isinstance(procs, str):  # PowerShell 5.1 can unwrap a one-item array
+        procs = [procs]
+    if not procs or not isinstance(cpu, (int, float)) or cpu < VOD_PROCESSING_MIN_CPU:
+        return None
+    return {"processes": [str(p) for p in procs], "cpuPercent": cpu}
+
+
 def _compute_readiness(findings, performance=None, disk_health=None,
                        perf_sample=None, now=None) -> dict:
     """Roll the findings into one PASS / WARN / FAIL verdict per VPU.
@@ -3266,10 +3289,23 @@ def _compute_readiness(findings, performance=None, disk_health=None,
     if cpu_avg is None and performance and not performance.get("error"):
         cpu_avg = (performance.get("cpu") or {}).get("usagePercent")
     if isinstance(cpu_avg, (int, float)) and cpu_avg > 90:
-        add("risk", "cpu-sustained", "CPU sustained above 90%",
-            f"CPU averaged {cpu_avg:g}% over the sample window. Sustained load "
-            f"this high risks dropped frames mid-broadcast. Check for a runaway "
-            f"process before game time.", "Performance")
+        vod = _vod_processing(perf_sample)
+        # After a game Pixellot cuts and uploads the recording with ffmpeg.exe
+        # and PostProcess.exe, which can hold the CPU near 100% (Perry,
+        # 2026-10-15: ffmpeg 86%, PostProcess 8%). Expected work, not a fault:
+        # if the rest of the box is under the bar, say so instead of warning.
+        # It clears on its own once the tools exit or the CPU drops.
+        if vod and cpu_avg - vod["cpuPercent"] <= 90:
+            add("info", "vod-processing", "VOD being processed",
+                f"CPU averaged {cpu_avg:g}% over the sample window, "
+                f"{vod['cpuPercent']:g}% of it {_join_names(vod['processes'])} "
+                f"processing and uploading the last event's recording. Expected "
+                f"after an event; it clears when they finish.", "Performance")
+        else:
+            add("risk", "cpu-sustained", "CPU sustained above 90%",
+                f"CPU averaged {cpu_avg:g}% over the sample window. Sustained load "
+                f"this high risks dropped frames mid-broadcast. Check for a runaway "
+                f"process before game time.", "Performance")
 
     # F19 — Memory sustained >90%, averaged (snapshot fallback).
     mem_avg = (perf_sample or {}).get("memAvgPercent")
@@ -4419,6 +4455,7 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
             pixellot_config=pixellot_config, network_config=net_config,
             probe_results=probe_results, gpu_info=gpu_info,
             expectations=expectations, disk_health=disk_health,
+            perf_sample=perf_sample,
         )
     return _build_dashboard(
         identity, performance, services, nics, net_config, hardware,
