@@ -1562,6 +1562,16 @@ class TestPixellotBinaries(unittest.TestCase):
         self.assertIn("libcef.dll, chrome_elf.dll, a.dll, and 1 more are missing", f[0]["title"])
         self.assertEqual(len(f[0]["details"]), 4)
 
+    def test_says_when_no_users_path_could_be_searched(self):
+        # The fleet monitor runs as SYSTEM: with nobody logged in it had no
+        # user's PATH to read (De La Salle, 2026-10-16), and says so.
+        nobody = dict(self._bin(missing=["opencv_imgproc470.dll"]), runAs="system", userPathsRead=0)
+        self.assertIn("no user logged in", _finding_text(main._binary_findings(nobody)[0]))
+        for ok in (dict(self._bin(missing=["opencv_imgproc470.dll"]), runAs="system", userPathsRead=1),
+                   dict(self._bin(missing=["opencv_imgproc470.dll"]), runAs="user", userPathsRead=None),
+                   self._bin(missing=["opencv_imgproc470.dll"])):          # an older collector
+            self.assertNotIn("no user logged in", _finding_text(main._binary_findings(ok)[0]))
+
 
 # Finding codes emitted with severity "critical" by _compute_findings. Kept
 # explicit rather than scraped so adding a critical is a deliberate two-line

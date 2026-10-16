@@ -17,6 +17,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- A unit whose Pixellot dependency folders are on its user's PATH no longer
+  reads FAIL with "VPU.exe can't start because ... are missing". The DLL
+  check runs as SYSTEM in the agent, and SYSTEM's user PATH is empty, so every
+  DLL found only through the user's PATH read as missing (De La Salle, CA:
+  22 of them, on a VPU that ran its daily test that morning). As SYSTEM it
+  now also searches the PATH of each user logged in. If no user is logged in,
+  the finding says that no user's PATH could be searched.
+
 ## [0.2.0] - 2026-10-15
 
 ### Added
