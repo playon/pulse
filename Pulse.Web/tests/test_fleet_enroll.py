@@ -327,6 +327,35 @@ class RunnerLayout(unittest.TestCase):
         with mock.patch.object(fe, "query_task", return_value=self._runner_task()):
             self.assertEqual(fe.status(self.src, "dev")["state"], "broken")
 
+    def test_says_whether_the_running_slot_holds_this_build(self):
+        # A dev launch never copies its build into a runner-layout monitor, so
+        # the card offers "Reinstall this build" when the slot runs other code.
+        with mock.patch.object(fe, "_run", side_effect=self._fake_run), \
+                mock.patch.object(fe, "query_task", return_value=None):
+            self.assertTrue(fe.enroll(self.src, "dev")["ok"])
+        with open(os.path.join(self.root, "pulse-monitor-ticks.log"), "w") as fh:
+            fh.write("2026-10-16 00:05:00 plan=none ok\n")
+        with mock.patch.object(fe, "query_task", return_value=self._runner_task()):
+            st = fe.status(self.src, "dev")
+            self.assertTrue(st["runner"])
+            self.assertTrue(st["slotMatchesThisBuild"])
+            self.assertEqual(st["thisBuild"], "agent 0.2.0 (Pulse web-dev-v1.5.0-dev)")
+            with open(os.path.join(self.src, "app", "monitor_once.py"), "w") as fh:
+                fh.write("x = 2  # a fix in this build\n")
+            st = fe.status(self.src, "dev")
+        self.assertFalse(st["slotMatchesThisBuild"])
+        self.assertIsNone(st["current"])                # still no "older than this Pulse"
+
+    def test_older_layout_has_no_slot_to_compare(self):
+        _build(self.root)
+        with open(os.path.join(self.root, "pulse-monitor-ticks.log"), "w") as fh:
+            fh.write("2026-10-16 00:05:00 plan=none ok\n")
+        old = {"installDir": self.root, "enabled": True, "runner": False}
+        with mock.patch.object(fe, "query_task", return_value=old):
+            st = fe.status(self.src, "dev")
+        self.assertFalse(st["runner"])
+        self.assertIsNone(st["slotMatchesThisBuild"])
+
     def test_refresh_leaves_the_runner_layout_alone(self):
         with mock.patch.object(fe, "query_task", return_value=self._runner_task()), \
                 mock.patch.object(fe, "enroll") as en:

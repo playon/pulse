@@ -273,6 +273,15 @@ def status(source_root: str, channel: str, now: Optional[float] = None) -> dict:
         # On the runner layout fleet control picks the build, not this launch:
         # there's no "older than this Pulse" to show.
         "current": None if runner else (src is not None and build.get("fingerprint") == src),
+        "runner": runner,
+        # On the runner layout, whether the slot that runs holds this Pulse's
+        # code. A dev launch doesn't copy its build there, so a fix in this
+        # build reaches the monitor only by a reinstall from this card (or an
+        # agent release pinned in fleet control).
+        "slotMatchesThisBuild": (src is not None and fingerprint(code_root) == src) if runner else None,
+        "thisBuild": "agent {} (Pulse {})".format(
+            _read_text(os.path.join(source_root, "app", "pulse_agent", "VERSION")) or "unknown",
+            _read_text(os.path.join(source_root, "VERSION")) or "unknown"),
         "lastTickAt": tick.get("at"),
         "lastTickOutcome": tick.get("outcome"),
         "lastPostAt": posts.get("lastPostAt"),
