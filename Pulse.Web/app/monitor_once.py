@@ -71,6 +71,9 @@ SLOW_COLLECTOR_TTLS = {
     "Get-DiskHealth.ps1": 3600,
     "Get-WifiAdapters.ps1": 3600,
     "Get-RebootHistory.ps1": 1800,
+    # Calibration only moves when someone recalibrates; a read that couldn't
+    # answer comes back as an error, which is never cached (PV-57).
+    "Get-CalibrationStatus.ps1": 6 * 3600,
 }
 
 _BELOW_NORMAL_PRIORITY_CLASS = 0x00004000

@@ -34,8 +34,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   each calibrated sport with when it was calibrated (newest first, at most
   20), and whether the scoreboard (OCR) camera is calibrated. It is read from
   the Pixellot calibration folders by a new local collector,
-  `Get-CalibrationStatus.ps1`, once per monitor pass; no camera is probed. A
-  recalibration posts on the next pass; an unchanged unit posts nothing extra.
+  `Get-CalibrationStatus.ps1`; no camera is probed. The monitor keeps its
+  answer for 6 hours, like the hardware inventory, so most passes start no
+  PowerShell for it. A recalibration shows up within 6 hours; an unchanged
+  unit posts nothing extra. A read that fails is retried on the next pass.
   `calibration` is null when the calibration folder can't be read, and
   `sports: []` means it was read and no sport is calibrated (PV-57).
 

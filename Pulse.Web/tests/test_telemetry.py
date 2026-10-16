@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import unittest
 
 _APP_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app")
@@ -491,6 +492,86 @@ class TestCalibration(unittest.TestCase):
         for probe in ("Invoke-WebRequest", "WebClient", "HttpWebRequest", "Test-Connection",
                       "Get-PixellotConfig", "camera.cfg"):
             self.assertNotIn(probe, src)
+
+
+class TestCalibrationCache(unittest.TestCase):
+    """PV-57: the monitor serves Get-CalibrationStatus.ps1 from its 6 h disk
+    cache (as it does Get-Hardware.ps1), so a pass starts no PowerShell for it."""
+
+    SCRIPT = "Get-CalibrationStatus.ps1"
+    NAMES = ("_PS_CONCURRENCY", "_PS_LOW_PRIORITY", "_PS_SEMAPHORE", "_DISK_CACHE_PATH",
+             "_DISK_CACHE_TTLS", "_PS_BATCH", "_PS_SKIP")
+
+    def setUp(self):
+        import monitor_once
+        self.ttls = monitor_once.SLOW_COLLECTOR_TTLS
+        self.saved = {n: getattr(powershell, n) for n in self.NAMES}
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cache = os.path.join(self.tmp.name, "cache.json")
+        powershell.configure_background(disk_cache_path=self.cache, disk_cache_ttls=self.ttls)
+
+    def tearDown(self):
+        for n, v in self.saved.items():
+            setattr(powershell, n, v)
+        powershell._RESULT_CACHE.clear()
+        self.tmp.cleanup()
+
+    def _pass(self):
+        """One monitor tick: a fresh process (no memory cache), a fresh loop.
+        Returns (calibration runs, calibration block, raw)."""
+        powershell._RESULT_CACHE.clear()
+        powershell._PS_SEMAPHORE = None
+        powershell.LOG_BUFFER.clear()
+        raw = {}
+        asyncio.run(agent_telemetry._collect_telemetry_extras(raw))
+        runs = sum(1 for e in powershell.LOG_BUFFER if e["script"] == self.SCRIPT)
+        return runs, agent_telemetry._telemetry_calibration(raw), raw
+
+    def test_cached_for_six_hours(self):
+        self.assertEqual(self.ttls.get(self.SCRIPT), 6 * 3600)
+
+    def test_second_pass_runs_the_script_zero_times_and_builds_the_same_block(self):
+        first, second = self._pass(), self._pass()
+        self.assertEqual((first[0], second[0]), (1, 0))
+        self.assertIsNotNone(first[1])
+        self.assertEqual(first[1], second[1])
+
+    def test_a_failed_read_is_not_cached(self):
+        import demo_data
+        saved = demo_data.DEMO[self.SCRIPT]
+        demo_data.DEMO[self.SCRIPT] = lambda **kw: {
+            "error": True, "message": "Calibration folders could not be read", "script": self.SCRIPT}
+        try:
+            runs = [self._pass(), self._pass()]
+        finally:
+            demo_data.DEMO[self.SCRIPT] = saved
+        self.assertEqual([r[0] for r in runs], [1, 1])          # retried, not served from cache
+        self.assertEqual([r[1] for r in runs], [None, None])    # and unknown, not empty
+        if os.path.exists(self.cache):
+            with open(self.cache, encoding="utf-8") as fh:
+                self.assertNotIn(self.SCRIPT, json.load(fh))
+        # The next good read is cached as usual.
+        self.assertEqual((self._pass()[0], self._pass()[0]), (1, 0))
+
+    def test_a_changed_cached_result_changes_the_fingerprint(self):
+        # Only the calibration read: the other demo collectors are not stable
+        # pass to pass (the demo ScoreConnect draws a random bot number).
+        fp = lambda raw: agent_telemetry._telemetry_fingerprint(  # noqa: E731
+            agent_telemetry._build_telemetry({}, {"calibration": raw.get("calibration")}), [])
+        _, block, raw = self._pass()
+        same = fp(raw)
+        self.assertEqual(fp(self._pass()[2]), same)              # served from cache: no change
+        # A recalibration, as the next read after the cache expires would see it.
+        with open(self.cache, encoding="utf-8") as fh:
+            data = json.load(fh)
+        data[self.SCRIPT]["result"]["multisport"]["sports"].append(
+            {"name": "Volleyball", "at": "2026-10-16T09:00:00-04:00"})
+        with open(self.cache, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        runs, changed, raw2 = self._pass()
+        self.assertEqual(runs, 0)
+        self.assertEqual(changed["sports"][0]["name"], "Volleyball")
+        self.assertNotEqual(fp(raw2), same)
 
 
 if __name__ == "__main__":

@@ -115,7 +115,9 @@ async def _collect_telemetry_extras(raw: dict, skip_intrusive: bool = False) -> 
         # the ScoreConnect config history, which is the interactive tab's job.
         engine.run_ps("Get-ScoreConnectStatus.ps1", {"BaseUrl": engine.sc3_base_url()}, timeout=15),
         # Two folders and a few file times. Not Get-PixellotConfig: that also
-        # probes every camera over CGI.
+        # probes every camera over CGI. The monitor serves it from its 6 h disk
+        # cache (monitor_once.SLOW_COLLECTOR_TTLS), so most passes start no
+        # PowerShell for it; no args, or the cache would not apply.
         engine.run_ps("Get-CalibrationStatus.ps1", timeout=15),
         return_exceptions=True,
     )
@@ -286,10 +288,12 @@ def _telemetry_power(raw: dict) -> dict:
             "unexpectedShutdowns7d": len(unexpected) if rb else None}
 
 
-# Calibration (PV-57). Static data: the block is a pure function of two
-# folders, ordered deterministically, so an unchanged unit fingerprints the
-# same every pass and a recalibration (a sport's time moves, a sport appears)
-# changes the fingerprint and posts on the next full pass.
+# Calibration (PV-57). Static data, read through the monitor's 6 h disk cache:
+# the block is a pure function of that read, ordered deterministically, so an
+# unchanged unit fingerprints the same every pass, and a recalibration (a
+# sport's time moves, a sport appears) changes the fingerprint and posts on
+# the first full pass after the cached read expires, within 6 h. A read that
+# could not answer is an error, never cached, so it retries next pass.
 CALIBRATION_MAX_SPORTS = 20
 CALIBRATION_NAME_MAX = 40
 _STAMP = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.\d+)?(Z|[+-]\d\d:\d\d)$")

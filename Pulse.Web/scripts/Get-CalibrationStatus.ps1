@@ -28,6 +28,11 @@
     answer (nothing calibrated); a Configuration folder that cannot be read is
     no answer.
 
+    When either section gives no answer the whole result is an error. The
+    fleet monitor serves this collector from its 6 h disk cache, which never
+    stores an error, so a failed read is retried on the next pass instead of
+    sticking for six hours.
+
     Times are ISO 8601 with the UTC offset, no fractional seconds.
 
     Always emits one JSON object, even when nothing could be read.
@@ -115,6 +120,12 @@ try {
             $pipReadable = $true
         }
         catch { }
+    }
+
+    $mscAnswered = $mscReadable -or ((-not $mscExists) -and $rootReadable)
+    $pipAnswered = $pipReadable -or ((-not $pipExists) -and $rootReadable)
+    if (-not ($mscAnswered -and $pipAnswered)) {
+        throw 'Calibration folders could not be read'
     }
 
     $result = [pscustomobject]@{
