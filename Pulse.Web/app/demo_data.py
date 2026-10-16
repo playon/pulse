@@ -716,7 +716,9 @@ def _demo_network_capture(**kw):
 DEMO = {
     "Get-SystemIdentity.ps1": lambda **kw: {
         "computerSystem": {"name": _VENUE["hostname"], "manufacturer": "HP", "model": "HP Z2 Tower G9 Workstation Desktop PC"},
-        "bios": {"serialNumber": _VENUE["serial"]},
+        # releaseDate as the collector prints it: local time (UTC midnight, ET).
+        "bios": {"serialNumber": _VENUE["serial"], "smbiosVersion": "U50 Ver. 01.02.03",
+                 "releaseDate": "2023-04-11T20:00:00.0000000-04:00"},
         "uptime": {"formatted": _fmt_uptime(_uptime_secs()), "totalSeconds": _uptime_secs()},
         # LTSC 2019 (1809, build 17763) — EOS Jan 2029, well clear of the EOL
         # warning window so the demo dashboard stays clean. (Older LTSC build
@@ -822,11 +824,11 @@ DEMO = {
             # compat check passes — Ampere has no version cap. (Was GTX 1070
             # = Pascal, capped at 5.2.x, which conflicted with the 5.13.x
             # swVersion the demo venues use and produced a CRITICAL finding.)
-            {"name": "NVIDIA GeForce RTX 3060", "adapterRAMMB": 12288, "driverVersion": "31.0.15.5212",
+            {"name": "NVIDIA GeForce RTX 3060", "adapterRAMMB": 12288, "vramMB": 12288, "driverVersion": "31.0.15.5212",
              "adapterCompatibility": "NVIDIA", "vendor": "NVIDIA", "isDedicated": True},
         ],
         "diskDrives": [
-            {"model": "Samsung SSD 870 EVO 500GB", "sizeGB": 500, "interfaceType": "SATA", "serialNumber": "S3Z8NB0K901234A"}
+            {"index": 0, "model": "Samsung SSD 870 EVO 500GB", "sizeGB": 500, "interfaceType": "SATA", "mediaType": "SSD", "serialNumber": "S3Z8NB0K901234A"}
         ],
     },
     "Get-UsersAndDomains.ps1": lambda **kw: {

@@ -415,6 +415,24 @@ test("telemetry.calibration (PV-57) is kept whole in unit_status", async () => {
   assert.equal(JSON.parse(n.telemetry).calibration, null);
 });
 
+test("the hardware block (PV-64) is kept whole in the telemetry document", async () => {
+  const hardware = {
+    model: "HP EliteDesk 800 G4 WKS TWR",
+    cpu: { name: "Intel(R) Core(TM) i5-8500 CPU @ 3.00GHz", cores: 6, threads: 6 },
+    memoryGb: 32,
+    disks: [{ model: "TOSHIBA DT01ACA100", sizeGb: 932, type: "HDD" }],
+    gpus: [{ name: "NVIDIA GeForce GTX 1650", driver: "32.0.15.7628", vramMb: 4096 },
+           { name: "Intel(R) UHD Graphics 630", driver: "24.20.100.6136", vramMb: 1024 }],
+    bios: { version: "Q01 Ver. 02.07.01", date: "2019-04-23" },
+  };
+  await post({ secret: SECRET, checkins: [checkin({ reason: "periodic", telemetry: telemetryDoc({ hardware }) })] });
+  const row = env.DB.raw.prepare("SELECT telemetry FROM checkins").get();
+  assert.deepEqual(JSON.parse(row.telemetry).hardware, hardware);
+  const g = env.DB.raw.prepare(
+    "SELECT json_extract(telemetry, '$.hardware.gpus[0].vramMb') v FROM checkins").get();
+  assert.equal(g.v, 4096);
+});
+
 test("a heartbeat moves last_seen but keeps the last full reading", async () => {
   const full = checkin({ reason: "state-change", telemetry: telemetryDoc({ status: "PASS", blockers: [] }) });
   const beat = { checkinId: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", sentAt: "2026-09-20T15:00:00Z",

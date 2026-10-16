@@ -50,6 +50,27 @@ try {
     # Pixellot VPUs require a dedicated NVIDIA or AMD GPU for encoding.
     # Intel iGPUs alone won't run the encoder -- surface vendor + an
     # isDedicated flag so _compute_findings can flag wrong-hardware hosts.
+    #
+    # vramMB: Win32_VideoController.AdapterRAM is a 32-bit field, so a card
+    # with 4 GB or more reads ~4095 MB (a T1000 and an RTX 4000 alike). The
+    # display driver keeps the real size as a QWORD in its class key; match it
+    # by DriverDesc, which is the adapter's Name. Registry only, no process.
+    # SilentlyContinue, not Stop: the class key's "Properties" subkey is
+    # SYSTEM-only, and an admin run would otherwise lose every entry.
+    $vramByName = @{}
+    try {
+        $classKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'
+        foreach ($k in @(Get-ChildItem -Path $classKey -ErrorAction SilentlyContinue)) {
+            if ($k.PSChildName -notmatch '^\d{4}$') { continue }
+            $kp = Get-ItemProperty -Path $k.PSPath -ErrorAction SilentlyContinue
+            $qw = $kp.'HardwareInformation.qwMemorySize'
+            if ($kp.DriverDesc -and ($qw -is [ValueType]) -and $qw -gt 0) {
+                $vramByName["$($kp.DriverDesc)"] = [math]::Round($qw / 1MB, 0)
+            }
+        }
+    }
+    catch { }
+
     $gpus = Get-CimInstance Win32_VideoController | ForEach-Object {
         $compat = $_.AdapterCompatibility
         $vendor = switch -Regex ($compat) {
@@ -62,6 +83,7 @@ try {
         [ordered]@{
             name                 = $_.Name
             adapterRAMMB         = if ($_.AdapterRAM) { [math]::Round($_.AdapterRAM / 1MB, 0) } else { $null }
+            vramMB               = if ($vramByName.ContainsKey("$($_.Name)")) { $vramByName["$($_.Name)"] } else { $null }
             driverVersion        = $_.DriverVersion
             driverDate           = if ($_.DriverDate) { $_.DriverDate.ToString('o') } else { $null }
             adapterCompatibility = $compat
@@ -80,12 +102,18 @@ try {
     # (field case: Toshiba DT01ACA100). Get-PhysicalDisk's BusType is accurate,
     # keyed by DeviceId == Win32_DiskDrive.Index; WMI's value is the fallback.
     $busNames = @{ 1 = 'SCSI'; 2 = 'ATAPI'; 3 = 'ATA'; 7 = 'USB'; 8 = 'RAID'; 10 = 'SAS'; 11 = 'SATA'; 12 = 'SD'; 17 = 'NVMe' }
+    # MediaType (SSD or HDD) is what tells a SATA SSD from a spinning disk.
+    $mediaNames = @{ 3 = 'HDD'; 4 = 'SSD'; 5 = 'SCM' }
     $busByIndex = @{}
+    $mediaByIndex = @{}
     try {
         foreach ($pd in @(Get-PhysicalDisk -ErrorAction Stop)) {
             $bus = $pd.BusType
             if ($bus -is [ValueType] -and $busNames.ContainsKey([int]$bus)) { $bus = $busNames[[int]$bus] }
             if ($bus) { $busByIndex["$($pd.DeviceId)"] = "$bus" }
+            $media = $pd.MediaType
+            if ($media -is [ValueType] -and $mediaNames.ContainsKey([int]$media)) { $media = $mediaNames[[int]$media] }
+            if ($media -and "$media" -ne 'Unspecified') { $mediaByIndex["$($pd.DeviceId)"] = "$media" }
         }
     }
     catch { }
@@ -97,6 +125,7 @@ try {
             index            = $_.Index
             sizeGB           = [math]::Round($_.Size / 1GB, 2)
             interfaceType    = $iface
+            mediaType        = $mediaByIndex["$($_.Index)"]
             model            = $_.Model
             serialNumber     = if ($_.SerialNumber) { $_.SerialNumber.Trim() } else { $null }
             firmwareRevision = $_.FirmwareRevision

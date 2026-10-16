@@ -86,8 +86,13 @@ class TestBuildTelemetry(unittest.TestCase):
         # troubleshooting detail waits for a later tier.
         text = json.dumps(self.t)
         for gone in ("hostname", "serialNumber", "camera_macs", "cameraMacs", '"findings"',
-                     "clockOffset", '"poe"', "recentRecordings", '"gpus"', '"adapters"'):
+                     "clockOffset", '"poe"', "recentRecordings", '"adapters"'):
             self.assertNotIn(gone, text)
+        # GPUs and disks came back with the hardware inventory (PV-64), and
+        # only there: tests/test_telemetry_hardware.py.
+        rest = json.dumps({k: v for k, v in self.t.items() if k != "hardware"})
+        self.assertNotIn('"gpus"', rest)
+        self.assertNotIn('"disks"', rest)
 
     def test_skipped_port_probe_is_null_not_blocked(self):
         n = agent_telemetry._build_telemetry(self.dash, dict(self.raw, port_tests=None))["network"]

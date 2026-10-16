@@ -20,10 +20,10 @@ from pulse_agent.engine import engine
 # services down, scoreboard source, boots and power loss, versions). Oracle
 # already shows Pixellot's own live metrics (CPU, bandwidth, dark court), so
 # this carries what Pixellot can't see from outside the box. Troubleshooting
-# detail (full findings copy, every adapter, clock drift, PoE, GPUs, disks,
-# recordings) comes later. Kept small on purpose: Unity writes must be. D1
-# stores it as the proof of concept. Leaves out hostname, BIOS serial and
-# camera serials.
+# detail (full findings copy, every adapter, clock drift, PoE, recordings)
+# comes later; the hardware inventory came with PV-64. Kept small on purpose:
+# Unity writes must be. D1 stores it as the proof of concept. Leaves out
+# hostname, BIOS serial, disk serials and camera serials.
 _TELEMETRY_SCHEMA = "pulse.telemetry/v1"
 def _port_names() -> dict:
     # Built per call: the RTMP purpose is the engine's, and main.py binds the
@@ -370,6 +370,156 @@ def _telemetry_calibration(raw: dict) -> Optional[dict]:
     return out
 
 
+# ── Hardware inventory (PV-64) ──────────────────────────────────────────────
+# What the box is: model, CPU, memory, disks, graphics, BIOS. Built from
+# collectors the pass already runs: Get-SystemIdentity (every pass, ~0.2 s)
+# and Get-Hardware (the monitor serves it from its 6 h disk cache,
+# monitor_once.SLOW_COLLECTOR_TTLS), so it adds no collection. It sits in the
+# post fingerprint like every other field, so it goes out on the first post
+# and again only when something in it changes. A part whose collector failed
+# is null (unknown); an empty list means the collector ran and found none.
+# Never a serial: the fields are picked one by one, and any string that
+# contains the BIOS or a disk serial, the asset tag or the hostname is
+# dropped (an odd OEM can put one in a model string).
+_HW_MAX_DISKS = 8
+_HW_MAX_GPUS = 4
+_HW_MAX_STR = 80
+# Version strings run 12-17 chars ("32.0.15.7628", "Q01 Ver. 02.07.01"); the
+# tighter cap is what keeps a worst-case block under 2 KB.
+_HW_MAX_VERSION = 32
+# Board makers' unfilled SMBIOS fields: not a model.
+_HW_PLACEHOLDERS = {"to be filled by o.e.m.", "system product name", "default string",
+                    "not applicable", "none", "n/a", "unknown", "o.e.m."}
+# Virtual adapters that come and go with a remote session; listing them would
+# post a "change" every time someone connects. Basic Display stays: it means
+# the real driver is missing.
+_HW_GPU_SKIP = re.compile(r"remote display|mirror|indirect display|virtual display", re.I)
+# WMI's InterfaceType, the collector's fallback, reads a SATA disk as IDE and
+# an NVMe one as SCSI: not trustworthy on its own.
+_HW_UNTRUSTED_BUS = {"IDE", "SCSI"}
+# AdapterRAM is 32-bit: a value at its ceiling is "4 GB or more", not a size.
+_HW_ADAPTER_RAM_CAP_MB = 4095
+
+
+def _hw_identifiers(identity: dict, hardware: dict) -> list:
+    """Every identifier the collectors return, lower-cased, so no field of the
+    hardware block can carry one."""
+    vals = []
+    if isinstance(identity, dict):
+        vals += [(identity.get("bios") or {}).get("serialNumber"),
+                 (identity.get("computerSystem") or {}).get("name"),
+                 identity.get("assetTag")]
+    if isinstance(hardware, dict):
+        vals += [d.get("serialNumber") for d in hardware.get("diskDrives") or [] if isinstance(d, dict)]
+    return [str(v).strip().lower() for v in vals if v is not None and len(str(v).strip()) >= 4]
+
+
+def _hw_str(v, ids: list, limit: int = _HW_MAX_STR) -> Optional[str]:
+    """Trimmed, whitespace-collapsed, at most `limit` chars; None when empty,
+    a placeholder, or carrying an identifier."""
+    if v is None or isinstance(v, (dict, list, bool)):
+        return None
+    s = " ".join(str(v).split())
+    low = s.lower()
+    if not s or low in _HW_PLACEHOLDERS or any(i in low for i in ids):
+        return None
+    return s[:limit]
+
+
+def _hw_int(v) -> Optional[int]:
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
+        return None
+    return int(round(v))
+
+
+def _hw_disk_type(d: dict) -> Optional[str]:
+    """NVMe, USB, SSD, HDD, or the bus (SATA, SAS, RAID...) when the media
+    type is unknown. Get-PhysicalDisk calls an NVMe drive an SSD, and a USB
+    drive is worth naming as one, so the bus wins for those two."""
+    bus = str(d.get("interfaceType") or "").strip()
+    media = str(d.get("mediaType") or "").strip().upper()
+    if bus.upper() == "NVME":
+        return "NVMe"
+    if bus.upper() == "USB":
+        return "USB"
+    if media in ("SSD", "HDD", "SCM"):
+        return media
+    if not bus or bus.upper() in _HW_UNTRUSTED_BUS:
+        return None
+    return bus[:16]
+
+
+def _hw_bios_date(v) -> Optional[str]:
+    """YYYY-MM-DD in UTC. The collector prints the BIOS date as local time,
+    and SMBIOS dates are UTC midnight, so vpu-home's 2019-04-23 BIOS reads
+    2019-04-22T20:00:00-04:00: the first ten characters are a day early."""
+    from datetime import datetime, timedelta
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})?)?",
+                 str(v or ""))
+    if not m:
+        return None
+    try:
+        dt = datetime(*(int(x or 0) for x in m.groups()[:6]))
+    except ValueError:
+        return None
+    tz = m.group(7)
+    if tz and tz != "Z":
+        sign = 1 if tz[0] == "+" else -1
+        dt -= sign * timedelta(hours=int(tz[1:3]), minutes=int(tz[4:6]))
+    return dt.strftime("%Y-%m-%d")
+
+
+def _hw_vram_mb(g: dict) -> Optional[int]:
+    real = _hw_int(g.get("vramMB"))
+    if real:
+        return real
+    wmi = _hw_int(g.get("adapterRAMMB"))
+    return wmi if wmi and wmi < _HW_ADAPTER_RAM_CAP_MB else None
+
+
+def _telemetry_hardware(raw: dict) -> Optional[dict]:
+    """The hardware block, or None when neither collector answered (a build
+    without PV-64 sends no block at all, which Vitals reads the same way)."""
+    identity = raw.get("identity")
+    hardware = raw.get("hardware")
+    ident_ok = isinstance(identity, dict) and not identity.get("error")
+    hw_ok = isinstance(hardware, dict) and not hardware.get("error")
+    if not ident_ok and not hw_ok:
+        return None
+    ids = _hw_identifiers(identity if ident_ok else {}, hardware if hw_ok else {})
+    out = {"model": None, "cpu": None, "memoryGb": None, "disks": None, "gpus": None, "bios": None}
+
+    if ident_ok:
+        out["model"] = _hw_str((identity.get("computerSystem") or {}).get("model"), ids)
+        bios = identity.get("bios") or {}
+        bios_out = {"version": _hw_str(bios.get("smbiosVersion"), ids, _HW_MAX_VERSION),
+                    "date": _hw_bios_date(bios.get("releaseDate"))}
+        out["bios"] = bios_out if any(v is not None for v in bios_out.values()) else None
+
+    if hw_ok:
+        procs = [p for p in hardware.get("processors") or [] if isinstance(p, dict)]
+        if procs:
+            cores = [_hw_int(p.get("numberOfCores")) for p in procs]
+            threads = [_hw_int(p.get("numberOfLogicalProcessors")) for p in procs]
+            out["cpu"] = {"name": _hw_str(procs[0].get("name"), ids),
+                          # Summed over sockets; null if any socket didn't say.
+                          "cores": sum(cores) if all(cores) else None,
+                          "threads": sum(threads) if all(threads) else None}
+        # The DIMM sum, the same number the ram-insufficient finding reads.
+        # None for no DIMM list: the OS-visible total runs short of it.
+        ram = engine._total_ram_gb(hardware, None)
+        out["memoryGb"] = int(round(ram)) if ram > 0 else None
+        disks = sorted((d for d in hardware.get("diskDrives") or [] if isinstance(d, dict)),
+                       key=lambda d: d.get("index") if isinstance(d.get("index"), int) else 1 << 30)
+        out["disks"] = [{"model": _hw_str(d.get("model"), ids), "sizeGb": _hw_int(d.get("sizeGB")),
+                         "type": _hw_disk_type(d)} for d in disks][:_HW_MAX_DISKS]
+        gpus = [g for g in hardware.get("gpus") or []
+                if isinstance(g, dict) and not _HW_GPU_SKIP.search(str(g.get("name") or ""))]
+        out["gpus"] = [{"name": _hw_str(g.get("name"), ids), "driver": _hw_str(g.get("driverVersion"), ids, _HW_MAX_VERSION),
+                        "vramMb": _hw_vram_mb(g)} for g in gpus][:_HW_MAX_GPUS]
+    return out
+
+
 def _build_telemetry(dashboard: dict, raw: dict, status_since: Optional[str] = None,
                      status: Optional[str] = None, open_codes=None) -> dict:
     """The utilitarian payload. Fail-soft: a collector that errored leaves its
@@ -427,6 +577,7 @@ def _build_telemetry(dashboard: dict, raw: dict, status_since: Optional[str] = N
         "scoreboard":   scoreboard,
         "power":        _telemetry_power(raw),
         "calibration":  _telemetry_calibration(raw),
+        "hardware":     _telemetry_hardware(raw),
     }
 
 

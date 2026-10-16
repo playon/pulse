@@ -40,6 +40,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   unit posts nothing extra. A read that fails is retried on the next pass.
   `calibration` is null when the calibration folder can't be read, and
   `sports: []` means it was read and no sport is calibrated (PV-57).
+- Telemetry carries a `hardware` block (PV-64): PC model, processor (name,
+  cores, threads), memory in GB, up to 8 disks (model, size, NVMe/SSD/HDD/USB),
+  up to 4 graphics cards (name, driver, memory) and the BIOS version and date.
+  It reuses what the pass already collects (Get-Hardware comes from the 6 h
+  cache), so a pass costs no more, and it is posted again only when it
+  changes. A part that couldn't be read is null. No serial number, asset tag
+  or hostname, from the BIOS or any disk.
+- Get-Hardware reports a graphics card's real memory (`vramMB`, from the
+  driver's registry key: WMI tops out at 4095 MB) and each disk's media type
+  (`mediaType`, SSD or HDD).
 
 ### Fixed
 - A unit whose Pixellot dependency folders are on its user's PATH no longer
