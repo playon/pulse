@@ -192,6 +192,17 @@ call :netdiag
 goto :fatal
 
 :dl_ok
+:: The commit lookup above failed (api.github.com blocked, slow or out of
+:: its 60 unauthenticated requests an hour), but the branch zip names its
+:: commit anyway: GitHub writes the 40-hex commit id as the zip comment, in
+:: the End of Central Directory record at the end of the file. Without it
+:: the install is stamped <branch>-unknown, nothing can tell which build the
+:: unit runs, and every later launch downloads again (De La Salle CA,
+:: 2026-10-16). No match leaves COMMIT_SHA empty, as before.
+if not defined COMMIT_SHA (
+    for /f "usebackq delims=" %%s in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p='%ZIPFILE%';try{$fs=[IO.File]::OpenRead($p);$n=[int][Math]::Min($fs.Length,65557);$null=$fs.Seek(-$n,'End');$b=New-Object byte[] $n;$null=$fs.Read($b,0,$n);$fs.Close();for($i=$n-22;$i -ge 0;$i--){if($b[$i] -eq 80 -and $b[$i+1] -eq 75 -and $b[$i+2] -eq 5 -and $b[$i+3] -eq 6){$len=$b[$i+20]+256*$b[$i+21];if($i+22+$len -le $n){$c=[Text.Encoding]::ASCII.GetString($b,$i+22,$len);if($c -match '\A[0-9a-f]{40}\z'){$c}};break}}}catch{}"`) do set "COMMIT_SHA=%%s"
+    if defined COMMIT_SHA set "NEW_VER=%BRANCH%-!COMMIT_SHA:~0,7!"
+)
 if exist "%EXTRACT%" rd /s /q "%EXTRACT%"
 :: Import-Module explicitly: Expand-Archive lives in a module, and the spinner
 :: runs it in a fresh runspace rather than relying on command auto-discovery.
