@@ -28,6 +28,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - ScoreConnect tab: a **Reinstall ScoreConnect III** button. It stops the service, deletes the whole Sportzcast LLC program folder, and installs a fresh copy, with progress shown in Pulse. Saved settings and logs are kept. Use it when ScoreConnect III won't start or keeps failing.
 - Settings (dev channel only): a **Fleet Monitoring** card. **Opt in this unit** installs the fleet monitor, which checks every 5 minutes whether the VPU is ready to stream and reports to Pulse Vitals. The card shows when it last checked and reported, and **Opt out** removes it. A production launch on the same VPU doesn't affect it.
 
+### Fixed
+- Camera Connectivity: an Intel I210 camera card is now labelled "ADLINK GIE74-series" instead of always "GIE74P". Pulse can't tell a GIE74 from a GIE74P, and it had been calling GIE74 cards GIE74P.
+- Camera Connectivity: when the PoE card won't report its power budget, the message no longer blames only the driver. It now says the card's PoE controller may not be responding, and tells you to check the card's Molex power lead first. If cameras still get no power after that, treat it as a card fault.
+
 ## [1.4.1] - 2026-10-13
 
 ### Changed
