@@ -2985,7 +2985,7 @@ function _demoVerdict(state) {
     { code: "disk-d-critical", category: "Storage", title: "Recording drive (D:) almost full", recommendation: "D: is 93% full. The game recording is saved to D:, so if it fills during the game the recording may not save. Free up space on D:." },
   ] };
   return { status: "FAIL", policyVersion: "v1", timestamp: stamp, info: [], risks: [nicRisk], blockers: [
-    { code: "stream-blocked", category: "Network", title: "Streaming is blocked, so the VPU can't broadcast",
+    { code: "stream-blocked", category: "Network", title: "Streaming is blocked by the venue's network",
       recommendation: "The venue's network is blocking all three connections the VPU uses to send live video, so the game can't broadcast. Ask venue IT to open at least one.",
       it: "Outbound UDP 2088 and UDP 443 to prod-echo.pixellot.tv, and TCP 1935. Filters that match by destination must also allow *.pixellot.stream, because the streaming servers change for every event." },
   ] };

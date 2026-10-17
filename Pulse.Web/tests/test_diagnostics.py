@@ -236,7 +236,7 @@ class TestComputeFindings(unittest.TestCase):
                       "gpus": [{"vendor": "Intel", "isDedicated": False}]},
             gpu_info=_gpu("Turing"),
         )
-        self.assertIn("No dedicated graphics card, so this is the wrong hardware for a VPU", titles)
+        self.assertIn("No dedicated graphics card", titles)
 
     def test_findings_have_required_shape(self):
         # Every finding must carry severity + title so the dashboard can render it.
@@ -314,6 +314,85 @@ class TestComputeFindings(unittest.TestCase):
             nics=nics, probe_results=self._ocr_probe(),
         )
         self.assertTrue(any("running slow" in t for t in titles), titles)
+
+    def test_slow_onboard_port_is_not_flagged_but_a_slow_camera_port_is(self):
+        # The NIC collector matches adapters by chipset, so the onboard
+        # motherboard port (PCI bus 0) can sit in `ports` beside the camera
+        # card's ports. A slow onboard link is the venue uplink's business,
+        # not a camera fault; a slow camera-card port still flags.
+        nics = {"ports": [
+            {"name": "Ethernet 29", "status": "Up", "linkSpeedMbps": 100,
+             "mac": "00:30:64:5F:61:87",
+             "arpEntries": [{"ip": "169.254.16.50", "mac": "00:D0:89:18:CE:E8"}]},
+            {"name": "Ethernet 5", "status": "Up", "linkSpeedMbps": 100,
+             "mac": "C8:D9:D2:30:5E:4F", "arpEntries": []},
+        ]}
+        network_config = {"adapters": [
+            {"name": "Ethernet 5", "interfaceDescription": "Intel(R) Ethernet Connection (7) I219-LM",
+             "status": "Up", "physicalMediaType": "802.3", "macAddress": "C8-D9-D2-30-5E-4F", "pciBus": 0},
+            {"name": "Ethernet 29", "interfaceDescription": "Intel(R) 82574L Gigabit Network Connection #14",
+             "status": "Up", "physicalMediaType": "802.3", "macAddress": "00-30-64-5F-61-87", "pciBus": 5},
+        ]}
+        titles = self._titles(
+            identity=_identity("5.2.0"), performance={}, services={},
+            nics=nics, network_config=network_config,
+        )
+        slow = [t for t in titles if "running slow" in t]
+        self.assertEqual(len(slow), 1, slow)
+        self.assertIn("port 1", slow[0])          # the camera port, by MAC order
+
+    def test_slow_onboard_port_still_flagged_when_adapter_roles_unknown(self):
+        # No network_config means nothing can be told apart: behavior as before.
+        nics = {"ports": [
+            {"name": "Ethernet 5", "status": "Up", "linkSpeedMbps": 100,
+             "mac": "C8:D9:D2:30:5E:4F", "arpEntries": []},
+        ]}
+        titles = self._titles(
+            identity=_identity("5.2.0"), performance={}, services={}, nics=nics,
+        )
+        self.assertTrue(any("running slow" in t for t in titles), titles)
+
+
+# ── Streaming chain: the four outcomes and their titles (PV-50) ──
+class TestStreamFindingTitles(unittest.TestCase):
+    def _chain(self, main_ok, backup_ok, rtmp_ok):
+        def rung(purpose, ok, port, proto):
+            return {"purpose": purpose, "status": "pass" if ok else "fail",
+                    "host": "prod-echo.pixellot.tv", "port": port, "protocol": proto}
+        return {"results": [
+            rung("Zixi Streaming", main_ok, 2088, "udp"),
+            rung("Zixi Backup", backup_ok, 443, "udp"),
+            rung(main._RTMP_FALLBACK_PURPOSE, rtmp_ok, 1935, "tcp"),
+        ]}
+
+    def _one(self, **kw):
+        found = main._stream_findings(self._chain(**kw))
+        self.assertEqual(len(found), 1, found)
+        return found[0]
+
+    def test_every_connection_blocked(self):
+        f = self._one(main_ok=False, backup_ok=False, rtmp_ok=False)
+        self.assertEqual((f["code"], f["title"]),
+                         ("stream-blocked", "Streaming is blocked by the venue's network"))
+
+    def test_only_the_last_resort_is_open(self):
+        f = self._one(main_ok=False, backup_ok=False, rtmp_ok=True)
+        self.assertEqual((f["code"], f["title"]),
+                         ("stream-degraded-rtmp", "Streaming is using its last-resort connection (1935 TCP)"))
+
+    def test_on_the_backup_connection(self):
+        f = self._one(main_ok=False, backup_ok=True, rtmp_ok=True)
+        self.assertEqual((f["code"], f["title"]),
+                         ("stream-resiliency-reduced", "Streaming is using its backup connection (443 UDP)"))
+
+    def test_main_connection_fine_but_the_backup_is_blocked(self):
+        # Streaming on the main connection, so it is NOT "using the backup".
+        f = self._one(main_ok=True, backup_ok=False, rtmp_ok=True)
+        self.assertEqual((f["code"], f["title"]),
+                         ("stream-resiliency-reduced", "Streaming backup connection is blocked"))
+
+    def test_everything_open_raises_nothing(self):
+        self.assertEqual(main._stream_findings(self._chain(True, True, True)), [])
 
 
 # ── Missing-main-cameras finding: probe-aware + cold-start grace ──
@@ -1063,6 +1142,40 @@ class TestReadinessPolicy(unittest.TestCase):
         )
         self.assertEqual(verdict["status"], "PASS")
 
+    def test_reclassified_findings_gate_readiness(self):
+        """Ian, 2026-10-15: an interrupted update or too little RAM fails the
+        unit; a worn SSD, concerning software and a SSL-inspected support
+        service warn. alt-remote and the other support-plane notes stay info."""
+        for code in ("install-incomplete", "ram-insufficient"):
+            self.assertEqual(main._readiness_class(code), "blocker", code)
+        for code in ("disk-smart-wear", "sw-security", "sw-crypto-miner", "sw-torrent",
+                     "sw-system-cleaner", "sw-game-platform", "sw-consumer-sync",
+                     "ssl-inspection-support"):
+            self.assertEqual(main._readiness_class(code), "risk", code)
+        for code in ("sw-alt-remote", "tls-filtered-support", "lmi-ssl-blocked"):
+            self.assertEqual(main._readiness_class(code), "info", code)
+
+        def verdict(code):
+            return main._compute_readiness(
+                [{"code": code, "severity": "warning", "category": "Hardware",
+                  "title": "t", "recommendation": "r"}])["status"]
+        self.assertEqual(verdict("ram-insufficient"), "FAIL")
+        self.assertEqual(verdict("install-incomplete"), "FAIL")
+        self.assertEqual(verdict("sw-torrent"), "WARN")
+        self.assertEqual(verdict("sw-alt-remote"), "PASS")
+
+    def test_system_drive_title_names_the_threshold(self):
+        # The title is built from the same constant as the check, so they
+        # cannot drift apart. "Over 90%" means more than 90.
+        pct = main.READINESS_DISK_FULL_PCT
+        full = main._compute_readiness(
+            [], disk_health={"logicalDisks": [{"deviceID": "C:", "usedPercent": pct + 2}]})
+        self.assertEqual([b["title"] for b in full["blockers"]],
+                         [f"System drive (C:) is over {pct}% full"])
+        edge = main._compute_readiness(
+            [], disk_health={"logicalDisks": [{"deviceID": "C:", "usedPercent": pct}]})
+        self.assertEqual(edge["blockers"], [])
+
     def test_every_critical_finding_code_is_classified(self):
         # `info` is the default for UNKNOWN codes, which is right for new or
         # unverifiable checks — but a code we ship as `critical` reaching that
@@ -1419,7 +1532,7 @@ class TestSupportOnlyTlsFindings(unittest.TestCase):
         codes = [f["code"] for f in self._findings(tls)]
         self.assertIn("ssl-inspection-support", codes)
         self.assertNotIn("ssl-inspection", codes)
-        self.assertEqual(main._readiness_class("ssl-inspection-support"), "info")
+        self.assertEqual(main._readiness_class("ssl-inspection-support"), "risk")
 
     def test_broadcast_interception_still_blocks(self):
         tls = self._tls([self._row("api.singular.live", "intercepted"),
