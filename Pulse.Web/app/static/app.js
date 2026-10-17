@@ -456,7 +456,7 @@ function _verdictStripModel() {
   var blockers = (v.blockers || []).length, risks = (v.risks || []).length;
   var text = (blockers ? blockers + (blockers === 1 ? " thing is" : " things are") + " stopping tonight's game"
                        : "Nothing is stopping tonight's game")
-    + " \u00b7 " + (risks ? risks + (risks === 1 ? " risk" : " risks") + " tonight" : "No risks tonight");
+    + (risks ? " \u00b7 " + risks + (risks === 1 ? " risk" : " risks") + " tonight" : (blockers ? "" : " \u00b7 No risks tonight"));
   var here = 0;
   if (currentPage !== "dashboard") {
     var tf = _dashToneFn(dash);
@@ -3036,9 +3036,9 @@ function readinessCard(verdict, freshness) {
     +   '<span>' + (blockers.length
           ? blockers.length + (blockers.length === 1 ? ' thing is' : ' things are') + " stopping tonight's game"
           : "Nothing is stopping tonight's game") + '</span>'
-    +   '<span>' + (risks.length
+    +   (risks.length || !blockers.length ? '<span>' + (risks.length
           ? risks.length + (risks.length === 1 ? ' risk' : ' risks') + ' tonight'
-          : 'No risks tonight') + '</span>'
+          : 'No risks tonight') + '</span>' : '')
     + '</div>'
     + demoBar
     + '</div>';
@@ -3229,7 +3229,7 @@ function renderDashboard() {
       lines.push("Stream readiness: " + meta.word + " - " + meta.tag);
       var nb = (rdy.blockers || []).length, nr = (rdy.risks || []).length;
       lines.push(nb
-        ? nb + (nb === 1 ? " thing is" : " things are") + " stopping tonight's game, " + nr + " risk" + (nr === 1 ? "" : "s") + " tonight"
+        ? nb + (nb === 1 ? " thing is" : " things are") + " stopping tonight's game" + (nr ? ", " + nr + " risk" + (nr === 1 ? "" : "s") + " tonight" : "")
         : "Nothing is stopping tonight's game, " + nr + " risk" + (nr === 1 ? "" : "s") + " tonight");
       lines.push("");
     }
