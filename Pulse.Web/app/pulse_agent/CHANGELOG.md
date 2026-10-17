@@ -17,6 +17,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-16
+
 ### Added
 - The check-in's `scoreboard` block now says more about the score source
   (PV-59). `ocr` is `{configured, issue}` for the scoreboard camera, or null
