@@ -32,6 +32,7 @@ MARIST = [
     "TUSB3410 Driver 6.7.5.0", "UMC v2.23.0",
     # vpu-home spellings
     "Blackmagic Design Desktop Video", "ADLINK Vision Software SDK", "ScoreConnectIII",
+    "Dell Peripheral Manager",
 ]
 
 
@@ -51,6 +52,10 @@ class SoftwareReview(unittest.TestCase):
     def test_not_approved_beats_approved(self):
         # "LogMeIn" is approved; a name matching both must not be.
         self.assertEqual(sr.classify("Datto LogMeIn bridge"), "informational")
+
+    def test_bench_tools_stay_informational(self):
+        for n in ("Tailscale", "Wireshark 4.6.8 x64", "Npcap", "Barrier 2.4.0-release"):
+            self.assertEqual(sr.classify(n), "informational", n)
 
     def test_unknown_app_is_informational(self):
         self.assertEqual(sr.classify("Some New Vendor Tool"), "informational")

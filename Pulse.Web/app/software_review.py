@@ -65,6 +65,7 @@ APPROVED_APPS = (
     ("Intel(R) Dynamic Tuning", "image"),
     ("Intel(R) Management Engine Components", "image"),
     ("Ext2Fsd", "image"),
+    ("Dell Peripheral Manager", "image"),
 )
 
 
