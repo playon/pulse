@@ -192,6 +192,34 @@ class TestConcerningSoftware(unittest.TestCase):
         self.assertEqual(
             sum(len(v) for v in main._detect_concerning_software({"error": True}).values()), 0)
 
+    def test_datto_edr_is_unsupported_security(self):
+        out = main._detect_concerning_software(self._sw("Datto EDR Agent"))
+        self.assertEqual(len(out["security"]), 1)
+        findings = main._compute_findings(
+            identity=None, performance=None, services=None, nics=None,
+            installed_sw=self._sw("Datto EDR Agent"))
+        sec = [f for f in findings if f["code"] == "sw-security"]
+        self.assertEqual([f["severity"] for f in sec], ["critical"])
+
+    def test_datto_rmm_is_alt_remote_warning(self):
+        out = main._detect_concerning_software(self._sw("Datto RMM"))
+        self.assertEqual(len(out["alt_remote"]), 1)
+        self.assertEqual(len(out["security"]), 0)
+        enriched = main._enrich_software_with_concerns(self._sw("Datto RMM"))
+        self.assertEqual(enriched["software"][0]["concern"]["severity"], "warning")
+
+    def test_chrome_webapp_shortcuts_are_not_risks(self):
+        sw = {"software": [
+            {"displayName": "Google Drive", "publisher": "Google\\Chrome"},
+            {"displayName": "Gmail", "publisher": "Google\\Chrome"}]}
+        self.assertEqual(sum(len(v) for v in main._detect_concerning_software(sw).values()), 0)
+        enriched = main._enrich_software_with_concerns(sw)
+        self.assertTrue(all("concern" not in s for s in enriched["software"]))
+
+    def test_real_google_drive_client_is_still_a_risk(self):
+        sw = {"software": [{"displayName": "Google Drive", "publisher": "Google LLC"}]}
+        self.assertEqual(len(main._detect_concerning_software(sw)["consumer_sync"]), 1)
+
 
 # ── _compute_findings integration (the high-churn function) ──
 class TestComputeFindings(unittest.TestCase):
