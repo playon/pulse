@@ -19,11 +19,14 @@ from pulse_agent.engine import engine
 # internet adapter's IPv4 setup and MAC, cameras with per-port detail,
 # services down, scoreboard source, boots and power loss, versions). Oracle
 # already shows Pixellot's own live metrics (CPU, bandwidth, dark court), so
-# this carries what Pixellot can't see from outside the box. Troubleshooting
-# detail (full findings copy, every adapter, clock drift, PoE, recordings)
-# comes later; the hardware inventory came with PV-64. Kept small on purpose:
-# Unity writes must be. D1 stores it as the proof of concept. Leaves out
-# hostname, BIOS serial, disk serials and camera serials.
+# this carries what Pixellot can't see from outside the box. The hardware
+# inventory came with PV-64; the camera card and PoE, restart history, disk
+# space and health, components, applications, programs and the Windows/clock
+# environment with PV-65 to PV-76, for Vitals' unit tabs. The full findings
+# copy and recordings are still left out. Kept small on purpose: Unity writes
+# must be, and the check-in Worker drops a document over 16 KB
+# (_fit_telemetry). Leaves out hostname, BIOS serial, disk serials and camera
+# serials.
 _TELEMETRY_SCHEMA = "pulse.telemetry/v1"
 def _port_names() -> dict:
     # Built per call: the RTMP purpose is the engine's, and main.py binds the
@@ -104,12 +107,23 @@ def _telemetry_cameras(raw: dict) -> dict:
 
 async def _collect_telemetry_extras(raw: dict, skip_intrusive: bool = False) -> None:
     """Collectors the telemetry needs beyond the dashboard pass: boots and
-    power loss, the scoreboard source, and calibration. Fills `raw`; each part
-    fails soft.
-    `skip_intrusive` is accepted for symmetry; none of them probes the
-    network."""
+    power loss, the scoreboard source, calibration, the Windows patch level,
+    clock drift and the camera card's PoE. Fills `raw`; each part fails soft.
+    `skip_intrusive` is accepted for symmetry. None of them probes the venue
+    network the way Test-NetworkPorts does: Test-NtpDrift sends one NTP sample
+    to the unit's own time source, which Windows does on its own anyway."""
     del skip_intrusive
-    reboots, sc, calib = await asyncio.gather(
+    card = _camera_card(raw.get("network_config"))
+
+    async def _poe():
+        # Only a card whose chip reports PoE ever loads SmartPoE.dll: on the
+        # GIE64 and GIE74P-AN, Register_Card fails or hangs (PV-66). The
+        # collector keeps its own crash sentinel, in SYSTEM's TEMP here.
+        if not card or not card.get("poeSupported"):
+            return None
+        return await engine.run_ps("Get-PoePower.ps1", timeout=20)
+
+    reboots, sc, calib, ubr, ntp, poe = await asyncio.gather(
         engine.run_ps("Get-RebootHistory.ps1", timeout=30),
         # Straight to the collector, not _run_sc_status: that also appends to
         # the ScoreConnect config history, which is the interactive tab's job.
@@ -119,11 +133,19 @@ async def _collect_telemetry_extras(raw: dict, skip_intrusive: bool = False) -> 
         # cache (monitor_once.SLOW_COLLECTOR_TTLS), so most passes start no
         # PowerShell for it; no args, or the cache would not apply.
         engine.run_ps("Get-CalibrationStatus.ps1", timeout=15),
+        # PV-75. One registry read (6 h cache) and one NTP sample (1 h cache).
+        engine.run_ps("Get-WindowsUbr.ps1", timeout=10),
+        engine.run_ps("Test-NtpDrift.ps1", timeout=20),
+        _poe(),
         return_exceptions=True,
     )
-    raw.update(reboots=reboots if isinstance(reboots, dict) and not reboots.get("error") else None,
+
+    def ok(v):
+        return v if isinstance(v, dict) and not v.get("error") else None
+    raw.update(reboots=ok(reboots),
                scoreconnect=sc if isinstance(sc, dict) else None,
-               calibration=calib if isinstance(calib, dict) and not calib.get("error") else None)
+               calibration=ok(calib), ubr=ok(ubr), ntp=ok(ntp),
+               poe=poe if isinstance(poe, dict) else None)
 
 
 def _prefix_to_mask(prefix) -> Optional[str]:
@@ -279,13 +301,62 @@ def _services_down(services: dict, scoreboard: Optional[dict]) -> list:
     return down
 
 
+# Power events (PV-68). Get-RebootHistory already runs on every full pass
+# (30 min disk cache). Only labels leave the box: the source Pulse names
+# ("Windows Update", "Pulse (Reboot VPU)") and Windows' reason text. The
+# process path, the user (VPU\Pixellot carries the computer name), the
+# shutdown comment and the raw message stay out.
+_POWER_MAX_EVENTS = 20
+_POWER_MAX_REASONS = 5
+
+
+def _is_unexpected(h: dict) -> bool:
+    return h.get("category") == "unexpected" or h.get("eventId") in (41, 6008)
+
+
+def _power_stamp(v) -> Optional[str]:
+    """Like _calibration_stamp, and a task that never ran (Windows says
+    1999-11-30) is no time at all."""
+    t = _calibration_stamp(v)
+    return t if t and t >= "2000" else None
+
+
 def _telemetry_power(raw: dict) -> dict:
     rb = raw.get("reboots") or {}
-    hist = rb.get("history") or []
-    unexpected = [h for h in hist if h.get("category") == "unexpected" or h.get("eventId") in (41, 6008)]
-    return {"lastBoot": rb.get("lastBoot") or None,
-            # Power cuts and hard crashes, from Get-RebootHistory's 7-day window.
-            "unexpectedShutdowns7d": len(unexpected) if rb else None}
+    hist = [h for h in rb.get("history") or [] if isinstance(h, dict)]
+    unexpected = [h for h in hist if _is_unexpected(h)]
+    out = {"lastBoot": rb.get("lastBoot") or None,
+           # Power cuts and hard crashes, from Get-RebootHistory's 7-day window.
+           "unexpectedShutdowns7d": len(unexpected) if rb else None}
+    if not rb:
+        # Unread: the PV-68 fields stay out, as on an older agent, so a null
+        # `deviceInstallRebootLastRun` or an empty `events` is always an answer.
+        return out
+    ids = _hw_identifiers(raw.get("identity") or {}, {})
+    pend = rb.get("pending")
+    out["pendingReboot"] = {
+        "isPending": bool(pend.get("isPending")),
+        "reasons": [r for r in (_hw_str(x, ids) for x in pend.get("reasons") or []) if r][:_POWER_MAX_REASONS],
+    } if isinstance(pend, dict) else None
+    apl = rb.get("afterPowerLoss")
+    if isinstance(apl, dict) and _tel_str(apl.get("status")):
+        status = _tel_str(apl.get("status"))[:16]
+        # A value only when it was read: unknown never reads as "Power On".
+        out["afterPowerLoss"] = {"status": status,
+                                 "value": _hw_str(apl.get("value"), ids, 32) if status == "read" else None}
+    else:
+        out["afterPowerLoss"] = None
+    out["deviceInstallRebootLastRun"] = _power_stamp(rb.get("deviceInstallRebootTaskLastRun"))
+    rows = sorted(hist, key=lambda h: _calibration_stamp(h.get("time")) or "", reverse=True)
+    # Capped at 20, newest first; `unexpectedShutdowns7d` still counts them all.
+    out["events"] = [{
+        "time":       _calibration_stamp(h.get("time")),
+        "category":   "unexpected" if _is_unexpected(h) else "planned",
+        "byPulse":    bool(h.get("byPulse")),
+        "source":     _hw_str(h.get("source"), ids),
+        "reasonText": _hw_str(h.get("reasonText"), ids),
+    } for h in rows[:_POWER_MAX_EVENTS]]
+    return out
 
 
 # Calibration (PV-57). Static data, read through the monitor's 6 h disk cache:
@@ -478,15 +549,22 @@ def _hw_vram_mb(g: dict) -> Optional[int]:
 
 
 def _telemetry_hardware(raw: dict) -> Optional[dict]:
-    """The hardware block, or None when neither collector answered (a build
-    without PV-64 sends no block at all, which Vitals reads the same way)."""
+    """The hardware block, or None when none of its collectors answered (a
+    build without PV-64 sends no block at all, which Vitals reads the same
+    way). Disk space and drive health (PV-70, PV-74) come from Get-DiskHealth,
+    which the dashboard pass already runs (1 h disk cache in the monitor)."""
     identity = raw.get("identity")
     hardware = raw.get("hardware")
+    disk_health = raw.get("disk_health")
     ident_ok = isinstance(identity, dict) and not identity.get("error")
     hw_ok = isinstance(hardware, dict) and not hardware.get("error")
-    if not ident_ok and not hw_ok:
+    dh_ok = isinstance(disk_health, dict) and not disk_health.get("error")
+    if not ident_ok and not hw_ok and not dh_ok:
         return None
     ids = _hw_identifiers(identity if ident_ok else {}, hardware if hw_ok else {})
+    if dh_ok:
+        ids += [str(d.get("serialNumber")).strip().lower() for d in _rows(disk_health.get("physicalDisks"))
+                if d.get("serialNumber") is not None and len(str(d.get("serialNumber")).strip()) >= 4]
     out = {"model": None, "cpu": None, "memoryGb": None, "disks": None, "gpus": None, "bios": None}
 
     if ident_ok:
@@ -511,13 +589,362 @@ def _telemetry_hardware(raw: dict) -> Optional[dict]:
         out["memoryGb"] = int(round(ram)) if ram > 0 else None
         disks = sorted((d for d in hardware.get("diskDrives") or [] if isinstance(d, dict)),
                        key=lambda d: d.get("index") if isinstance(d.get("index"), int) else 1 << 30)
+        health = _drive_health_lookup(disk_health if dh_ok else None)
         out["disks"] = [{"model": _hw_str(d.get("model"), ids), "sizeGb": _hw_int(d.get("sizeGB")),
-                         "type": _hw_disk_type(d)} for d in disks][:_HW_MAX_DISKS]
+                         "type": _hw_disk_type(d), **health(d)} for d in disks][:_HW_MAX_DISKS]
         gpus = [g for g in hardware.get("gpus") or []
                 if isinstance(g, dict) and not _HW_GPU_SKIP.search(str(g.get("name") or ""))]
         out["gpus"] = [{"name": _hw_str(g.get("name"), ids), "driver": _hw_str(g.get("driverVersion"), ids, _HW_MAX_VERSION),
                         "vramMb": _hw_vram_mb(g)} for g in gpus][:_HW_MAX_GPUS]
+    out["volumes"] = _telemetry_volumes(disk_health if dh_ok else None)
+    pf = disk_health.get("predictFailure") if dh_ok else None
+    out["predictFailure"] = pf if isinstance(pf, bool) else None
     return out
+
+
+def _rows(v) -> list:
+    """A collector's list of objects; PowerShell unrolls a one-item array."""
+    if isinstance(v, dict):
+        v = [v]
+    return [r for r in v if isinstance(r, dict)] if isinstance(v, list) else []
+
+
+# ── Disk space per volume (PV-70) ───────────────────────────────────────────
+# Fixed local disks only (Get-DiskHealth reads DriveType 3), by letter. The
+# letter and two sizes, never the volume label: a tech may have typed a school
+# name into it. GiB with one decimal, the unit and precision of the collector's
+# usedPercent, so Vitals' percent and the 90% finding agree.
+_VOL_MAX = 8
+_VOL_LETTER = re.compile(r"^[A-Z]$")
+
+
+def _num(v) -> Optional[float]:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _telemetry_volumes(disk_health) -> Optional[list]:
+    """None when Get-DiskHealth failed or listed no volume: an empty list
+    would read as "no disks", which no running VPU has."""
+    if not isinstance(disk_health, dict):
+        return None
+    out = {}
+    for d in _rows(disk_health.get("logicalDisks")):
+        letter = str(d.get("deviceID") or "").strip().rstrip(":").upper()
+        size, free = _num(d.get("sizeGB")), _num(d.get("freeSpaceGB"))
+        if not _VOL_LETTER.match(letter) or letter in out or size is None or size <= 0 \
+                or free is None or not 0 <= free <= size:
+            continue
+        out[letter] = {"letter": letter, "sizeGb": round(size, 1), "freeGb": round(free, 1)}
+    rows = [out[k] for k in sorted(out)][:_VOL_MAX]
+    return rows or None
+
+
+# ── Drive health (PV-74) ─────────────────────────────────────────────────────
+# Per physical drive, from Get-DiskHealth's physicalDisks, matched to
+# Get-Hardware's drives by serial (which is used to match and never sent),
+# then by model. Unknown is null per field, never 0 or "Healthy": SMART isn't
+# readable on every drive (RAID, USB, some NVMe).
+_DRIVE_FIELDS = ("health", "wearPercent", "powerOnHours", "uncorrectedErrors")
+
+
+def _count(v) -> Optional[int]:
+    """A non-negative whole number, or None. 0 is a real reading here."""
+    n = _num(v)
+    return int(round(n)) if n is not None and n >= 0 else None
+
+
+def _drive_health(pd: Optional[dict]) -> dict:
+    if not pd:
+        return dict.fromkeys(_DRIVE_FIELDS)
+    smart = pd.get("smart") if isinstance(pd.get("smart"), dict) else {}
+    health = str(pd.get("healthStatus") or "").strip()
+    reads, writes = _count(smart.get("readErrorsUncorrected")), _count(smart.get("writeErrorsUncorrected"))
+    return {
+        # Windows' HealthStatus: Healthy, Warning or Unhealthy. "Unknown" is null.
+        "health":            health[:16] if health and health.lower() != "unknown" else None,
+        "wearPercent":       _count(smart.get("wearPercent")),
+        "powerOnHours":      _count(smart.get("powerOnHours")),
+        # Read plus write, the same sum the disk-smart-prefail finding reads.
+        "uncorrectedErrors": None if reads is None and writes is None else (reads or 0) + (writes or 0),
+    }
+
+
+def _drive_health_lookup(disk_health):
+    """A function from a Get-Hardware drive to its health fields."""
+    physical = _rows((disk_health or {}).get("physicalDisks")) if disk_health else []
+    key = lambda v: " ".join(str(v or "").split()).upper()
+    by_serial = {key(p.get("serialNumber")): p for p in physical if key(p.get("serialNumber"))}
+    by_model = {}
+    for p in physical:
+        by_model.setdefault(key(p.get("friendlyName")), []).append(p)
+
+    def lookup(d: dict) -> dict:
+        pd = by_serial.get(key(d.get("serialNumber"))) if key(d.get("serialNumber")) else None
+        if pd is None:
+            same = by_model.get(key(d.get("model"))) or []
+            pd = same[0] if len(same) == 1 else None   # two of one model: can't tell them apart
+        return _drive_health(pd)
+    return lookup
+
+
+# ── Camera card (PV-65) and its PoE power (PV-66) ───────────────────────────
+# The card is the adapters on the camera card's PCI bus (main.py's
+# _adapter_role: the motherboard port is bus 0 and often the same Intel chip).
+# The chip is a fact; the product name is a family, because nothing on the box
+# tells a GIE74 from a GIE74P (#239) or a GIE64 from a GIE64+. An unknown chip
+# is a null model, never a guess.
+_NIC_CHIPS = (("82574l", "82574L"), ("i210", "I210"), ("i211", "I211"), ("i350", "I350"),
+              ("i354", "I354"), ("82576", "82576"), ("82580", "82580"))
+_NIC_FAMILY = {"82574L": "GIE64 series", "I210": "GIE74 series", "I211": "GIE74 series",
+               "I350": "GIE74P-AN", "I354": "GIE74P-AN"}
+# Only the I210/I211 cards report PoE; the GIE64 and GIE74P-AN can't.
+_NIC_POE = {"I210": True, "I211": True, "82574L": False, "I350": False, "I354": False}
+_NIC_MAX_PORTS = 8
+
+
+def _nic_chip(desc) -> Optional[str]:
+    d = str(desc or "").lower()
+    return next((chip for needle, chip in _NIC_CHIPS if needle in d), None)
+
+
+def _camera_card(network_config) -> Optional[dict]:
+    """{model, chip, portCount, poeSupported}, or None when the adapters
+    couldn't be read or no camera-card port was placed."""
+    if not isinstance(network_config, dict) or network_config.get("error"):
+        return None
+    ports = [a for a in _rows(network_config.get("adapters")) if engine._adapter_role(a) == "camera"]
+    if not ports:
+        return None
+    chips = [_nic_chip(a.get("interfaceDescription")) for a in ports]
+    families = {}
+    for c in chips:
+        if c:
+            families.setdefault(_NIC_FAMILY.get(c, c), []).append(c)
+    if families:
+        # The card is the family most of the camera ports belong to.
+        family = max(families.values(), key=len)
+        chip, count = family[0], len(family)
+    else:
+        chip, count = None, len(ports)
+    return {"model": _NIC_FAMILY.get(chip), "chip": chip, "portCount": min(count, _NIC_MAX_PORTS),
+            "poeSupported": _NIC_POE.get(chip)}
+
+
+def _round(v, places: int) -> Optional[float]:
+    n = _num(v)
+    return round(n, places) if n is not None else None
+
+
+def _telemetry_poe(poe) -> Optional[dict]:
+    """What the card reported, or None when it didn't: not a PoE card, no
+    SmartPoE driver, the crash sentinel latched, or the read failed. Total is
+    what the card says its budget is; it drifts with consumed and remaining on
+    real hardware, so it is the card's figure, not its rating."""
+    if not isinstance(poe, dict) or poe.get("error") or not poe.get("supported") or not poe.get("available"):
+        return None
+    b = poe.get("budget") if isinstance(poe.get("budget"), dict) else None
+    if b is None:
+        return None
+    temp = _num(b.get("tempC"))
+    ports = []
+    for p in _rows(poe.get("ports"))[:_NIC_MAX_PORTS]:
+        n = _count(p.get("port"))
+        if n is None:
+            continue
+        read = p.get("readOk") is not False
+        ports.append({"port": n, "on": bool(p.get("poeOn")) if read else None,
+                      "volts": _round(p.get("voltage"), 1) if read else None,
+                      "amps": _round(p.get("current"), 3) if read else None,
+                      "watts": _round(p.get("watts"), 1) if read else None})
+    return {"budget": {"totalW": _round(b.get("totalW"), 1), "consumedW": _round(b.get("consumedW"), 1),
+                       "remainingW": _round(b.get("remainingW"), 1),
+                       # The collector writes 0 when the temperature read failed.
+                       "tempC": round(temp) if temp and temp > 0 else None},
+            # The Molex lead: the same flag the poe-underpowered finding reads.
+            "underPowered": bool(b.get("underPowered")),
+            "ports": ports}
+
+
+def _telemetry_nic(raw: dict) -> Optional[dict]:
+    card = _camera_card(raw.get("network_config"))
+    if card is None:
+        return None
+    card["poe"] = _telemetry_poe(raw.get("poe")) if card["poeSupported"] else None
+    return card
+
+
+# ── Streaming components and installed applications (PV-71) ─────────────────
+# `services` states each component outright, so Vitals stops reading "not in
+# servicesDown" as Running. `servicesDown` keeps its v1 meaning beside it.
+_SERVICE_ORDER = ("agent", "coordinator", "keepagentup", "vpu", "scoreconnect")
+_SERVICE_STATE = {"running": "running", "stopped": "stopped", "notfound": "not-installed"}
+_APPS_MAX = 150
+_APP_NAME_MAX, _APP_VERSION_MAX, _APP_PUBLISHER_MAX = 80, 32, 40
+
+
+def _service_key(name: str) -> str:
+    k = re.sub(r"[^a-z0-9]", "", str(name).lower())
+    return "scoreconnect" if k.startswith("scoreconnect") else k
+
+
+def _telemetry_services(services: dict) -> Optional[list]:
+    """None when Get-Services didn't answer. A component it didn't list is
+    "unknown"; LogMeIn (remote support) is added when it is listed."""
+    if not services:
+        return None
+    states = {}
+    for name, st in services.items():
+        key = _service_key(name)
+        st = _SERVICE_STATE.get(str(st or "").lower(), "unknown")
+        # A running instance wins (an SC I/II leftover can sit beside SC III).
+        if states.get(key) != "running":
+            states[key] = st
+    out = [{"name": k, "state": states.get(k, "unknown")} for k in _SERVICE_ORDER]
+    if "logmein" in states:
+        out.append({"name": "logmein", "state": states["logmein"]})
+    return out
+
+
+def _telemetry_applications(raw: dict) -> Optional[list]:
+    """Everything installed, Pixellot first, then by name. Names, versions
+    and publishers only: no install paths, dates or keys. None when the read
+    failed or listed nothing (no Windows box has nothing installed)."""
+    sw = raw.get("installed_sw")
+    if not isinstance(sw, dict) or sw.get("error"):
+        return None
+    ids = _hw_identifiers(raw.get("identity") or {}, {})
+    seen, out = set(), []
+    for a in _rows(sw.get("software")):
+        name = _hw_str(a.get("displayName"), ids, _APP_NAME_MAX)
+        if not name:
+            continue
+        row = {"name": name, "version": _hw_str(a.get("displayVersion"), ids, _APP_VERSION_MAX),
+               "publisher": _hw_str(a.get("publisher"), ids, _APP_PUBLISHER_MAX)}
+        k = (name.lower(), row["version"])
+        if k not in seen:
+            seen.add(k)
+            out.append(row)
+    pix = lambda r: "pixellot" in f"{r['name']} {r['publisher'] or ''}".lower()
+    out.sort(key=lambda r: (not pix(r), r["name"].lower(), r["version"] or ""))
+    # Uncapped here: _build_telemetry caps it, and counts what it left out.
+    return out or None
+
+
+# ── Can Pixellot's programs start (PV-76) ───────────────────────────────────
+# Test-PixellotBinaries already runs on every dashboard pass. `canStart` is
+# the rule _binary_findings blocks the stream on: a library missing now, or a
+# loader-error pop-up within START_ERROR_LIVE_SECONDS (or a VPU.exe stuck on
+# one). An older pop-up is the finding's warning or info, not "can't start".
+_PROGRAM_MAX_MISSING = 5
+_PROGRAM_DLL_MAX = 40
+
+
+def _telemetry_programs(raw: dict) -> Optional[list]:
+    b = raw.get("binaries")
+    if not isinstance(b, dict) or b.get("error"):
+        return None
+    now = engine._ps_time(b.get("now"))
+    stuck = any(p.get("stuckOnLoaderError") for p in _rows(b.get("vpuProcesses")))
+    popups = [p for p in _rows(b.get("popups")) if p.get("count")]
+    out = []
+    for e in _rows(b.get("exes")):
+        name = _tel_str(e.get("name"))
+        if not name:
+            continue
+        mine = [p for p in popups if str(p.get("exe") or "").lower() == name.lower()]
+        lasts = [t for t in (engine._ps_time(p.get("last")) for p in mine) if t]
+        last = max(lasts) if lasts else None
+        missing = []
+        for m in _rows(e.get("missing")):
+            dll = _tel_str(m.get("dll"))
+            if dll and dll[:_PROGRAM_DLL_MAX] not in missing:
+                missing.append(dll[:_PROGRAM_DLL_MAX])
+        if not e.get("present") or e.get("readable") is False or not e.get("scanned"):
+            can = None   # not there, or couldn't be scanned: unknown, never true
+        elif missing:
+            can = False
+        else:
+            live = last is not None and now is not None and (now - last).total_seconds() <= engine.START_ERROR_LIVE_SECONDS
+            can = not (live or (stuck and name.lower() == "vpu.exe" and mine))
+        out.append({"name": name, "canStart": can, "missing": missing[:_PROGRAM_MAX_MISSING],
+                    "loaderErrors": {"count": sum(_count(p.get("count")) or 0 for p in mine),
+                                     "last": _calibration_stamp(last.isoformat()) if last else None}
+                                    if mine else None})
+    return out or None
+
+
+# ── Windows, time zone and clock (PV-75) ────────────────────────────────────
+# The OS and time zone come from Get-SystemIdentity (every pass) and the patch
+# level from Get-WindowsUbr (6 h cache); clock drift from Test-NtpDrift (1 h
+# cache), the same read the Network page shows. `timeZone.us` is the function
+# the tz-non-us blocker uses, so the tab and the verdict can't disagree. No
+# hostname, user or domain.
+_CLOCK_STATUS = {"ok", "warn", "fail"}
+
+
+def _telemetry_environment(raw: dict) -> Optional[dict]:
+    identity, ubr, ntp = raw.get("identity"), raw.get("ubr"), raw.get("ntp")
+    ident_ok = isinstance(identity, dict) and not identity.get("error")
+    ubr_ok = isinstance(ubr, dict) and not ubr.get("error")
+    ids = _hw_identifiers(identity if ident_ok else {}, {})
+    os_ = identity.get("operatingSystem") or {} if ident_ok else {}
+    build = re.sub(r"\D", "", str(os_.get("buildNumber") or (ubr.get("currentBuild") if ubr_ok else "") or ""))[:8] or None
+    patch = _count(ubr.get("ubr")) if ubr_ok and (not build or str(ubr.get("currentBuild") or build) == build) else None
+    name = _hw_str(re.sub(r"^Microsoft\s+", "", str(os_.get("caption") or "")), ids)
+    os_out = {"name": name, "build": build, "ubr": patch} if (name or build) else None
+    tz_out = None
+    if ident_ok:
+        tz_id, tz_cap = str(identity.get("timezoneId") or ""), str(identity.get("timezone") or "")
+        if tz_id or tz_cap:
+            tz_out = {"caption": _tel_str(tz_cap or tz_id), "us": engine._is_us_timezone(tz_id, tz_cap)}
+    clock = None
+    if isinstance(ntp, dict) and not ntp.get("error"):
+        st = str(ntp.get("status") or "").lower()
+        synced = ntp.get("networkSynced")
+        clock = {"offsetSeconds": _round(ntp.get("offsetSeconds"), 3),
+                 "status": st if st in _CLOCK_STATUS else None,
+                 "source": _hw_str(ntp.get("source"), ids),
+                 "synced": synced if isinstance(synced, bool) else None}
+    if os_out is None and tz_out is None and clock is None:
+        return None
+    return {"os": os_out, "timeZone": tz_out, "clock": clock}
+
+
+# The check-in Worker drops a telemetry document over 16 KB whole
+# (MAX_TELEMETRY_BYTES in tools/checkin-worker/src/ingest.js), and the unit
+# then reads as reporting nothing. 15 KB leaves room for the Worker's own
+# JSON.stringify, which is never larger than this compact, ASCII-escaped form.
+_TELEMETRY_MAX_BYTES = 15 * 1024
+
+
+def _telemetry_bytes(t: dict) -> int:
+    return len(json.dumps(t, separators=(",", ":"), default=str).encode("utf-8"))
+
+
+def _fit_telemetry(t: dict) -> dict:
+    """Keep the document under the Worker's cap by cutting the two long lists
+    from their ends: the installed applications (Pixellot's come first, so
+    they stay), then the oldest restart rows. `applicationsTotal` still says
+    how many there were. Anything else over the cap is left for the Worker
+    to refuse, as before."""
+    for path in (("applications",), ("power", "events")):
+        if _telemetry_bytes(t) <= _TELEMETRY_MAX_BYTES:
+            break
+        parent = t if len(path) == 1 else t.get(path[0])
+        rows = parent.get(path[-1]) if isinstance(parent, dict) else None
+        if not isinstance(rows, list) or not rows:
+            continue
+        lo, hi = 0, len(rows)          # the most rows that fit
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            parent[path[-1]] = rows[:mid]
+            if _telemetry_bytes(t) <= _TELEMETRY_MAX_BYTES:
+                lo = mid
+            else:
+                hi = mid - 1
+        # An application list cut to nothing would read as "none installed".
+        parent[path[-1]] = rows[:lo] if lo or path[-1] == "events" else None
+    return t
 
 
 def _build_telemetry(dashboard: dict, raw: dict, status_since: Optional[str] = None,
@@ -547,11 +974,12 @@ def _build_telemetry(dashboard: dict, raw: dict, status_since: Optional[str] = N
     scoreboard = _telemetry_scoreboard(raw)
     adapters = _telemetry_adapters(raw.get("network_config"),
                                    (net.get("uplinkAdapter") or {}).get("interfaceAlias"))
+    apps = _telemetry_applications(raw)
     inet = next((a for a in adapters or [] if a.get("internet")), None)
     if inet:
         inet = {k: inet.get(k) for k in ("adapter", "mac", "ip", "subnetMask", "gateway",
                                          "dns1", "dns2", "dhcp")}
-    return {
+    return _fit_telemetry({
         "schema":          _TELEMETRY_SCHEMA,
         "status":          status or verdict.get("status"),
         "statusSince":     status_since,
@@ -572,13 +1000,49 @@ def _build_telemetry(dashboard: dict, raw: dict, status_since: Optional[str] = N
             "detected":   cameras.get("detected"),
             "slow":       sum(1 for p in cameras.get("ports") or [] if p.get("slow")),
             "ports":      cameras.get("ports"),
+            "nic":        _telemetry_nic(raw),
         },
         "servicesDown": _services_down(services, scoreboard) if services else None,
+        "services":     _telemetry_services(services),
+        "applications": apps[:_APPS_MAX] if apps else None,
+        "applicationsTotal": len(apps) if apps else None,
+        "programs":     _telemetry_programs(raw),
         "scoreboard":   scoreboard,
         "power":        _telemetry_power(raw),
         "calibration":  _telemetry_calibration(raw),
         "hardware":     _telemetry_hardware(raw),
-    }
+        "environment":  _telemetry_environment(raw),
+    })
+
+
+def _fingerprint_view(t: dict) -> dict:
+    """The payload as the post rules compare it. Readings that move on every
+    read are coarsened, or a healthy unit would post in full every pass:
+    clock drift to whole seconds, disk space to whole percent used, PoE to each
+    port on or off, and a drive's power-on hours not at all. The post itself
+    carries the exact values."""
+    t = dict(t)
+    env = t.get("environment")
+    if isinstance(env, dict) and isinstance(env.get("clock"), dict):
+        off = env["clock"].get("offsetSeconds")
+        t["environment"] = {**env, "clock": {**env["clock"], "offsetSeconds": None if off is None else round(off)}}
+    hw = t.get("hardware")
+    if isinstance(hw, dict):
+        hw = dict(hw)
+        if isinstance(hw.get("volumes"), list):
+            hw["volumes"] = [[v["letter"], round(100 * (v["sizeGb"] - v["freeGb"]) / v["sizeGb"])]
+                             for v in hw["volumes"]]
+        if isinstance(hw.get("disks"), list):
+            hw["disks"] = [{k: v for k, v in d.items() if k != "powerOnHours"} for d in hw["disks"]]
+        t["hardware"] = hw
+    cams = t.get("cameras")
+    nic = cams.get("nic") if isinstance(cams, dict) else None
+    if isinstance(nic, dict) and isinstance(nic.get("poe"), dict):
+        poe = nic["poe"]
+        t["cameras"] = {**cams, "nic": {**nic, "poe": {
+            "underPowered": poe.get("underPowered"),
+            "ports": [[p.get("port"), p.get("on")] for p in poe.get("ports") or []]}}}
+    return t
 
 
 def _telemetry_fingerprint(telemetry: dict, open_codes) -> str:
@@ -586,6 +1050,6 @@ def _telemetry_fingerprint(telemetry: dict, open_codes) -> str:
     payload except when it was measured, plus the open blocker/risk codes (a
     risk opening may not move any payload field). A change posts at once."""
     import hashlib
-    t = {k: v for k, v in (telemetry or {}).items() if k not in ("checkedAt", "statusSince")}
+    t = {k: v for k, v in _fingerprint_view(telemetry or {}).items() if k not in ("checkedAt", "statusSince")}
     body = json.dumps({"t": t, "open": sorted(open_codes or [])}, sort_keys=True, default=str)
     return hashlib.sha1(body.encode("utf-8")).hexdigest()

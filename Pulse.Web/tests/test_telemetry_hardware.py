@@ -17,7 +17,9 @@ import powershell  # noqa: E402
 from pulse_agent import telemetry as agent_telemetry  # noqa: E402
 
 hw_block = agent_telemetry._telemetry_hardware
-KEYS = {"model", "cpu", "memoryGb", "disks", "gpus", "bios"}
+KEYS = {"model", "cpu", "memoryGb", "disks", "gpus", "bios", "volumes", "predictFailure"}
+# PV-74: every disk carries its health fields, null when Get-DiskHealth gave none.
+NO_HEALTH = {"health": None, "wearPercent": None, "powerOnHours": None, "uncorrectedErrors": None}
 BIOS_SERIAL = "CZC9QX7LMN"
 DISK_SERIAL = "Z9K1ABCDEFGH"
 HOSTNAME = "PXLS2-55555"
@@ -71,11 +73,12 @@ class TestHardwareBlock(unittest.TestCase):
             "model": "HP EliteDesk 800 G4 WKS TWR",
             "cpu": {"name": "Intel(R) Core(TM) i5-8500 CPU @ 3.00GHz", "cores": 6, "threads": 6},
             "memoryGb": 32,
-            "disks": [{"model": "TOSHIBA DT01ACA100", "sizeGb": 932, "type": "HDD"}],
+            "disks": [{"model": "TOSHIBA DT01ACA100", "sizeGb": 932, "type": "HDD", **NO_HEALTH}],
             "gpus": [{"name": "NVIDIA GeForce GTX 1650", "driver": "32.0.15.7628", "vramMb": 4096},
                      {"name": "Intel(R) UHD Graphics 630", "driver": "24.20.100.6136", "vramMb": 1024}],
             # The collector prints UTC midnight as local time: 04-22 20:00 ET is 04-23.
             "bios": {"version": "Q01 Ver. 02.07.01", "date": "2019-04-23"},
+            "volumes": None, "predictFailure": None,
         })
 
     def test_laptop(self):
@@ -83,7 +86,7 @@ class TestHardwareBlock(unittest.TestCase):
         self.assertEqual(h["model"], "HP ZBook Fury 15 G8 Mobile Workstation PC")
         self.assertEqual((h["cpu"]["cores"], h["cpu"]["threads"]), (8, 16))
         self.assertEqual([g["name"] for g in h["gpus"]], ["Intel(R) UHD Graphics", "NVIDIA RTX A2000 Laptop GPU"])
-        self.assertEqual(h["disks"], [{"model": "SAMSUNG MZVL2512HCJQ-00BH1", "sizeGb": 477, "type": "NVMe"}])
+        self.assertEqual(h["disks"], [{"model": "SAMSUNG MZVL2512HCJQ-00BH1", "sizeGb": 477, "type": "NVMe", **NO_HEALTH}])
 
     def test_demo_pass(self):
         powershell._PS_SEMAPHORE = None
@@ -142,7 +145,7 @@ class TestHardwareBlock(unittest.TestCase):
         self.assertIsNone(h["bios"])
         self.assertEqual(h["cpu"], {"name": "Some CPU", "cores": None, "threads": None})
         self.assertIsNone(h["gpus"][0]["vramMb"])          # 4095 is the 32-bit ceiling, not a size
-        self.assertEqual(h["disks"], [{"model": "Old disk", "sizeGb": None, "type": None}])
+        self.assertEqual(h["disks"], [{"model": "Old disk", "sizeGb": None, "type": None, **NO_HEALTH}])
 
     def test_no_gpu_is_an_empty_list_not_unknown(self):
         raw = desktop()
@@ -170,11 +173,11 @@ class TestHardwareBlock(unittest.TestCase):
             {"index": 4, "model": "Unknown media", "sizeGB": 100, "interfaceType": "SATA"},
         ]
         self.assertEqual(hw_block(raw)["disks"], [
-            {"model": "Samsung SSD 970 EVO 1TB", "sizeGb": 932, "type": "NVMe"},
-            {"model": "Samsung SSD 870 EVO 500GB", "sizeGb": 466, "type": "SSD"},
-            {"model": "SanDisk Cruzer", "sizeGb": 29, "type": "USB"},
-            {"model": "WDC WD40EFRX", "sizeGb": 3726, "type": "HDD"},
-            {"model": "Unknown media", "sizeGb": 100, "type": "SATA"},
+            {"model": "Samsung SSD 970 EVO 1TB", "sizeGb": 932, "type": "NVMe", **NO_HEALTH},
+            {"model": "Samsung SSD 870 EVO 500GB", "sizeGb": 466, "type": "SSD", **NO_HEALTH},
+            {"model": "SanDisk Cruzer", "sizeGb": 29, "type": "USB", **NO_HEALTH},
+            {"model": "WDC WD40EFRX", "sizeGb": 3726, "type": "HDD", **NO_HEALTH},
+            {"model": "Unknown media", "sizeGb": 100, "type": "SATA", **NO_HEALTH},
         ])
 
     # ── Caps and size ────────────────────────────────────────────────────────
@@ -200,10 +203,11 @@ class TestHardwareBlock(unittest.TestCase):
         self.assertTrue(all(len(s) == 32 for s in versions))
         self.assertEqual(h["cpu"]["cores"], 128)            # two sockets summed
 
-    def test_worst_case_under_2_kb(self):
+    def test_worst_case_under_3_kb(self):
         # Python's default separators: larger than the Worker's JSON.stringify.
+        # Was 2 KB before drive health (PV-74) put four fields on each of 8 disks.
         size = len(json.dumps(hw_block(self.worst_case())).encode("utf-8"))
-        self.assertLess(size, 2048, size)
+        self.assertLess(size, 3072, size)
 
     def test_typical_unit_is_small(self):
         self.assertLess(len(json.dumps(hw_block(desktop())).encode("utf-8")), 800)
@@ -241,7 +245,7 @@ class TestHardwareBlock(unittest.TestCase):
         self.assertEqual(set(h), KEYS)
         self.assertEqual(set(h["cpu"]), {"name", "cores", "threads"})
         self.assertEqual(set(h["bios"]), {"version", "date"})
-        self.assertTrue(all(set(d) == {"model", "sizeGb", "type"} for d in h["disks"]))
+        self.assertTrue(all(set(d) == {"model", "sizeGb", "type", *NO_HEALTH} for d in h["disks"]))
         self.assertTrue(all(set(g) == {"name", "driver", "vramMb"} for g in h["gpus"]))
 
     def test_bios_dates(self):

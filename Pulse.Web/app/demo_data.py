@@ -1175,6 +1175,7 @@ DEMO = {
             "at": (datetime.now().astimezone() - timedelta(days=57, hours=-1)).replace(microsecond=0).isoformat(),
         },
     },
+    # Times carry the offset, as the collector's ToString('o') writes them.
     "Get-RebootHistory.ps1": lambda **kw: {
         "pending": {
             "isPending": True,
@@ -1186,22 +1187,22 @@ DEMO = {
             "options": ["Power Off", "Power On", "Previous State"],
             "manufacturer": "HP", "model": "HP EliteDesk 800 G4 WKS TWR", "message": None,
         },
-        "lastBoot": (datetime.now() - timedelta(minutes=25)).isoformat(),
+        "lastBoot": (datetime.now().astimezone() - timedelta(minutes=25)).isoformat(),
         "uptime": "0d 0h 25m",
         # The PnP task that reboots after a driver install flags reboot-required
         # — fired ~28 min ago, the "unprovoked restart shortly after logon".
-        "deviceInstallRebootTaskLastRun": (datetime.now() - timedelta(minutes=28)).isoformat(),
+        "deviceInstallRebootTaskLastRun": (datetime.now().astimezone() - timedelta(minutes=28)).isoformat(),
         "count": 4,
         "history": [
             # External planned restart — empty comment proves it was NOT Pulse.
-            {"time": (datetime.now() - timedelta(minutes=28)).isoformat(), "eventId": 1074,
+            {"time": (datetime.now().astimezone() - timedelta(minutes=28)).isoformat(), "eventId": 1074,
              "kind": "restart", "category": "planned",
              "process": "C:\\Windows\\system32\\shutdown.exe (VPU)", "user": "VPU\\Pixellot",
              "reasonCode": "0x800000ff", "reasonText": "Reason not recorded by Windows",
              "comment": "", "byPulse": False, "source": "Planned - external",
              "message": "The process C:\\Windows\\system32\\shutdown.exe (VPU) has initiated the restart of computer VPU on behalf of user VPU\\Pixellot ... Reason Code: 0x800000ff  Shutdown Type: restart  Comment:"},
             # Pulse-initiated reboot — stamped comment, positively attributed.
-            {"time": (datetime.now() - timedelta(days=2)).isoformat(), "eventId": 1074,
+            {"time": (datetime.now().astimezone() - timedelta(days=2)).isoformat(), "eventId": 1074,
              "kind": "restart", "category": "planned",
              "process": "C:\\Windows\\system32\\shutdown.exe (VPU)", "user": "VPU\\Pixellot",
              "reasonCode": "0x80040002", "reasonText": "Other (Planned)",
@@ -1209,14 +1210,14 @@ DEMO = {
              "source": "Pulse (Reboot VPU)",
              "message": "The process C:\\Windows\\system32\\shutdown.exe (VPU) has initiated the restart ... Comment: Reboot requested from Pulse diagnostics"},
             # Windows Update restart.
-            {"time": (datetime.now() - timedelta(days=4)).isoformat(), "eventId": 1074,
+            {"time": (datetime.now().astimezone() - timedelta(days=4)).isoformat(), "eventId": 1074,
              "kind": "restart", "category": "planned",
              "process": "C:\\Windows\\system32\\MusNotification.exe", "user": "NT AUTHORITY\\SYSTEM",
              "reasonCode": "0x80020002", "reasonText": "Operating System: Recovery (Planned)",
              "comment": "", "byPulse": False, "source": "Windows Update",
              "message": "The process MusNotification.exe has initiated the restart ... Operating System: Recovery (Planned)"},
             # Unexpected loss (power blip / hard crash).
-            {"time": (datetime.now() - timedelta(days=6)).isoformat(), "eventId": 41,
+            {"time": (datetime.now().astimezone() - timedelta(days=6)).isoformat(), "eventId": 41,
              "kind": "unexpected", "category": "unexpected",
              "process": "", "user": "", "reasonCode": "", "reasonText": "",
              "comment": "", "byPulse": False,
