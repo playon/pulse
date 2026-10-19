@@ -1,7 +1,8 @@
-"""pulse.telemetry/v1 blocks for Vitals' unit tabs (PV-65, PV-66, PV-68, PV-70,
-PV-71, PV-74, PV-75, PV-76): the camera card and its PoE, power events, disk
-space, drive health, streaming components, installed applications, whether
-Pixellot's programs can start, and the Windows build, time zone and clock.
+"""pulse.telemetry/v1 blocks for Vitals' unit tabs (PV-65, PV-68, PV-70, PV-71,
+PV-74, PV-75, PV-76): the camera card, power events, disk space, drive health,
+streaming components, installed applications, whether Pixellot's programs can
+start, and the Windows build, time zone and clock. The card's PoE read (PV-66)
+waits for its own PR.
 
 Unknown is null throughout, never a healthy-looking default."""
 
@@ -36,7 +37,7 @@ def fp(t):
     return T._telemetry_fingerprint(t, [])
 
 
-# ── Camera card (PV-65) and PoE (PV-66) ──────────────────────────────────────
+# ── Camera card (PV-65) ──────────────────────────────────────────────────────
 
 def adapter(name, desc, bus):
     return {"name": name, "interfaceDescription": desc, "physicalMediaType": "802.3", "pciBus": bus}
@@ -50,36 +51,19 @@ def network(card_desc="Intel(R) I210 Gigabit Network Connection", ports=4, onboa
     return {"adapters": adapters}
 
 
-def poe_read(**budget):
-    return {"supported": True, "available": True, "nicModel": "I210",
-            "budget": {"totalW": 59.64, "consumedW": 11.62, "remainingW": 48.02, "tempC": 46.4,
-                       "underPowered": False, "healthyFloorW": 55, **budget},
-            "ports": [{"port": 1, "voltage": 54.709, "current": 0.1061, "watts": 5.81, "poeOn": True, "readOk": True},
-                      {"port": 2, "voltage": 54.149, "current": 0.1, "watts": 5.41, "poeOn": True, "readOk": True},
-                      {"port": 3, "voltage": 0.187, "current": 0, "watts": 0, "poeOn": False, "readOk": True},
-                      {"port": 4, "voltage": 0, "current": 0, "watts": 0, "poeOn": False, "readOk": False,
-                       "state": "Unreadable"}]}
-
-
 class TestCameraCard(unittest.TestCase):
-    def test_gie74_with_poe(self):
-        nic = build({"network_config": network(), "poe": poe_read()})["cameras"]["nic"]
-        self.assertEqual({k: nic[k] for k in ("model", "chip", "portCount", "poeSupported")},
-                         {"model": "GIE74 series", "chip": "I210", "portCount": 4, "poeSupported": True})
-        self.assertEqual(nic["poe"]["budget"], {"totalW": 59.6, "consumedW": 11.6, "remainingW": 48.0, "tempC": 46})
-        self.assertFalse(nic["poe"]["underPowered"])
-        self.assertEqual(nic["poe"]["ports"][0], {"port": 1, "on": True, "volts": 54.7, "amps": 0.106, "watts": 5.8})
-        self.assertEqual(nic["poe"]["ports"][2]["on"], False)
-        # A port the card couldn't read is unknown, not off.
-        self.assertEqual(nic["poe"]["ports"][3], {"port": 4, "on": None, "volts": None, "amps": None, "watts": None})
+    def test_gie74(self):
+        nic = build({"network_config": network()})["cameras"]["nic"]
+        # No `poe` key at all: the read isn't sent yet (PV-66), which is not
+        # the same as a read that failed.
+        self.assertEqual(nic, {"model": "GIE74 series", "chip": "I210", "portCount": 4, "poeSupported": True})
 
     def test_the_onboard_port_is_not_a_card_port(self):
         self.assertEqual(T._camera_card(network(ports=4))["portCount"], 4)
 
     def test_gie64_reports_no_poe(self):
-        nic = build({"network_config": network("Intel(R) 82574L Gigabit Network Connection"),
-                     "poe": poe_read()})["cameras"]["nic"]
-        self.assertEqual((nic["model"], nic["chip"], nic["poeSupported"], nic["poe"]), ("GIE64 series", "82574L", False, None))
+        nic = build({"network_config": network("Intel(R) 82574L Gigabit Network Connection")})["cameras"]["nic"]
+        self.assertEqual(nic, {"model": "GIE64 series", "chip": "82574L", "portCount": 4, "poeSupported": False})
 
     def test_gie74p_an(self):
         nic = T._camera_card(network("Intel(R) I350 Gigabit Network Connection"))
@@ -94,22 +78,7 @@ class TestCameraCard(unittest.TestCase):
         self.assertIsNone(build({"network_config": {"error": True}})["cameras"]["nic"])
         self.assertIsNone(build({"network_config": network(ports=0)})["cameras"]["nic"])
 
-    def test_a_poe_card_whose_read_failed_says_supported_with_no_figures(self):
-        for poe in (None, {"error": True}, {"supported": True, "available": False, "reason": "no SmartPoE.dll"},
-                    {"supported": True, "available": False, "reason": "crashed 3 times"}):
-            nic = build({"network_config": network(), "poe": poe})["cameras"]["nic"]
-            self.assertTrue(nic["poeSupported"])
-            self.assertIsNone(nic["poe"])
-
-    def test_temperature_zero_is_unknown(self):
-        nic = build({"network_config": network(), "poe": poe_read(tempC=0)})["cameras"]["nic"]
-        self.assertIsNone(nic["poe"]["budget"]["tempC"])
-
-    def test_under_powered_card(self):
-        nic = build({"network_config": network(), "poe": poe_read(underPowered=True, totalW=20.1)})["cameras"]["nic"]
-        self.assertTrue(nic["poe"]["underPowered"])
-
-    def test_the_monitor_loads_smartpoe_only_for_a_card_that_reports_poe(self):
+    def test_the_monitor_never_loads_smartpoe(self):
         ran = []
 
         async def fake(script, *a, **k):
@@ -118,22 +87,14 @@ class TestCameraCard(unittest.TestCase):
         saved = main.run_ps
         main.run_ps = fake
         try:
-            for net, want in ((network(), True), (network("Intel(R) 82574L"), False),
-                              (network("Intel(R) I350"), False), (None, False)):
+            for net in (network(), network("Intel(R) 82574L"), network("Intel(R) I350"), None):
                 ran.clear()
-                asyncio.run(T._collect_telemetry_extras({"network_config": net}))
-                self.assertEqual("Get-PoePower.ps1" in ran, want, net and net["adapters"][1])
+                raw = {"network_config": net}
+                asyncio.run(T._collect_telemetry_extras(raw))
+                self.assertNotIn("Get-PoePower.ps1", ran, net and net["adapters"][1])
+                self.assertNotIn("poe", raw)
         finally:
             main.run_ps = saved
-
-    def test_poe_readings_move_the_fingerprint_only_when_a_port_turns_on_or_off(self):
-        base = build({"network_config": network(), "poe": poe_read()})
-        jitter = poe_read(consumedW=12.9, remainingW=46.7, tempC=48)
-        jitter["ports"][0].update(current=0.12, watts=6.6)
-        self.assertEqual(fp(build({"network_config": network(), "poe": jitter})), fp(base))
-        off = poe_read()
-        off["ports"][1].update(poeOn=False, watts=0)
-        self.assertNotEqual(fp(build({"network_config": network(), "poe": off})), fp(base))
 
 
 # ── Power events (PV-68) ─────────────────────────────────────────────────────
@@ -536,7 +497,6 @@ class TestMonitorAndSize(unittest.TestCase):
         ttl = monitor_once.SLOW_COLLECTOR_TTLS
         self.assertGreaterEqual(ttl.get("Get-WindowsUbr.ps1", 0), 3600)
         self.assertGreaterEqual(ttl.get("Test-NtpDrift.ps1", 0), 3600)
-        self.assertGreaterEqual(ttl.get("Get-PoePower.ps1", 0), 3600)
 
     def test_the_dashboard_hands_the_monitor_what_these_blocks_read(self):
         powershell._PS_SEMAPHORE = None
@@ -547,7 +507,7 @@ class TestMonitorAndSize(unittest.TestCase):
 
     def worst(self):
         long = "X" * 300
-        raw = {"identity": IDENTITY, "network_config": network(), "poe": poe_read(), "ubr": UBR, "ntp": NTP,
+        raw = {"identity": IDENTITY, "network_config": network(), "ubr": UBR, "ntp": NTP,
                "reboots": reboots([dict(restart(1 + i % 28), source=long, reasonText=long) for i in range(40)]),
                "disk_health": disk_health(volumes=[{"deviceID": f"{chr(67 + i)}:", "freeSpaceGB": 1.0,
                                                     "sizeGB": 99999.0} for i in range(12)]),
@@ -580,7 +540,7 @@ class TestMonitorAndSize(unittest.TestCase):
         t = T._build_telemetry(dash, raw)
         for key in ("services", "applications", "programs", "environment"):
             self.assertIsNotNone(t[key], key)
-        self.assertIsNotNone(t["cameras"]["nic"]["poe"])
+        self.assertNotIn("poe", t["cameras"]["nic"])
         self.assertIsNotNone(t["environment"]["clock"])
         self.assertTrue(all(e["time"] for e in t["power"]["events"]))
 

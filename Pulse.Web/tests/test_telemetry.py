@@ -88,9 +88,10 @@ class TestBuildTelemetry(unittest.TestCase):
         # Ian, 2026-10-13: no hostname, serial, or separate camera-MAC list;
         # troubleshooting detail waits for a later tier.
         text = json.dumps(self.t)
-        # PoE (PV-66) and clock drift (PV-75) came back as their own blocks.
+        # Clock drift came back as its own block (PV-75). PoE waits for its
+        # own PR (PV-66).
         for gone in ("hostname", "serialNumber", "camera_macs", "cameraMacs", '"findings"',
-                     "clockOffset", "recentRecordings", '"adapters"'):
+                     "clockOffset", '"poe"', "recentRecordings", '"adapters"'):
             self.assertNotIn(gone, text)
         # GPUs and disks came back with the hardware inventory (PV-64), and
         # only there: tests/test_telemetry_hardware.py.

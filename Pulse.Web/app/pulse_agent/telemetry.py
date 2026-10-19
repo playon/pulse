@@ -20,10 +20,11 @@ from pulse_agent.engine import engine
 # services down, scoreboard source, boots and power loss, versions). Oracle
 # already shows Pixellot's own live metrics (CPU, bandwidth, dark court), so
 # this carries what Pixellot can't see from outside the box. The hardware
-# inventory came with PV-64; the camera card and PoE, restart history, disk
-# space and health, components, applications, programs and the Windows/clock
-# environment with PV-65 to PV-76, for Vitals' unit tabs. The full findings
-# copy and recordings are still left out. Kept small on purpose: Unity writes
+# inventory came with PV-64; the camera card, restart history, disk space and
+# health, components, applications, programs and the Windows/clock environment
+# with PV-65 to PV-76, for Vitals' unit tabs. The full findings copy,
+# recordings and the card's PoE read (PV-66, its own PR after a GIE74 soak) are
+# still left out. Kept small on purpose: Unity writes
 # must be, and the check-in Worker drops a document over 16 KB
 # (_fit_telemetry). Leaves out hostname, BIOS serial, disk serials and camera
 # serials.
@@ -107,23 +108,14 @@ def _telemetry_cameras(raw: dict) -> dict:
 
 async def _collect_telemetry_extras(raw: dict, skip_intrusive: bool = False) -> None:
     """Collectors the telemetry needs beyond the dashboard pass: boots and
-    power loss, the scoreboard source, calibration, the Windows patch level,
-    clock drift and the camera card's PoE. Fills `raw`; each part fails soft.
+    power loss, the scoreboard source, calibration, the Windows patch level
+    and clock drift. Fills `raw`; each part fails soft. Not the camera card's
+    PoE: SmartPoE.dll waits for a day of passes on a GIE74 (PV-66).
     `skip_intrusive` is accepted for symmetry. None of them probes the venue
     network the way Test-NetworkPorts does: Test-NtpDrift sends one NTP sample
     to the unit's own time source, which Windows does on its own anyway."""
     del skip_intrusive
-    card = _camera_card(raw.get("network_config"))
-
-    async def _poe():
-        # Only a card whose chip reports PoE ever loads SmartPoE.dll: on the
-        # GIE64 and GIE74P-AN, Register_Card fails or hangs (PV-66). The
-        # collector keeps its own crash sentinel, in SYSTEM's TEMP here.
-        if not card or not card.get("poeSupported"):
-            return None
-        return await engine.run_ps("Get-PoePower.ps1", timeout=20)
-
-    reboots, sc, calib, ubr, ntp, poe = await asyncio.gather(
+    reboots, sc, calib, ubr, ntp = await asyncio.gather(
         engine.run_ps("Get-RebootHistory.ps1", timeout=30),
         # Straight to the collector, not _run_sc_status: that also appends to
         # the ScoreConnect config history, which is the interactive tab's job.
@@ -136,7 +128,6 @@ async def _collect_telemetry_extras(raw: dict, skip_intrusive: bool = False) -> 
         # PV-75. One registry read (6 h cache) and one NTP sample (1 h cache).
         engine.run_ps("Get-WindowsUbr.ps1", timeout=10),
         engine.run_ps("Test-NtpDrift.ps1", timeout=20),
-        _poe(),
         return_exceptions=True,
     )
 
@@ -144,8 +135,7 @@ async def _collect_telemetry_extras(raw: dict, skip_intrusive: bool = False) -> 
         return v if isinstance(v, dict) and not v.get("error") else None
     raw.update(reboots=ok(reboots),
                scoreconnect=sc if isinstance(sc, dict) else None,
-               calibration=ok(calib), ubr=ok(ubr), ntp=ok(ntp),
-               poe=poe if isinstance(poe, dict) else None)
+               calibration=ok(calib), ubr=ok(ubr), ntp=ok(ntp))
 
 
 def _prefix_to_mask(prefix) -> Optional[str]:
@@ -687,7 +677,7 @@ def _drive_health_lookup(disk_health):
     return lookup
 
 
-# ── Camera card (PV-65) and its PoE power (PV-66) ───────────────────────────
+# ── Camera card (PV-65) ─────────────────────────────────────────────────────
 # The card is the adapters on the camera card's PCI bus (main.py's
 # _adapter_role: the motherboard port is bus 0 and often the same Intel chip).
 # The chip is a fact; the product name is a family, because nothing on the box
@@ -697,7 +687,8 @@ _NIC_CHIPS = (("82574l", "82574L"), ("i210", "I210"), ("i211", "I211"), ("i350",
               ("i354", "I354"), ("82576", "82576"), ("82580", "82580"))
 _NIC_FAMILY = {"82574L": "GIE64 series", "I210": "GIE74 series", "I211": "GIE74 series",
                "I350": "GIE74P-AN", "I354": "GIE74P-AN"}
-# Only the I210/I211 cards report PoE; the GIE64 and GIE74P-AN can't.
+# Only the I210/I211 cards report PoE; the GIE64 and GIE74P-AN can't. The read
+# itself (`poe`, PV-66) isn't sent yet, so the key is absent, not null.
 _NIC_POE = {"I210": True, "I211": True, "82574L": False, "I350": False, "I354": False}
 _NIC_MAX_PORTS = 8
 
@@ -735,42 +726,8 @@ def _round(v, places: int) -> Optional[float]:
     return round(n, places) if n is not None else None
 
 
-def _telemetry_poe(poe) -> Optional[dict]:
-    """What the card reported, or None when it didn't: not a PoE card, no
-    SmartPoE driver, the crash sentinel latched, or the read failed. Total is
-    what the card says its budget is; it drifts with consumed and remaining on
-    real hardware, so it is the card's figure, not its rating."""
-    if not isinstance(poe, dict) or poe.get("error") or not poe.get("supported") or not poe.get("available"):
-        return None
-    b = poe.get("budget") if isinstance(poe.get("budget"), dict) else None
-    if b is None:
-        return None
-    temp = _num(b.get("tempC"))
-    ports = []
-    for p in _rows(poe.get("ports"))[:_NIC_MAX_PORTS]:
-        n = _count(p.get("port"))
-        if n is None:
-            continue
-        read = p.get("readOk") is not False
-        ports.append({"port": n, "on": bool(p.get("poeOn")) if read else None,
-                      "volts": _round(p.get("voltage"), 1) if read else None,
-                      "amps": _round(p.get("current"), 3) if read else None,
-                      "watts": _round(p.get("watts"), 1) if read else None})
-    return {"budget": {"totalW": _round(b.get("totalW"), 1), "consumedW": _round(b.get("consumedW"), 1),
-                       "remainingW": _round(b.get("remainingW"), 1),
-                       # The collector writes 0 when the temperature read failed.
-                       "tempC": round(temp) if temp and temp > 0 else None},
-            # The Molex lead: the same flag the poe-underpowered finding reads.
-            "underPowered": bool(b.get("underPowered")),
-            "ports": ports}
-
-
 def _telemetry_nic(raw: dict) -> Optional[dict]:
-    card = _camera_card(raw.get("network_config"))
-    if card is None:
-        return None
-    card["poe"] = _telemetry_poe(raw.get("poe")) if card["poeSupported"] else None
-    return card
+    return _camera_card(raw.get("network_config"))
 
 
 # ── Streaming components and installed applications (PV-71) ─────────────────
@@ -1018,9 +975,9 @@ def _build_telemetry(dashboard: dict, raw: dict, status_since: Optional[str] = N
 def _fingerprint_view(t: dict) -> dict:
     """The payload as the post rules compare it. Readings that move on every
     read are coarsened, or a healthy unit would post in full every pass:
-    clock drift to whole seconds, disk space to whole percent used, PoE to each
-    port on or off, and a drive's power-on hours not at all. The post itself
-    carries the exact values."""
+    clock drift to whole seconds, disk space to whole percent used, and a
+    drive's power-on hours not at all. The post itself carries the exact
+    values."""
     t = dict(t)
     env = t.get("environment")
     if isinstance(env, dict) and isinstance(env.get("clock"), dict):
@@ -1035,13 +992,6 @@ def _fingerprint_view(t: dict) -> dict:
         if isinstance(hw.get("disks"), list):
             hw["disks"] = [{k: v for k, v in d.items() if k != "powerOnHours"} for d in hw["disks"]]
         t["hardware"] = hw
-    cams = t.get("cameras")
-    nic = cams.get("nic") if isinstance(cams, dict) else None
-    if isinstance(nic, dict) and isinstance(nic.get("poe"), dict):
-        poe = nic["poe"]
-        t["cameras"] = {**cams, "nic": {**nic, "poe": {
-            "underPowered": poe.get("underPowered"),
-            "ports": [[p.get("port"), p.get("on")] for p in poe.get("ports") or []]}}}
     return t
 
 

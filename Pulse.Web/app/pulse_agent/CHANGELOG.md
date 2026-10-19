@@ -18,14 +18,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
-- The check-in carries what Vitals' unit tabs show (PV-65 to PV-76). Each part
-  is null when its read failed, never a healthy-looking default.
+- The check-in carries what Vitals' unit tabs show (PV-65 to PV-76, except
+  PV-66). Each part is null when its read failed, never a healthy-looking
+  default.
   - `cameras.nic`: the camera card's chip, its family name (`GIE74 series`,
     `GIE64 series`, `GIE74P-AN`, or null for a chip Pulse doesn't know), its
-    port count, whether it can report PoE, and `poe`: the card's budget,
-    temperature, the Molex flag and each port's volts, amps and watts. Only an
-    I210/I211 card loads SmartPoE.dll, at most once an hour, behind the
-    collector's crash sentinel.
+    port count and whether it can report PoE. The PoE read itself (PV-66)
+    comes in a later release, after a day of passes on a real GIE74.
   - `power`: pending reboot, BIOS After Power Loss, when the device-install
     reboot task last ran, and up to 20 restarts and shutdowns from the last 7
     days (time, planned or unexpected, by Pulse or not, source, reason). No
@@ -40,13 +39,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
     rule the pixellot-dll-missing and pixellot-start-error blockers use.
   - `environment`: Windows name, build and patch level, the time zone and
     whether it is a US one (the tz-non-us rule), and clock drift.
-- The monitor reads the Windows patch level (6 h cache), clock drift (1 h
-  cache) and PoE (1 h cache) on full passes.
+- The monitor reads the Windows patch level (6 h cache) and clock drift (1 h
+  cache) on full passes.
 
 ### Changed
 - Readings that move on every read no longer post a full check-in by
   themselves: clock drift counts in whole seconds, disk space in whole percent,
-  PoE as each port on or off, and power-on hours not at all. Each post still
+  and power-on hours not at all. Each post still
   carries the exact values.
 - A telemetry document is kept under 15 KB by cutting the application list,
   then the oldest restart rows, from the end. The check-in Worker drops one
