@@ -47,6 +47,7 @@ from powershell import (
 )
 import peer
 import cloud_api
+import software_review as _software_review
 
 _web_root = _os.path.dirname(_app_dir)
 SETTINGS_PATH = _os.path.join(_web_root, "pulse-settings.json")
@@ -1231,6 +1232,8 @@ def _enrich_software_with_concerns(installed_sw):
                     break
             if "concern" in sw:
                 break
+        # approved | risk | informational, by name only (software_review.py)
+        sw["review"] = _software_review.classify(sw.get("displayName"), sw.get("concern"))
     return installed_sw
 
 
