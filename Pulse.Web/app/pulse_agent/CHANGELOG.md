@@ -17,6 +17,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- A unit missing one of its main cameras (1 of 2 on an S2) now reports readiness FAIL, with the `cam-partial` finding critical. It was WARN. A multi-camera head can't stream with a camera missing. Verdict change only; no new fields.
+
 ### Added
 - The check-in carries what Vitals' unit tabs show (PV-65 to PV-76, except
   PV-66). Each part is null when its read failed, never a healthy-looking

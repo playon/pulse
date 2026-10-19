@@ -3063,6 +3063,10 @@ _READINESS_POLICY = {
                                          #     the last 2 h, or the running VPU.exe is the
                                          #     copy on the error box.
     "cam-none":              "blocker",  # F4  0 of N main cameras present
+    "cam-partial":           "blocker",  # F6  k of N present (k>0). A multi-camera head
+                                         #     (S2 = 2, S1 = 4) can't stitch its picture
+                                         #     with a camera missing, so it won't stream.
+                                         #     Was "risk" until Archer GA (PXLS2_15488).
     "gpu-none":              "blocker",  # F5  no NVIDIA GPU — encoder can't run
     "gpu-igpu-only":         "blocker",  # F11 Intel iGPU only — wrong hardware
     "port-dns-blocked":      "blocker",  # F23a DNS down → name resolution fails
@@ -3094,7 +3098,6 @@ _READINESS_POLICY = {
     "tz-non-us":             "blocker",  # F25 non-US time zone (Ian, 2026-09-22: critical)
 
     # ── RISKS → WARN (will likely stream, but a human should eyeball) ──
-    "cam-partial":           "risk",     # F6  k of N present (k>0)
     "cam-count-pending":     "risk",     # zero cameras during the cold-start grace:
                                          #     unconfirmed is not a pass. The Dashboard
                                          #     re-checks when the grace window closes.
@@ -3974,13 +3977,14 @@ def _camera_count_findings(ports, expected_main, probe_results, probes_attempted
     missing = expected - detected_main
     return [{
         "code": "cam-partial",
-        "severity": "warning",
+        "severity": "critical",
         "category": "Camera",
-        "title": f"{detected_main} of {expected} main cameras detected ({missing} missing)",
+        "title": f"{detected_main} of {expected} main cameras detected ({missing} missing), so it won't stream",
         "recommendation": (
             f"{missing} main camera{'s are' if missing != 1 else ' is'} expected but not "
-            f"connected." + uplink_note + " Check the missing port's cable, the camera's "
-            "power, and the switch port."
+            f"connected. The VPU needs every main camera to build the picture, so it "
+            f"won't stream until {'they are' if missing != 1 else 'it is'} back." + uplink_note
+            + " Check the missing port's cable, the camera's power, and the switch port."
         ),
         "details": details,
         "evidence": evidence,

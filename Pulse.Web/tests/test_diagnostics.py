@@ -421,9 +421,9 @@ class TestCamCountFinding(unittest.TestCase):
         self.assertEqual(found[0]["code"], "cam-none")
 
     def test_partial_count_still_warns_in_grace(self):
-        # One of two mains confirmed by probe: cam-partial fires (warning)
-        # even inside the grace window — suppression is only for the
-        # nothing-anywhere cold-start signature.
+        # One of two mains confirmed by probe: cam-partial fires (critical,
+        # an S2 won't stream with one camera) even inside the grace window
+        # — suppression is only for the nothing-anywhere cold-start signature.
         self._enter_grace()
         nics = {"ports": [self._up_port()]}
         one_main = {"00:D0:89:18:CE:E8": {
@@ -432,7 +432,7 @@ class TestCamCountFinding(unittest.TestCase):
         found = self._cam_findings(nics, one_main)
         self.assertEqual(len(found), 1, found)
         self.assertEqual(found[0]["code"], "cam-partial")
-        self.assertEqual(found[0]["severity"], "warning")
+        self.assertEqual(found[0]["severity"], "critical")
 
     def test_arp_count_still_works_without_probes(self):
         # Two mains present in ARP on default IPs, no probes: no finding.
