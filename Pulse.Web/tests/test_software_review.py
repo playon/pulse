@@ -30,6 +30,8 @@ MARIST = [
     "NVIDIA HD Audio Driver 1.4.3.2", "NVIDIA PhysX System Software 9.23.1019",
     "NVIDIA USBC Driver 1.52.831.832", "ScoreConnectII", "SUNIX Multi-IO Controller",
     "TUSB3410 Driver 6.7.5.0", "UMC v2.23.0",
+    # vpu-home spellings
+    "Blackmagic Design Desktop Video", "ADLINK Vision Software SDK", "ScoreConnectIII",
 ]
 
 
@@ -39,7 +41,8 @@ class SoftwareReview(unittest.TestCase):
             self.assertEqual(sr.classify(name), "approved", name)
 
     def test_teamviewer_host_is_not_approved(self):
-        self.assertEqual(sr.classify("TeamViewer Host"), "informational")
+        for n in ("TeamViewer Host", "TeamViewer"):
+            self.assertEqual(sr.classify(n), "informational", n)
 
     def test_datto_is_not_approved(self):
         for name in ("Datto RMM", "Datto Windows Agent", "Datto Backup Agent"):

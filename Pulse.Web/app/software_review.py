@@ -44,11 +44,12 @@ APPROVED_APPS = (
     ("NVIDIA App", "hardware"),
     # hardware: PoE card
     ("GIE Series SmartPoE", "hardware"),
+    ("ADLINK Vision Software SDK", "hardware"),  # AVS SDK, reads the PoE card
     # hardware: cameras and capture
     ("Basler pylon", "hardware"),
     ("FlyCapture", "hardware"),
     ("JAI SDK", "hardware"),
-    ("Blackmagic Desktop Video", "hardware"),
+    ("Blackmagic", "hardware"),                # "Desktop Video" vs "Design Desktop Video" by version,
     ("DCViewer", "hardware"),
     # hardware: scoreboard
     ("ScoreConnect", "hardware"),
@@ -72,7 +73,7 @@ APPROVED_APPS = (
 # above can never approve them by accident. Promote one to a risk by adding
 # its name to a `_CONCERNING_SOFTWARE` category in main.py.
 NOT_APPROVED_APPS = (
-    ("TeamViewer Host", "remote access; only LogMeIn is approved"),
+    ("TeamViewer", "remote access; only LogMeIn is approved"),
     ("Datto", "remote management / backup agent (datto.com)"),
 )
 
