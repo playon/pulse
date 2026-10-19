@@ -28,6 +28,7 @@ class TestBuildTelemetry(unittest.TestCase):
         powershell._PS_SEMAPHORE = None
         cls.raw = {}
         cls.dash = asyncio.run(main._collect_dashboard(raw_out=cls.raw))
+        powershell._PS_SEMAPHORE = None   # a second event loop
         asyncio.run(agent_telemetry._collect_telemetry_extras(cls.raw))
         cls.t = agent_telemetry._build_telemetry(cls.dash, cls.raw, "2026-10-13T19:00:00Z")
 
@@ -35,16 +36,18 @@ class TestBuildTelemetry(unittest.TestCase):
         t = self.t
         self.assertEqual(t["schema"], "pulse.telemetry/v1")
         for key in ("status", "statusSince", "headline", "blockers", "checkedAt", "pixellotVersion",
-                    "network", "cameras", "servicesDown", "scoreboard", "power", "calibration"):
+                    "network", "cameras", "servicesDown", "scoreboard", "power", "calibration",
+                    "services", "applications", "programs", "environment"):
             self.assertIn(key, t)
         self.assertEqual(set(t["network"]), {"internetReachable", "streamingPath", "portsFailed", "internet"})
-        self.assertEqual(set(t["cameras"]), {"systemType", "expected", "detected", "slow", "ports"})
+        self.assertEqual(set(t["cameras"]), {"systemType", "expected", "detected", "slow", "ports", "nic"})
         # source and ok are Ian's v1 fields; the rest are additive detail
         # (2026-10-14: ok read true all event with 6493's ScoreLink missing).
         self.assertTrue({"source", "ok"} <= set(t["scoreboard"]))
         self.assertTrue(set(t["scoreboard"]) <= {"source", "ok", "scoreLinkConnected", "dataFlowing",
                                                   "dataStatus", "sport", "ocr", "scoreConnect"})
-        self.assertEqual(set(t["power"]), {"lastBoot", "unexpectedShutdowns7d"})
+        self.assertEqual(set(t["power"]), {"lastBoot", "unexpectedShutdowns7d", "pendingReboot",
+                                           "afterPowerLoss", "deviceInstallRebootLastRun", "events"})
         self.assertEqual(set(t["calibration"]), {"primary", "sports", "ocr"})
         self.assertEqual(t["calibration"]["primary"], "Football")
 
@@ -85,6 +88,8 @@ class TestBuildTelemetry(unittest.TestCase):
         # Ian, 2026-10-13: no hostname, serial, or separate camera-MAC list;
         # troubleshooting detail waits for a later tier.
         text = json.dumps(self.t)
+        # Clock drift came back as its own block (PV-75). PoE waits for its
+        # own PR (PV-66).
         for gone in ("hostname", "serialNumber", "camera_macs", "cameraMacs", '"findings"',
                      "clockOffset", '"poe"', "recentRecordings", '"adapters"'):
             self.assertNotIn(gone, text)
@@ -107,7 +112,9 @@ class TestBuildTelemetry(unittest.TestCase):
         self.assertIsNone(t["power"]["unexpectedShutdowns7d"])
 
     def test_small(self):
-        self.assertLess(len(json.dumps(self.t)), 4000)
+        # Was 4,000 before the installed-applications list (PV-71) and restart
+        # history (PV-68); those two are most of the rest.
+        self.assertLess(len(json.dumps(self.t)), 8000)
 
     def test_services_down_ignores_idle_vpu_and_unneeded_scoreconnect(self):
         svc = {"agent": "Running", "coordinator": "Stopped", "vpu": "Stopped",

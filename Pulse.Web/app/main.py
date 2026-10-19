@@ -4419,7 +4419,8 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
             pixellot_config=pixellot_config, network_config=net_config,
             probe_results=probe_results, gpu_info=gpu_info,
             expectations=expectations, disk_health=disk_health,
-            hardware=hardware,
+            hardware=hardware, services=services, installed_sw=installed_sw,
+            binaries=binaries,
         )
     return _build_dashboard(
         identity, performance, services, nics, net_config, hardware,

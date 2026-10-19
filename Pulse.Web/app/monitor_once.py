@@ -74,6 +74,10 @@ SLOW_COLLECTOR_TTLS = {
     # Calibration only moves when someone recalibrates; a read that couldn't
     # answer comes back as an error, which is never cached (PV-57).
     "Get-CalibrationStatus.ps1": 6 * 3600,
+    # PV-75: the patch level moves only when someone patches the unit, and
+    # clock drift by the hour.
+    "Get-WindowsUbr.ps1": 6 * 3600,
+    "Test-NtpDrift.ps1": 3600,
 }
 
 _BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
