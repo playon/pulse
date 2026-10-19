@@ -192,6 +192,14 @@ class TestConcerningSoftware(unittest.TestCase):
         self.assertEqual(
             sum(len(v) for v in main._detect_concerning_software({"error": True}).values()), 0)
 
+    def test_crowdstrike_windows_sensor_is_critical_security(self):
+        # The name Windows lists it under (publisher "CrowdStrike, Inc.").
+        sw = {"software": [{"displayName": "CrowdStrike Windows Sensor",
+                            "publisher": "CrowdStrike, Inc.", "displayVersion": "7.40.21309.0"}]}
+        self.assertEqual(len(main._detect_concerning_software(sw)["security"]), 1)
+        concern = main._enrich_software_with_concerns(sw)["software"][0]["concern"]
+        self.assertEqual((concern["category"], concern["severity"]), ("security", "critical"))
+
     def test_datto_edr_is_unsupported_security(self):
         out = main._detect_concerning_software(self._sw("Datto EDR Agent"))
         self.assertEqual(len(out["security"]), 1)
