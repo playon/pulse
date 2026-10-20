@@ -7176,20 +7176,26 @@ function renderDiskHealth() {
   const haveSmart = physical.length > 0;
   const predictFail = data.predictFailure === true;
   const anyUnhealthy = haveSmart && physical.some(d => (d.healthStatus || "").toLowerCase() !== "healthy");
-  const anyUncorrected = haveSmart && physical.some(d => {
+  // Uncorrected errors: a few on a Healthy drive is "Fix soon"; 100+ is critical.
+  // Mirrors SMART_ERRORS_CRITICAL in main.py.
+  const SMART_ERRORS_CRITICAL = 100;
+  const uncorrectedByDisk = haveSmart ? physical.map(d => {
     const s = d.smart || {};
-    return (s.readErrorsUncorrected || 0) + (s.writeErrorsUncorrected || 0) > 0;
-  });
+    return (s.readErrorsUncorrected || 0) + (s.writeErrorsUncorrected || 0);
+  }) : [];
+  const maxUncorrected = uncorrectedByDisk.reduce((m, n) => Math.max(m, n), 0);
   const maxWear = haveSmart ? physical.reduce((m, d) => {
     const w = (d.smart || {}).wearPercent;
     return (w != null && w > m) ? w : m;
   }, 0) : 0;
-  const smartBad  = predictFail || anyUnhealthy || anyUncorrected;
-  const smartWarn = !smartBad && maxWear >= 80;
+  const smartBad  = predictFail || anyUnhealthy || maxUncorrected >= SMART_ERRORS_CRITICAL;
+  const smartFewErrors = !smartBad && maxUncorrected > 0;
+  const smartWarn = !smartBad && (smartFewErrors || maxWear >= 80);
   const smartSev  = !haveSmart ? "muted" : smartBad ? "critical" : smartWarn ? "warning" : "ok";
-  const smartChip = !haveSmart ? "No data" : smartBad ? "Issue" : smartWarn ? "Wear high" : "OK";
+  const smartChip = !haveSmart ? "No data" : smartBad ? "Issue" : smartFewErrors ? "Errors" : smartWarn ? "Wear high" : "OK";
   const smartVal  = !haveSmart ? "SMART not reported"
     : smartBad ? "Drive predicting failure"
+    : smartFewErrors ? `${maxUncorrected} uncorrected error${maxUncorrected === 1 ? "" : "s"}`
     : smartWarn ? `Highest wear ${maxWear}%`
     : `${physical.length} disk${physical.length === 1 ? "" : "s"} checked`;
 
