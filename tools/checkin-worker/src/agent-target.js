@@ -33,6 +33,7 @@ export async function handleAgentTarget(request, env) {
   if (!/^application\/json\b/i.test(request.headers.get("Content-Type") || "")) {
     return fail(415, "unsupported-media-type", "send application/json");
   }
+  if (Number(request.headers.get("Content-Length") || 0) > MAX_BODY_BYTES) return fail(413, "too-large", "body over 4 KB");
   const text = await request.text();
   if (new TextEncoder().encode(text).length > MAX_BODY_BYTES) return fail(413, "too-large", "body over 4 KB");
   let body;

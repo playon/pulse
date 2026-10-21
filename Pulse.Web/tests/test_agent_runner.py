@@ -272,6 +272,13 @@ class Update(Fixture):
         self.assertEqual(self.downloads, [])
         self.assertEqual(self.ticks, [("a", ["--dry-run"])])
 
+    def test_a_dry_run_sweeps_nothing(self):
+        path = os.path.join(self.root, runner.DOWNLOAD_FILE)
+        with open(path, "w") as fh:
+            fh.write("half")
+        self.tick(argv=["--dry-run"])
+        self.assertTrue(os.path.exists(path))
+
 
 class Refused(Fixture):
     def _refused(self, data, expect):
@@ -599,6 +606,12 @@ class Processes(unittest.TestCase):
             self.assertFalse(self._alive(child), "the tick's child outlived it")
             if fds is not None:
                 self.assertLessEqual(_open_fds(), fds)
+
+    def test_a_tick_still_runs_when_its_stderr_file_cant_be_opened(self):
+        with open(os.path.join(self.root, "slots", "a", "app", "monitor_once.py"), "w") as fh:
+            fh.write("import sys\nsys.exit(0)\n")
+        os.makedirs(os.path.join(self.root, runner.STDERR_FILE))     # a directory: open() fails
+        self.assertEqual(runner.run_slot(self.root, "a", []), (True, "ok"))
 
     def test_a_failed_tick_reports_its_last_stderr_line_without_holding_it(self):
         with open(os.path.join(self.root, "slots", "a", "app", "monitor_once.py"), "w") as fh:

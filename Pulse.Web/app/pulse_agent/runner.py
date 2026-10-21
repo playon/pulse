@@ -225,7 +225,13 @@ def run_slot(root: str, name: str, args: list, timeout: float = TICK_TIMEOUT_SEC
     err_path = os.path.join(root, STDERR_FILE)
     try:
         # stderr goes to a file, not memory: one file, rewritten each tick.
-        with open(err_path, "wb") as err:
+        # If it can't be opened (something still holds it), the tick runs
+        # without it rather than not at all.
+        try:
+            err = open(err_path, "wb")
+        except OSError:
+            err, err_path = subprocess.DEVNULL, ""
+        try:
             proc = subprocess.Popen([sys.executable, script] + list(args), stderr=err, **kw)
             try:
                 code = proc.wait(timeout=timeout)
@@ -233,10 +239,13 @@ def run_slot(root: str, name: str, args: list, timeout: float = TICK_TIMEOUT_SEC
                 _kill_tree(proc)
                 proc.wait()
                 return False, f"the tick ran over {int(timeout)} s"
+        finally:
+            if err is not subprocess.DEVNULL:
+                err.close()
     except OSError as e:
         return False, f"couldn't start the tick: {e.strerror or type(e).__name__}"
     if code != 0:
-        tail = _last_line(err_path)
+        tail = _last_line(err_path) if err_path else ""
         return False, f"exit {code}" + (f": {tail}" if tail else "")
     return True, "ok"
 
@@ -489,7 +498,7 @@ def maybe_update(root: str, st: dict, now: float, *, is_event_live=event_live, d
         # backing off so a unit on a bad link doesn't pull 64 MB an hour.
         tries = int(st["tries"].get(key) or 0) + 1
         st["tries"][key] = tries
-        st["retryAt"][key] = now + min(RETRY_MAX_SECONDS, RETRY_AFTER_SECONDS * 2 ** (tries - 1))
+        st["retryAt"][key] = now + min(RETRY_MAX_SECONDS, RETRY_AFTER_SECONDS * 2 ** min(tries - 1, 8))
         save_slots(root, st)
         report(root, "failed", version, f"{type(e).__name__}: {e.strerror or e}" if isinstance(e, OSError)
                else f"{type(e).__name__}: {e}", current)
@@ -515,7 +524,8 @@ def maybe_update(root: str, st: dict, now: float, *, is_event_live=event_live, d
 def tick(root: str, argv: list, *, is_event_live=event_live, run=run_slot, download=fetch,
          url_template: str = RELEASE_URL, now=None) -> int:
     now = time.time() if now is None else now
-    sweep(root)
+    if "--dry-run" not in argv:
+        sweep(root)
     st = load_slots(root)
     marker = os.path.join(root, MARKER_FILE)
     if os.path.exists(marker):
