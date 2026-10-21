@@ -5,9 +5,11 @@
 //
 // Fail closed at every step: no verified Access identity, an identity not in
 // FLEET_CONTROL_EDITORS, a body that isn't exactly the documented shape, a
-// unit nobody has heard from, or a release that can't be checked all leave the
-// table as it was. A target is saved only when the playon/pulse release
-// agent-v<version> exists and its pulse-agent-<version>.zip has that SHA-256.
+// unit nobody has heard from, or a release that can't be checked all leave
+// agent_target (migration 0020) as it was. A target is saved only when the
+// playon/pulse release agent-v<version> exists and its
+// pulse-agent-<version>.zip has that SHA-256. Pins never touch
+// monitor_control, whose unit rows decide a unit's mode.
 // There is no URL in the request: the agent builds it from the version.
 
 import { accessIdentity } from "./access.js";
@@ -45,17 +47,31 @@ export async function handleAgentTarget(request, env) {
   const parsed = parse(body);
   if (parsed.error) return fail(400, "bad-request", parsed.error);
   const { scope, target, note } = parsed;
+  // Workers share egress IPs and GitHub allows 60 anonymous calls an hour per
+  // IP, so without a token a set fails at random. Refuse up front instead.
+  if (target && !env.GITHUB_TOKEN) {
+    return fail(500, "not-configured", "the admin Worker has no GITHUB_TOKEN secret, so it can't check releases");
+  }
 
+  // Pins live in agent_target (migration 0020), never in monitor_control:
+  // a monitor_control row would decide the unit's mode.
   const current = await env.DB.prepare(
-    "SELECT agent_version, agent_sha256 FROM monitor_control WHERE scope = ?",
+    "SELECT version, sha256 FROM agent_target WHERE scope = ?",
   ).bind(scope).first();
   if (scope !== "fleet" && !current) {
-    // A new unit row only for a unit the ingest would match: its key is the
+    // A new unit pin only for a unit the ingest would match: its key is the
     // venue id, else the VPU name (ingest.js controlFor).
     const known = await env.DB.prepare(
       "SELECT 1 AS ok FROM unit_latest WHERE unit_key = ?1 AND (venue_id = ?1 OR vpu_name = ?1) LIMIT 1",
     ).bind(scope).first();
     if (!known) return fail(404, "unknown-scope", "no unit has checked in with that venue id or VPU name");
+  }
+
+  const previous = current ? { version: current.version, sha256: current.sha256 } : null;
+  if (!target && !previous) {
+    // Nothing pinned, nothing to clear: no write, no log row.
+    return Response.json({ ok: true, scope, target: null, previous: null, setBy: email, setAt: null, note },
+                         { headers: { "Cache-Control": "no-store" } });
   }
 
   if (target) {
@@ -64,25 +80,18 @@ export async function handleAgentTarget(request, env) {
   }
 
   const at = new Date().toISOString();
-  const previous = current && current.agent_version
-    ? { version: current.agent_version, sha256: current.agent_sha256 } : null;
   const v = target ? target.version : null;
   const h = target ? target.sha256 : null;
   const statements = [];
-  if (target || scope === "fleet") {
+  if (target) {
     statements.push(env.DB.prepare(
-      `INSERT INTO monitor_control (scope, agent_version, agent_sha256, agent_note, agent_set_by, agent_set_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (scope) DO UPDATE SET agent_version = excluded.agent_version, agent_sha256 = excluded.agent_sha256,
-         agent_note = excluded.agent_note, agent_set_by = excluded.agent_set_by,
-         agent_set_at = excluded.agent_set_at, updated_at = excluded.updated_at`,
-    ).bind(scope, v, h, note, email, at, at));
+      `INSERT INTO agent_target (scope, version, sha256, note, set_by, set_at) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (scope) DO UPDATE SET version = excluded.version, sha256 = excluded.sha256,
+         note = excluded.note, set_by = excluded.set_by, set_at = excluded.set_at`,
+    ).bind(scope, v, h, note, email, at));
   } else {
-    // Clearing a unit: it follows the fleet row again. No row, nothing to clear.
-    statements.push(env.DB.prepare(
-      `UPDATE monitor_control SET agent_version = NULL, agent_sha256 = NULL, agent_note = ?,
-         agent_set_by = ?, agent_set_at = ?, updated_at = ? WHERE scope = ?`,
-    ).bind(note, email, at, at, scope));
+    // Clearing: a unit follows the fleet's pin again; the fleet stops moving anyone.
+    statements.push(env.DB.prepare("DELETE FROM agent_target WHERE scope = ?").bind(scope));
   }
   statements.push(env.DB.prepare(
     `INSERT INTO agent_target_log (at, scope, version, sha256, previous_version, previous_sha256, set_by, note)
@@ -136,7 +145,49 @@ function parse(body) {
 // The hash GitHub computed for the asset (asset.digest) and the .sha256 file
 // the release workflow published must both agree when present, and at least
 // one must be.
+//
+// A good answer is remembered for an hour (here and in the colo's cache):
+// agent-v* releases are never replaced (agent-release.yml refuses an existing
+// tag), and Vitals pins up to 100 units one request at a time, which would
+// otherwise be 100 lookups of the same release. Failures are never remembered.
 export async function checkRelease(env, version, sha256) {
+  const key = `${version}/${sha256}`;
+  if ((checked.get(key) || 0) > Date.now()) return { ok: true };
+  const cacheUrl = `https://pulse-checkin-admin.cache/release-check/${key}`;
+  const cache = typeof caches !== "undefined" && caches.default ? caches.default : null;
+  try {
+    if (cache && await cache.match(cacheUrl)) {
+      checked.set(key, Date.now() + CHECK_TTL_MS);
+      return { ok: true };
+    }
+  } catch {
+    // no cache: ask GitHub
+  }
+  const result = await lookUpRelease(env, version, sha256);
+  if (result.ok) {
+    checked.set(key, Date.now() + CHECK_TTL_MS);
+    if (checked.size > 64) checked.delete(checked.keys().next().value);
+    try {
+      if (cache) {
+        await cache.put(cacheUrl, new Response("ok", {
+          headers: { "Cache-Control": `max-age=${CHECK_TTL_MS / 1000}` },
+        }));
+      }
+    } catch {
+      // remembering is only a saving
+    }
+  }
+  return result;
+}
+
+const CHECK_TTL_MS = 60 * 60 * 1000;
+const checked = new Map();     // "version/sha256" -> ms until which it's known good
+
+export function forgetReleaseChecks() {
+  checked.clear();
+}
+
+async function lookUpRelease(env, version, sha256) {
   const tag = `agent-v${version}`;
   const asset = `pulse-agent-${version}.zip`;
   const headers = { "User-Agent": "pulse-checkin-admin", Accept: "application/vnd.github+json" };

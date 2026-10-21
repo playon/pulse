@@ -760,39 +760,55 @@ test("no agent target unless one is set", async () => {
   assert.equal(body.control.agent, undefined);
 });
 
-test("agent target: the fleet's pin, a unit's own pin wins, a unit row without one gets the fleet's", async () => {
-  env.DB.raw.exec(`UPDATE monitor_control SET agent_version = '0.2.0', agent_sha256 = '${SHA_A}' WHERE scope = 'fleet'`);
-  env.DB.raw.exec(`INSERT INTO monitor_control (scope, agent_version, agent_sha256) VALUES ('V42', '0.3.0', '${SHA_B}')`);
+function pinAt(scope, version, sha256) {
+  env.DB.raw.prepare("INSERT INTO agent_target (scope, version, sha256, set_at) VALUES (?, ?, ?, datetime('now'))")
+    .run(scope, version, sha256);
+}
+
+test("agent target: the fleet's pin, a unit's own pin wins, a unit with a mode row but no pin gets the fleet's", async () => {
+  pinAt("fleet", "0.2.0", SHA_A);
+  pinAt("V42", "0.3.0", SHA_B);
   env.DB.raw.exec(`INSERT INTO monitor_control (scope, mode) VALUES ('V7', 'off')`);
   const reply = async (venueId, n) => (await (await post({ checkins: [checkin({
     checkinId: `aaaaaaaa-0000-0000-0000-00000000030${n}`, venueId })] })).json()).control;
   assert.deepEqual((await reply("V42", 1)).agent, { version: "0.3.0", sha256: SHA_B });   // canary
-  assert.deepEqual((await reply("V99", 2)).agent, { version: "0.2.0", sha256: SHA_A });   // no row of its own
+  assert.deepEqual((await reply("V99", 2)).agent, { version: "0.2.0", sha256: SHA_A });   // no pin of its own
   const v7 = await reply("V7", 3);
   assert.equal(v7.mode, "off");
-  assert.deepEqual(v7.agent, { version: "0.2.0", sha256: SHA_A });                         // its row sets no version
+  assert.deepEqual(v7.agent, { version: "0.2.0", sha256: SHA_A });
 });
 
-test("a unit pin without its hash means no target, never the fleet's", async () => {
+test("a pin never changes a unit's mode: fleet off, unit pinned, the unit stays off", async () => {
+  env.DB.raw.exec(`UPDATE monitor_control SET mode = 'off' WHERE scope = 'fleet'`);
+  pinAt("V42", "0.3.0", SHA_B);
+  const body = await (await post({ checkins: [checkin()] })).json();
+  assert.equal(body.control.mode, "off");
+  assert.deepEqual(body.control.agent, { version: "0.3.0", sha256: SHA_B });
+});
+
+test("the retired monitor_control pin columns are not read", async () => {
   env.DB.raw.exec(`UPDATE monitor_control SET agent_version = '0.2.0', agent_sha256 = '${SHA_A}' WHERE scope = 'fleet'`);
-  env.DB.raw.exec(`INSERT INTO monitor_control (scope, agent_version) VALUES ('V42', '0.1.0')`);
   const body = await (await post({ checkins: [checkin()] })).json();
   assert.equal(body.control.agent, undefined);
-  assert.equal(body.control.mode, "on");
 });
 
-test("monitor_control refuses a malformed pin", () => {
-  const bad = [`agent_version = 'v0.2.0'`, `agent_version = '0.2'`, `agent_sha256 = '${SHA_A.toUpperCase()}'`,
-               `agent_sha256 = 'abc'`];
-  for (const set of bad) {
-    assert.throws(() => env.DB.raw.exec(`UPDATE monitor_control SET ${set} WHERE scope = 'fleet'`), /CHECK constraint/, set);
+test("agent_target refuses a malformed pin", () => {
+  const bad = [["v0.2.0", SHA_A], ["0.2", SHA_A], ["0.2.0", SHA_A.toUpperCase()], ["0.2.0", "abc"], ["0.2.0", null]];
+  for (const [v, h] of bad) {
+    assert.throws(() => pinAt("fleet", v, h), /constraint/, `${v} ${h}`);
   }
 });
 
+test("a broken pin lookup leaves agent out but keeps mode and skip", async () => {
+  env.DB.raw.exec(`UPDATE monitor_control SET mode = 'off' WHERE scope = 'fleet'`);
+  env.DB.raw.exec("DROP TABLE agent_target");
+  const body = await (await post({ checkins: [checkin()] })).json();
+  assert.deepEqual(body.control, { mode: "off", skip: [] });
+});
+
 test("switching a unit off the way the README says keeps its agent pin", async () => {
-  env.DB.raw.exec(`INSERT INTO monitor_control (scope, agent_version, agent_sha256) VALUES ('V42', '0.1.0', '${SHA_B}')`);
-  env.DB.raw.exec(`INSERT INTO monitor_control (scope, mode, note, updated_at) VALUES ('V42', 'off', 'why', datetime('now'))
-                   ON CONFLICT (scope) DO UPDATE SET mode=excluded.mode, note=excluded.note, updated_at=excluded.updated_at`);
+  pinAt("V42", "0.1.0", SHA_B);
+  env.DB.raw.exec(`INSERT OR REPLACE INTO monitor_control (scope, mode, note, updated_at) VALUES ('V42', 'off', 'why', datetime('now'))`);
   const body = await (await post({ checkins: [checkin()] })).json();
   assert.equal(body.control.mode, "off");
   assert.deepEqual(body.control.agent, { version: "0.1.0", sha256: SHA_B });

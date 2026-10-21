@@ -45,8 +45,9 @@ ACCESS_TEAM_DOMAIN = "REPLACE_WITH_TEAM.cloudflareaccess.com"
 ACCESS_AUD = "REPLACE_WITH_APPLICATION_AUD_TAG"
 # Who may set the agent target (POST /agent-target). Empty: nobody.
 FLEET_CONTROL_EDITORS = ""
-# Optional secret (wrangler secret put GITHUB_TOKEN --env admin): the release
-# check's GitHub API calls, past the unauthenticated rate limit.
+# Required secret to set a target (wrangler secret put GITHUB_TOKEN --env admin):
+# the release check's GitHub API calls. Without it POST /agent-target answers
+# 500 not-configured rather than fail at random on the shared-IP rate limit.
 
 [[env.admin.d1_databases]]
 binding = "DB"

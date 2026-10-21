@@ -166,39 +166,59 @@ export async function handleIngest(request, env) {
 // Pulse then keeps the last instruction it had.
 //
 // It also carries the agent build a unit should run (PV-49), as agent:
-// { version, sha256 }. A unit's own row wins when it sets a version (a canary,
-// or a unit held back); otherwise the fleet row's applies. The pair comes from
-// one row, and a malformed one means no target at all rather than the fleet's,
-// so a unit that was held back is never moved by a typo. No target: the agent
-// stays on what it runs.
+// { version, sha256 }, from agent_target (migration 0020), kept apart from
+// the mode rows so that pinning a unit never changes its mode. A unit's own
+// pin wins (a canary, or a unit held back); otherwise the fleet's applies.
+// The pair comes from one row, and a malformed one means no target at all
+// rather than the fleet's, so a unit that was held back is never moved by a
+// typo. No target: the agent stays on what it runs. A failed pin lookup
+// leaves agent out but keeps mode and skip.
 async function controlFor(env, unit) {
   try {
     const { results } = await env.DB.prepare(
-      "SELECT scope, mode, skip, agent_version, agent_sha256 FROM monitor_control WHERE scope = 'fleet' OR scope = ?",
+      "SELECT scope, mode, skip FROM monitor_control WHERE scope = 'fleet' OR scope = ?",
     ).bind(unit || "").all();
-    if (!results || !results.length) return { mode: "on", skip: [] };
-    const fleet = results.find((r) => r.scope === "fleet");
-    const own = results.find((r) => r.scope !== "fleet");
-    const mode = (own || fleet).mode === "off" ? "off" : "on";
-    const skip = new Set();
-    for (const r of [fleet, own]) {
-      if (!r) continue;
-      try {
-        for (const name of JSON.parse(r.skip || "[]")) if (typeof name === "string" && name) skip.add(name);
-      } catch {
-        // a malformed skip list in one row never blocks the reply
-      }
-    }
-    const control = { mode, skip: [...skip].slice(0, 50) };
-    const pin = [own, fleet].find((r) => r && r.agent_version !== null && r.agent_version !== undefined);
-    if (pin && TARGET_VERSION_RE.test(pin.agent_version) && SHA256_RE.test(pin.agent_sha256 || "")) {
-      control.agent = { version: pin.agent_version, sha256: pin.agent_sha256 };
-    }
+    const control = modeFor(results || []);
+    const pin = await pinFor(env, unit);
+    if (pin) control.agent = pin;
     return control;
   } catch (e) {
     console.error("control lookup failed", e && e.message);
     return null;
   }
+}
+
+async function pinFor(env, unit) {
+  try {
+    const { results } = await env.DB.prepare(
+      "SELECT scope, version, sha256 FROM agent_target WHERE scope = 'fleet' OR scope = ?",
+    ).bind(unit || "").all();
+    const rows = results || [];
+    const pin = rows.find((r) => r.scope !== "fleet") || rows.find((r) => r.scope === "fleet");
+    if (pin && TARGET_VERSION_RE.test(pin.version || "") && SHA256_RE.test(pin.sha256 || "")) {
+      return { version: pin.version, sha256: pin.sha256 };
+    }
+  } catch (e) {
+    console.error("agent target lookup failed", e && e.message);
+  }
+  return null;
+}
+
+function modeFor(results) {
+  if (!results.length) return { mode: "on", skip: [] };
+  const fleet = results.find((r) => r.scope === "fleet");
+  const own = results.find((r) => r.scope !== "fleet");
+  const mode = (own || fleet).mode === "off" ? "off" : "on";
+  const skip = new Set();
+  for (const r of [fleet, own]) {
+    if (!r) continue;
+    try {
+      for (const name of JSON.parse(r.skip || "[]")) if (typeof name === "string" && name) skip.add(name);
+    } catch {
+      // a malformed skip list in one row never blocks the reply
+    }
+  }
+  return { mode, skip: [...skip].slice(0, 50) };
 }
 
 function normalize(item, receivedAt) {

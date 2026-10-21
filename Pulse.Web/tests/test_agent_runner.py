@@ -35,6 +35,18 @@ import build_agent_zip  # noqa: E402
 REQS = "fastapi\nuvicorn[standard]\n"
 
 
+def setUpModule():
+    # No random waits unless a test asks for them: a new target is fetched at
+    # once and a retry waits exactly its gap.
+    global _real_jitter
+    _real_jitter = runner._jitter
+    runner._jitter = lambda: 0.0
+
+
+def tearDownModule():
+    runner._jitter = _real_jitter
+
+
 def _zip_bytes(version, reqs=REQS, extra=None, version_inside=None):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
@@ -66,6 +78,7 @@ class Fixture(unittest.TestCase):
         self.tick_ok = {}           # slot -> bool
         self.served = {}            # url -> bytes, or an exception to raise
         self.downloads = []
+        self.deadlines = []
         self.now = 1_000_000.0
 
     def _slot(self, name, version):
@@ -99,8 +112,9 @@ class Fixture(unittest.TestCase):
         self.served[runner.RELEASE_URL.format(version=version)] = data
         return hashlib.sha256(data).hexdigest() if isinstance(data, bytes) else None
 
-    def _download(self, url, dest):
+    def _download(self, url, dest, deadline=None):
         self.downloads.append(url)
+        self.deadlines.append(deadline)
         data = self.served.get(url, OSError("HTTP Error 404: Not Found"))
         if isinstance(data, Exception):
             raise data
@@ -499,7 +513,7 @@ class Leaks(Fixture):
         self.assertEqual((st["retryAt"], st["tries"]), ({}, {}))
         u = self.update()
         self.assertEqual((u["status"], u["version"]), ("failed", "0.3.0"))
-        self.assertIn("gave up after 5 network failures", u["error"])
+        self.assertIn("gave up after 5 failed tries", u["error"])
         self.assertIn("broke off", u["error"])                 # the last cause
         self.assertNotIn(self.root, u["error"])
         at = u["at"]
@@ -627,10 +641,152 @@ class Leaks(Fixture):
             self.assertLessEqual(_open_fds(), fds, "file handles or sockets left open")
 
 
+class Spacing(Fixture):
+    """When tries happen: counted before they start, inside the task's time,
+    spread out across the fleet, and never switching into an event."""
+
+    def test_a_try_the_time_limit_kills_still_counts_and_the_sixth_gives_up(self):
+        sha = self.serve("0.2.0", _zip_bytes("0.2.0"))
+        self.pin("0.2.0", sha)
+
+        def killed(url, dest, deadline=None):
+            self.downloads.append(url)
+            raise SystemExit("killed by the task's time limit")   # nothing after this runs
+        key = "0.2.0:" + sha
+        for n in range(1, 6):
+            with self.assertRaises(SystemExit):
+                runner.tick(self.root, [], is_event_live=lambda: False, run=self._run, download=killed, now=self.now)
+            st = self.slots()
+            self.assertEqual(st["tries"][key], n)
+            self.assertEqual(st["retryAt"][key] - self.now, 3600 * 2 ** (n - 1))
+            self.now = st["retryAt"][key]
+        self.tick(advance=0)
+        self.assertEqual(len(self.downloads), 5)                 # no sixth download
+        st = self.slots()
+        self.assertIn(key, st["blocked"])
+        self.assertEqual((st["tries"], st["retryAt"]), ({}, {}))
+        u = self.update()
+        self.assertEqual(u["status"], "failed")
+        self.assertIn("gave up after 5 failed tries; the last never finished", u["error"])
+
+    def test_the_download_must_end_inside_the_task_limit(self):
+        sha = self.serve("0.2.0", _zip_bytes("0.2.0"))
+        self.pin("0.2.0", sha)
+        before = time.monotonic()
+        self.tick()
+        after = time.monotonic()
+        (deadline,) = self.deadlines
+        limit = runner.TASK_LIMIT_SECONDS - runner.STAGE_RESERVE_SECONDS - runner.DOWNLOAD_TIMEOUT_SECONDS
+        self.assertLessEqual(deadline, after + limit)
+        self.assertGreaterEqual(deadline, before + limit)
+
+    def test_too_little_time_left_waits_for_a_later_tick_and_counts_no_try(self):
+        sha = self.serve("0.2.0", _zip_bytes("0.2.0"))
+        self.pin("0.2.0", sha)
+        st = runner.load_slots(self.root)
+        late = time.monotonic() + runner.DOWNLOAD_TIMEOUT_SECONDS + runner.MIN_DOWNLOAD_SECONDS - 1
+        runner.maybe_update(self.root, st, self.now, is_event_live=lambda: False, download=self._download,
+                            deadline=late)
+        self.assertEqual(self.downloads, [])
+        self.assertEqual(self.slots()["tries"], {})
+        self.tick()
+        self.assertEqual(self.slots()["active"], "b")
+
+    def test_a_new_target_waits_a_random_part_of_an_hour(self):
+        sha = self.serve("0.2.0", _zip_bytes("0.2.0"))
+        self.pin("0.2.0", sha)
+        runner._jitter = lambda: 0.5
+        try:
+            self.tick()
+            self.assertEqual(self.downloads, [])
+            self.assertEqual(self.slots()["retryAt"]["0.2.0:" + sha], self.now + 1800)
+            self.tick(advance=1500)
+            self.assertEqual(self.downloads, [])
+            self.tick(advance=300)
+            self.assertEqual(len(self.downloads), 1)
+            self.assertEqual(self.slots()["active"], "b")
+        finally:
+            runner._jitter = lambda: 0.0
+
+    def test_retries_wait_a_random_extra_part_of_their_gap(self):
+        self.pin("0.2.0", "a" * 64)                             # nothing served
+        self.tick()
+        runner._jitter = lambda: 1.0 - 1e-9
+        try:
+            self.tick(advance=3600)                              # the second try
+        finally:
+            runner._jitter = lambda: 0.0
+        gap = self.slots()["retryAt"]["0.2.0:" + "a" * 64] - self.now
+        self.assertAlmostEqual(gap, 7200 * (1 + runner.RETRY_JITTER), places=3)
+
+    def test_already_on_the_pinned_bytes_downloads_nothing(self):
+        data = _zip_bytes("0.1.0")
+        sha = hashlib.sha256(data).hexdigest()
+        st = self.slots()
+        st["slots"]["a"]["sha256"] = sha                        # what enroll now records
+        self._write_slots(st)
+        self.pin("0.1.0", sha)
+        self.tick()
+        self.assertEqual(self.downloads, [])
+        self.assertEqual(self.slots()["retryAt"], {})
+
+    def test_an_event_that_starts_during_the_download_delays_the_switch(self):
+        sha = self.serve("0.2.0", _zip_bytes("0.2.0"))
+        self.pin("0.2.0", sha)
+        answers = iter([False, True])                            # before the download, then before the switch
+        self.now += 300
+        runner.tick(self.root, [], is_event_live=lambda: next(answers), run=self._run,
+                    download=self._download, now=self.now)
+        st = self.slots()
+        self.assertEqual(st["active"], "a")
+        self.assertEqual(st["slots"]["b"]["sha256"], sha)        # ready in the other slot
+        self.assertEqual(st["probation"], None)
+        self.event = True
+        self.tick()
+        self.assertEqual(self.slots()["active"], "a")
+        self.event = False
+        self.tick()
+        st = self.slots()
+        self.assertEqual(st["active"], "b")
+        self.assertEqual(len(self.downloads), 1)                 # switched without fetching again
+
+    def test_a_disk_failure_isnt_called_a_network_one(self):
+        sha = self.serve("0.2.0", _zip_bytes("0.2.0"))
+        self.pin("0.2.0", sha)
+        real = runner.stage
+        runner.stage = lambda *a: (_ for _ in ()).throw(OSError(28, "No space left on device"))
+        try:
+            for _ in range(5):
+                self.tick(advance=0)
+                self.now = self.slots()["retryAt"].get("0.2.0:" + sha, self.now)
+        finally:
+            runner.stage = real
+        err = self.update()["error"]
+        self.assertIn("gave up after 5 failed tries", err)
+        self.assertIn("No space left", err)
+        self.assertNotIn("network", err)
+
+
+class RunnerVersion(unittest.TestCase):
+    def test_the_tick_is_told_the_runner_version(self):
+        root = tempfile.mkdtemp(prefix="pulse-runner-ver-")
+        self.addCleanup(shutil.rmtree, root, True)
+        app = os.path.join(root, "slots", "a", "app")
+        os.makedirs(app)
+        out = os.path.join(root, "seen")
+        with open(os.path.join(app, "monitor_once.py"), "w") as fh:
+            fh.write(f"import os\nopen({out!r}, 'w').write(os.environ.get('PULSE_RUNNER_VERSION', ''))\n")
+        self.assertEqual(runner.run_slot(root, "a", []), (True, "ok"))
+        with open(out) as fh:
+            self.assertEqual(fh.read(), runner.RUNNER_VERSION)
+
+
 RETRY_DAY = 25 * 3600
 
 
-@unittest.skipIf(sys.platform == "win32", "the process-group check is POSIX; the VPU smoke covers taskkill /T")
+@unittest.skipIf(sys.platform == "win32",
+                 "the process-group check is POSIX; taskkill /T is checked by hand on a VPU "
+                 "(docs/AGENT_RUNNER_VPU_CHECKLIST.md)")
 class Processes(unittest.TestCase):
     """A tick that runs over is killed with everything it started."""
 
