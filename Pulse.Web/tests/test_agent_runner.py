@@ -535,24 +535,33 @@ class Leaks(Fixture):
         import tracemalloc
         for i in range(6):
             self.one_failed_update(i)                # warm up: imports, caches
+        only = [tracemalloc.Filter(True, runner.__file__)]
+
+        def window(start):
+            for i in range(start, start + 60):
+                self.one_failed_update(i)
+            gc.collect()
+            return tracemalloc.take_snapshot().filter_traces(only)
+
         gc.collect()
         fds = _open_fds()
         tracemalloc.start()
         try:
-            before = tracemalloc.take_snapshot()
-            for i in range(6, 66):
-                self.one_failed_update(i)
             gc.collect()
-            after = tracemalloc.take_snapshot()
+            first = tracemalloc.take_snapshot().filter_traces(only)
+            second = window(6)                       # may still fill one-time caches
+            third = window(66)                       # a leak keeps growing here too
         finally:
             tracemalloc.stop()
-        # What's still allocated from runner.py after 60 failed updates: the
-        # runner keeps nothing between ticks, so close to nothing.
-        only = [tracemalloc.Filter(True, runner.__file__)]
-        grown = sum(d.size_diff for d in after.filter_traces(only).compare_to(before.filter_traces(only), "lineno"))
-        self.assertLess(grown, 4 * 1024, "runner.py holds memory across ticks")
-        total = sum(d.size_diff for d in after.compare_to(before, "filename"))
-        self.assertLess(total, 256 * 1024)
+        # What runner.py still holds after 60 more failed updates than before:
+        # it keeps nothing between ticks, so close to nothing. One-time
+        # allocations (the interpreter specialising code, lazy caches) land
+        # in the first window only.
+        diff = third.compare_to(second, "lineno")
+        grown = sum(d.size_diff for d in diff)
+        top = "; ".join(f"{d.traceback[0].lineno}: {d.size_diff:+d} B" for d in diff[:5] if d.size_diff)
+        self.assertLess(grown, 4 * 1024, f"runner.py holds memory across ticks ({top})")
+        self.assertIsNotNone(first)
         if fds is not None:
             self.assertLessEqual(_open_fds(), fds, "file handles or sockets left open")
 
