@@ -821,3 +821,29 @@ test("checkins_et lists every checkins column except the unfilled five", () => {
   }
   assert.ok(et.has("received_at_et") && et.has("sent_at_et"));
 });
+
+// PV-20
+test("readiness.status outside PASS/WARN/FAIL is stored as null", async () => {
+  const items = [
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000301", readiness: { status: "FIAL" } }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000302", readiness: { status: "WARN" } }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000303", reason: "heartbeat", readiness: undefined, status: "pass" }),
+  ];
+  await post({ secret: SECRET, checkins: items });
+  const get = (id) => env.DB.raw.prepare("SELECT readiness_status s FROM checkins WHERE checkin_id = ?").get(id).s;
+  assert.equal(get(items[0].checkinId), null);
+  assert.equal(get(items[1].checkinId), "WARN");
+  assert.equal(get(items[2].checkinId), null);
+});
+
+test("alert counts distinct units by venue, not by the retired serial and hostname", async () => {
+  await post({ secret: SECRET, checkins: [
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000311", venueId: "V1", vpuName: "A", hostname: undefined, serialNumber: undefined }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000312", venueId: "V1", vpuName: "A", hostname: undefined, serialNumber: undefined }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000313", venueId: "V2", vpuName: "B", hostname: undefined, serialNumber: undefined }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000314", venueId: undefined, vpuName: "C", hostname: undefined, serialNumber: undefined }),
+  ] });
+  const res = await runAlertCheck(env, new Date());
+  assert.equal(res.count, 4);
+  assert.equal(res.units, 3);
+});

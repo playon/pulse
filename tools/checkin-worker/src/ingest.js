@@ -221,7 +221,7 @@ function normalize(item, receivedAt) {
     pulseVersion: str(item.pulseVersion),
     channel: str(item.channel),
     // A heartbeat is one line: identity plus a top-level "status": "PASS".
-    readinessStatus: str(readiness.status) || (reason === "heartbeat" ? str(item.status) : null),
+    readinessStatus: verdict(readiness.status) || (reason === "heartbeat" ? verdict(item.status) : null),
     readinessPolicy: str(readiness.policyVersion),
     blockers: codes(readiness.blockers),
     risks: codes(readiness.risks),
@@ -304,6 +304,12 @@ function str(v, max = MAX_FIELD) {
   if (typeof v !== "string") return null;
   const t = v.trim();
   return t ? t.slice(0, max) : null;
+}
+
+// PASS | WARN | FAIL, the same set telemetry.status uses; anything else is null.
+function verdict(v) {
+  const s = str(v);
+  return STATUSES.has(s) ? s : null;
 }
 
 function codes(v) {
