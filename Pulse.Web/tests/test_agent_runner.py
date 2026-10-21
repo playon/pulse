@@ -474,21 +474,76 @@ class Leaks(Fixture):
         self.real_tick(mode)
         self.assertNotEqual(self.update()["at"], before)
 
-    def test_a_network_failure_backs_off(self):
-        _Release.zips["0.3.0"] = _zip_bytes("0.3.0")
-        self.pin("0.3.0", hashlib.sha256(_Release.zips["0.3.0"]).hexdigest())
-        gaps = []
-        for _ in range(7):
+    def _drop_until_given_up(self, version):
+        _Release.zips[version] = _zip_bytes(version)
+        sha = hashlib.sha256(_Release.zips[version]).hexdigest()
+        key = f"{version}:{sha}"
+        self.pin(version, sha)
+        gaps, attempts = [], 0
+        for _ in range(5):
+            at = (self.update() or {}).get("at")
             self.real_tick("drop", advance=0)
+            attempts += self.update()["at"] != at
             st = self.slots()
-            gaps.append(st["retryAt"]["0.3.0:" + hashlib.sha256(_Release.zips["0.3.0"]).hexdigest()] - self.now)
-            self.now = self.now + gaps[-1]
-        self.assertEqual(gaps, [3600, 7200, 14400, 28800, 57600, 86400, 86400])
-        self.assertIn("broke off", self.update()["error"])
+            if key in st["retryAt"]:
+                gaps.append(st["retryAt"][key] - self.now)
+                self.now += gaps[-1]
+        return key, sha, gaps, attempts
+
+    def test_a_network_failure_backs_off_then_gives_up_after_five(self):
+        key, sha, gaps, attempts = self._drop_until_given_up("0.3.0")
+        self.assertEqual(gaps, [3600, 7200, 14400, 28800])
+        self.assertEqual(attempts, 5)
+        st = self.slots()
+        self.assertIn(key, st["blocked"])
+        self.assertEqual((st["retryAt"], st["tries"]), ({}, {}))
+        u = self.update()
+        self.assertEqual((u["status"], u["version"]), ("failed", "0.3.0"))
+        self.assertIn("gave up after 5 network failures", u["error"])
+        self.assertIn("broke off", u["error"])                 # the last cause
+        self.assertNotIn(self.root, u["error"])
+        at = u["at"]
+        for _ in range(3):
+            self.real_tick("ok", advance=RETRY_DAY)            # served fine now: still no 6th attempt
+        self.assertEqual(self.update()["at"], at)
+        self.assertEqual(self.slots()["active"], "a")
         self.assert_clean()
+
+    def test_a_given_up_target_is_tried_again_after_it_changes(self):
+        key, sha, _, _ = self._drop_until_given_up("0.3.0")
+        self.pin("0.3.1", "b" * 64)                             # another target...
+        self.real_tick("missing", advance=1)
+        st = self.slots()
+        self.assertNotIn(key, st["blocked"])
+        self.assertEqual(st["tries"], {"0.3.1:" + "b" * 64: 1})  # ...counted on its own
+        self.pin("0.3.0", sha)                                  # ...then back: a fresh start
+        self.real_tick("ok", advance=1)
+        st = self.slots()
+        self.assertEqual(st["active"], "b")
+        self.assertEqual((st["blocked"], st["retryAt"], st["tries"]), ({}, {}, {}))
+
+    def test_clearing_the_target_resets_the_count(self):
+        key, sha, _, _ = self._drop_until_given_up("0.3.0")
+        with open(os.path.join(self.root, runner.QUEUE_FILE), "w") as fh:
+            json.dump({"queue": [], "control": {"mode": "on", "skip": []}}, fh)
+        self.real_tick("ok", advance=1)
+        self.assertEqual(self.slots()["blocked"], {})
+        self.pin("0.3.0", sha)
         self.real_tick("ok", advance=1)
         self.assertEqual(self.slots()["active"], "b")
-        self.assertEqual(self.slots()["tries"], {})
+
+    def test_a_success_resets_the_count(self):
+        _Release.zips["0.3.0"] = _zip_bytes("0.3.0")
+        sha = hashlib.sha256(_Release.zips["0.3.0"]).hexdigest()
+        self.pin("0.3.0", sha)
+        for _ in range(3):
+            self.real_tick("drop", advance=0)
+            self.now = self.slots()["retryAt"]["0.3.0:" + sha]
+        self.assertEqual(self.slots()["tries"], {"0.3.0:" + sha: 3})
+        self.real_tick("ok", advance=1)
+        st = self.slots()
+        self.assertEqual(st["active"], "b")
+        self.assertEqual((st["retryAt"], st["tries"]), ({}, {}))
 
     def test_a_download_that_trickles_is_cut_off(self):
         saved = runner.DOWNLOAD_DEADLINE_SECONDS

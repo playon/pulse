@@ -35,8 +35,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   computer name.
 - Runner: a target that was refused or rolled back is tried again only after
   fleet control names a different target, or clears it. Before, it was never
-  tried again. A network failure is retried after 1 h, then 2, 4 and so on, up
-  to 24 h apart. It used to retry every hour.
+  tried again. A network failure is retried after 1 h, 2 h, 4 h and 8 h. The
+  fifth network failure gives the target up the same way, and
+  `agentUpdate.error` says so with the last cause ("gave up after 5 network
+  failures; the last: ..."). It used to retry every hour, forever. The count
+  is kept for the current target only, and starts again when the target
+  changes or an update succeeds.
 - Runner: `agent-slots.json` only keeps refusals and retry times for the
   current target, so it no longer grows with every target ever pinned.
 - A unit missing one of its main cameras (1 of 2 on an S2) now reports readiness FAIL, with the `cam-partial` finding critical. It was WARN. A multi-camera head can't stream with a camera missing. Verdict change only; no new fields.

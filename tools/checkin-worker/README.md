@@ -158,11 +158,13 @@ Each change is stored on the row (`agent_set_by`, `agent_set_at`,
 `agent_note`) and appended to `agent_target_log` with the target it replaced
 (migration 0018).
 
-**A unit that refused a target** (bad hash, damaged zip, or rolled back after
-its new build failed) doesn't try it again until its target changes. To make it
-retry, clear the target or set another one, let the unit check in, then set
-the target again. A download that failed for a network reason is retried on
-its own, 1 h, 2 h, 4 h and so on, up to a day apart.
+**A unit that refused a target** (bad hash, damaged zip, rolled back after
+its new build failed, or five failed downloads) doesn't try it again until its
+target changes. To make it retry, clear the target or set another one, let the
+unit check in, then set the target again. A download that fails for a network
+reason is retried on its own after 1 h, 2 h, 4 h and 8 h. The fifth failure
+gives up, with `agent_update_error` starting "gave up after 5 network
+failures".
 
 Setup for the endpoint, all on `pulse-checkin-admin`:
 

@@ -37,7 +37,8 @@ A failed update leaves the unit on the build it runs and says why in
 agent-update.json. A zip that fails a check, and a build that was rolled back,
 are not tried again until fleet control names a different target (clearing
 it counts). A download that fails for a network reason is retried after an
-hour, then two, four, up to a day apart.
+hour, then two, four and eight; the fifth failure gives the target up the
+same way.
 
 Nothing an update does outlives it: the download, a half-unpacked slot and
 the slot being replaced are swept at the start of every tick (a killed runner
@@ -80,8 +81,8 @@ DOWNLOAD_TIMEOUT_SECONDS = 60             # per read
 DOWNLOAD_DEADLINE_SECONDS = 120            # the whole download
 MAX_ZIP_BYTES = 64 * 1024 * 1024
 MAX_UNPACKED_BYTES = 128 * 1024 * 1024
-RETRY_AFTER_SECONDS = 3600                 # doubles per failure, up to a day
-RETRY_MAX_SECONDS = 24 * 3600
+RETRY_AFTER_SECONDS = 3600                 # doubles per failure: 1, 2, 4, 8 h
+MAX_NETWORK_TRIES = 5                      # then the target is given up, like a refused one
 ERROR_MAX = 200
 LOG_MAX_BYTES = 512 * 1024
 REQUIRED_FILES = ("app/monitor_once.py", "app/main.py", "app/pulse_agent/VERSION", "app/requirements.txt")
@@ -495,13 +496,20 @@ def maybe_update(root: str, st: dict, now: float, *, is_event_live=event_live, d
         return
     except (OSError, ValueError) as e:
         # The network, a full disk, a slot in use: worth another try later,
-        # backing off so a unit on a bad link doesn't pull 64 MB an hour.
+        # backing off so a unit on a bad link doesn't pull 64 MB an hour, and
+        # giving up after five, until the target changes.
+        cause = f"{type(e).__name__}: {e.strerror or e}" if isinstance(e, OSError) else f"{type(e).__name__}: {e}"
         tries = int(st["tries"].get(key) or 0) + 1
-        st["tries"][key] = tries
-        st["retryAt"][key] = now + min(RETRY_MAX_SECONDS, RETRY_AFTER_SECONDS * 2 ** min(tries - 1, 8))
+        if tries >= MAX_NETWORK_TRIES:
+            cause = f"gave up after {tries} network failures; the last: {short_error(cause)}"
+            st["blocked"][key] = short_error(cause)
+            st["retryAt"].pop(key, None)
+            st["tries"].pop(key, None)
+        else:
+            st["tries"][key] = tries
+            st["retryAt"][key] = now + RETRY_AFTER_SECONDS * 2 ** (tries - 1)
         save_slots(root, st)
-        report(root, "failed", version, f"{type(e).__name__}: {e.strerror or e}" if isinstance(e, OSError)
-               else f"{type(e).__name__}: {e}", current)
+        report(root, "failed", version, cause, current)
         return
     finally:
         try:
