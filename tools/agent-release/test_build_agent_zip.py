@@ -71,8 +71,9 @@ class Build(unittest.TestCase):
                 notes = fh.read()
         self.assertIn("- A thing.", notes)
         self.assertNotIn("Old.", notes)
-        self.assertIn(f"agent_sha256 = '{sha}'", notes)
-        self.assertIn("agent_version = '1.2.3'", notes)
+        self.assertIn(f"'1.2.3', '{sha}'", notes)
+        self.assertIn("INSERT INTO agent_target", notes)
+        self.assertNotIn("monitor_control", notes)          # pins left it in migration 0020
 
     def test_the_real_tree_builds(self):
         version = b.agent_version(WEB_ROOT)
@@ -82,6 +83,17 @@ class Build(unittest.TestCase):
         self.assertIn("app/pulse_agent/checkin.py", names)
         self.assertIn("scripts/Get-SystemIdentity.ps1", names)
         self.assertFalse(any(n.startswith(("app/python/", "tests/")) for n in names))
+
+    def test_enroll_hashes_a_tree_as_the_release_zip_would(self):
+        # fleet_enroll records this for the slot it installs (PV-85).
+        from pulse_agent.release_zip import tree_sha256
+        with tempfile.TemporaryDirectory() as d:
+            _tree(d)
+            os.makedirs(os.path.join(d, "app", "__pycache__"), exist_ok=True)
+            with open(os.path.join(d, "app", "__pycache__", "x.pyc"), "wb") as fh:
+                fh.write(b"cache")                        # what a slot has after running
+            _, sha = b.build(d, "1.2.3", os.path.join(d, "dist"))
+            self.assertEqual(tree_sha256(d), sha)
 
 
 if __name__ == "__main__":

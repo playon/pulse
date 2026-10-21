@@ -460,12 +460,15 @@ def enroll(source_root: str, channel: str) -> dict:
                 _copy_file(os.path.join(source_root, f), os.path.join(slot, f))
         _copy_file(os.path.join(source_root, "app", "pulse_agent", "runner.py"), os.path.join(MONITOR_ROOT, RUNNER_FILE))
         agent_version = _read_text(os.path.join(slot, "app", "pulse_agent", "VERSION"))
-        # A fresh start: slot a runs, nothing on probation, nothing blocked. No
-        # hash: if fleet control pins a release, the runner fetches it, even of
-        # the same version, so the unit runs exactly the pinned bytes.
+        # A fresh start: slot a runs, nothing on probation, nothing blocked.
+        # The hash is the one this tree's release zip would have
+        # (pulse_agent/release_zip.py): a unit enrolled from exactly a released
+        # build doesn't download it again when fleet control pins it, and any
+        # other tree is replaced by the pinned bytes.
+        sha = _slot_sha256(slot)
         with open(os.path.join(MONITOR_ROOT, SLOTS_FILE), "w", encoding="utf-8") as fh:
             json.dump({"active": ENROLL_SLOT, "previous": None, "probation": None,
-                       "slots": {ENROLL_SLOT: {"version": agent_version, "sha256": None,
+                       "slots": {ENROLL_SLOT: {"version": agent_version, "sha256": sha,
                                                "installedAt": time.time(), "source": source_root}},
                        "blocked": {}, "retryAt": {}}, fh, indent=2)
         steps.append(f"Installed this Pulse build (agent {agent_version or 'unknown'}) in {slot}.")
@@ -492,6 +495,14 @@ def enroll(source_root: str, channel: str) -> dict:
             _run(["schtasks", "/Change", "/TN", TASK_NAME, "/ENABLE"], timeout=20)
         return {"ok": False, "error": str(e), "steps": steps}
     return {"ok": True, "steps": steps}
+
+
+def _slot_sha256(slot: str) -> Optional[str]:
+    try:
+        from pulse_agent.release_zip import tree_sha256
+    except ImportError:
+        return None
+    return tree_sha256(slot)
 
 
 def _copy_file(src: str, dst: str) -> None:

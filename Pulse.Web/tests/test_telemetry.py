@@ -51,6 +51,17 @@ class TestBuildTelemetry(unittest.TestCase):
         self.assertEqual(set(t["calibration"]), {"primary", "sports", "ocr"})
         self.assertEqual(t["calibration"]["primary"], "Football")
 
+    def test_runner_version_comes_from_the_runner(self):
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"PULSE_RUNNER_VERSION": "2"}):
+            self.assertEqual(agent_telemetry._build_telemetry(self.dash, self.raw)["runnerVersion"], "2")
+        for bad in ("", "x" * 40, "2; drop"):
+            with mock.patch.dict(os.environ, {"PULSE_RUNNER_VERSION": bad}):
+                self.assertIsNone(agent_telemetry._build_telemetry(self.dash, self.raw)["runnerVersion"])
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PULSE_RUNNER_VERSION", None)     # an older runner, or no runner
+            self.assertIsNone(agent_telemetry._build_telemetry(self.dash, self.raw)["runnerVersion"])
+
     def test_status_matches_the_verdict(self):
         self.assertEqual(self.t["status"], self.dash["readiness"]["status"])
         self.assertEqual(self.t["statusSince"], "2026-10-13T19:00:00Z")

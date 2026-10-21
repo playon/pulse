@@ -904,6 +904,19 @@ def _fit_telemetry(t: dict) -> dict:
     return t
 
 
+_RUNNER_VERSION_RE = re.compile(r"^[0-9A-Za-z.\-]{1,16}$")
+
+
+def _runner_version() -> Optional[str]:
+    """The agent runner's own version (runner.RUNNER_VERSION), which the
+    runner passes to each tick. An update never replaces the runner, so this
+    shows which units need enrolling again for a runner fix. None: run by a
+    runner from before PV-85's review fixes, or not by the runner at all."""
+    import os
+    v = os.environ.get("PULSE_RUNNER_VERSION") or ""
+    return v if _RUNNER_VERSION_RE.match(v) else None
+
+
 def _build_telemetry(dashboard: dict, raw: dict, status_since: Optional[str] = None,
                      status: Optional[str] = None, open_codes=None) -> dict:
     """The utilitarian payload. Fail-soft: a collector that errored leaves its
@@ -944,6 +957,7 @@ def _build_telemetry(dashboard: dict, raw: dict, status_since: Optional[str] = N
         "blockers":        [b.get("title") for b in blockers][:10],
         "checkedAt":       verdict.get("timestamp"),
         "pixellotVersion": ident.get("pixellotVersion"),
+        "runnerVersion":   _runner_version(),
         "network": {
             "internetReachable": net.get("internetReachable"),
             "streamingPath":     _telemetry_streaming_path(port_tests),

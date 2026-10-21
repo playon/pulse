@@ -5,9 +5,11 @@
 //
 // Fail closed at every step: no verified Access identity, an identity not in
 // FLEET_CONTROL_EDITORS, a body that isn't exactly the documented shape, a
-// unit nobody has heard from, or a release that can't be checked all leave the
-// table as it was. A target is saved only when the playon/pulse release
-// agent-v<version> exists and its pulse-agent-<version>.zip has that SHA-256.
+// unit nobody has heard from, or a release that can't be checked all leave
+// agent_target (migration 0020) as it was. A target is saved only when the
+// playon/pulse release agent-v<version> exists and its
+// pulse-agent-<version>.zip has that SHA-256. Pins never touch
+// monitor_control, whose unit rows decide a unit's mode.
 // There is no URL in the request: the agent builds it from the version.
 
 import { accessIdentity } from "./access.js";

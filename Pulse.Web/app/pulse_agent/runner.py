@@ -36,9 +36,14 @@ match the pinned hash is refused.
 A failed update leaves the unit on the build it runs and says why in
 agent-update.json. A zip that fails a check, and a build that was rolled back,
 are not tried again until fleet control names a different target (clearing
-it counts). A download that fails for a network reason is retried after an
-hour, then two, four and eight; the fifth failure gives the target up the
-same way.
+it counts). A download that fails for another reason (the network, a full
+disk, a slot in use) is retried after about an hour, then two, four and
+eight; the fifth try gives the target up the same way. Each try is counted
+before it starts, so one the task's time limit kills still counts.
+
+A new target isn't fetched at once: each unit waits a random part of an hour
+first, and retries wait a random extra part of their gap, so a fleet pin
+doesn't pull the zip on every unit in the same five minutes.
 
 Nothing an update does outlives it: the download, a half-unpacked slot and
 the slot being replaced are swept at the start of every tick (a killed runner
@@ -50,6 +55,7 @@ import hashlib
 import http.client
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -59,6 +65,13 @@ import urllib.error
 import urllib.request
 import zipfile
 import zlib
+
+# This file's own version: what the monitor's posts report as
+# telemetry.runnerVersion (it reads PULSE_RUNNER_VERSION). An update never
+# replaces the runner, so this says which units need enrolling again for a
+# runner fix. Bump it with any change to this file. None reported: a runner
+# from before PV-85's review fixes.
+RUNNER_VERSION = "2"
 
 RELEASE_URL = "https://github.com/playon/pulse/releases/download/agent-v{version}/pulse-agent-{version}.zip"
 SLOTS_FILE = "agent-slots.json"
@@ -73,16 +86,23 @@ SLOT_NAMES = ("a", "b")
 VERSION_RE = re.compile(r"^\d{1,4}\.\d{1,4}\.\d{1,6}$")   # the Worker's TARGET_VERSION_RE
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 PROBATION_CLEAN_TICKS = 3
+TASK_LIMIT_SECONDS = 300                    # Install-PulseMonitor.ps1: ExecutionTimeLimit PT5M
 TICK_TIMEOUT_SECONDS = 240                  # the task kills everything at 300
 # An update after a tick that took longer than this waits for a quicker
 # tick, so the download and unpack fit inside the task's 300 s.
 UPDATE_AFTER_TICK_MAX_SECONDS = 120
-DOWNLOAD_TIMEOUT_SECONDS = 60             # per read
-DOWNLOAD_DEADLINE_SECONDS = 120            # the whole download
+# What an update needs after the download, inside the task's limit: unpack,
+# two renames, and the event check before the switch (tasklist, up to 20 s).
+STAGE_RESERVE_SECONDS = 60
+DOWNLOAD_TIMEOUT_SECONDS = 30              # per read: a read can block this long past the deadline
+DOWNLOAD_DEADLINE_SECONDS = 120            # the whole download, at most
+MIN_DOWNLOAD_SECONDS = 30                  # less time left than this: try on a later tick
+FIRST_SPREAD_SECONDS = 3600                # a new target waits a random part of this
+RETRY_JITTER = 0.5                         # a retry waits up to this much of its gap more
 MAX_ZIP_BYTES = 64 * 1024 * 1024
 MAX_UNPACKED_BYTES = 128 * 1024 * 1024
 RETRY_AFTER_SECONDS = 3600                 # doubles per failure: 1, 2, 4, 8 h
-MAX_NETWORK_TRIES = 5                      # then the target is given up, like a refused one
+MAX_TRIES = 5                              # then the target is given up, like a refused one
 ERROR_MAX = 200
 LOG_MAX_BYTES = 512 * 1024
 REQUIRED_FILES = ("app/monitor_once.py", "app/main.py", "app/pulse_agent/VERSION", "app/requirements.txt")
@@ -92,6 +112,15 @@ _CREATE_NO_WINDOW = 0x08000000
 
 class Rejected(Exception):
     """A zip that fails a check: never retried for this version and hash."""
+
+
+def _jitter() -> float:
+    """0 <= x < 1; tests replace it."""
+    return random.random()
+
+
+def _retry_gap(tries: int) -> float:
+    return RETRY_AFTER_SECONDS * 2 ** (tries - 1) * (1 + RETRY_JITTER * _jitter())
 
 
 # ── Small file helpers ───────────────────────────────────────────────────────
@@ -217,7 +246,7 @@ def run_slot(root: str, name: str, args: list, timeout: float = TICK_TIMEOUT_SEC
     script = os.path.join(slot_dir(root, name), "app", "monitor_once.py")
     if not os.path.isfile(script):
         return False, f"slot {name} has no app/monitor_once.py"
-    env = dict(os.environ, PULSE_MONITOR_DATA=root)
+    env = dict(os.environ, PULSE_MONITOR_DATA=root, PULSE_RUNNER_VERSION=RUNNER_VERSION)
     kw = {"env": env, "cwd": os.path.dirname(script), "stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL}
     if sys.platform == "win32":
         kw["creationflags"] = _CREATE_NO_WINDOW
@@ -251,13 +280,17 @@ def run_slot(root: str, name: str, args: list, timeout: float = TICK_TIMEOUT_SEC
     return True, "ok"
 
 
-def fetch(url: str, dest: str) -> str:
+def fetch(url: str, dest: str, deadline=None) -> str:
     """Download url to dest, returning its SHA-256. Raises OSError on a
     network failure (an HTTP error, a dropped connection, too slow), Rejected
-    when it's too big. Every socket and file is closed on every path."""
+    when it's too big. `deadline` (time.monotonic()) is when it must stop;
+    a read can run DOWNLOAD_TIMEOUT_SECONDS past it, which the caller allows
+    for. Every socket and file is closed on every path."""
     h = hashlib.sha256()
     n = 0
-    deadline = time.monotonic() + DOWNLOAD_DEADLINE_SECONDS
+    started = time.monotonic()
+    cap = started + DOWNLOAD_DEADLINE_SECONDS
+    deadline = cap if deadline is None else min(deadline, cap)
     req = urllib.request.Request(url, headers={"User-Agent": "Pulse-agent-runner"})
     try:
         with urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT_SECONDS) as resp, open(dest, "wb") as out:
@@ -270,7 +303,7 @@ def fetch(url: str, dest: str) -> str:
                 if n > MAX_ZIP_BYTES:
                     raise Rejected(f"the download is over {MAX_ZIP_BYTES // (1024 * 1024)} MB")
                 if time.monotonic() > deadline:
-                    raise OSError(f"the download took over {DOWNLOAD_DEADLINE_SECONDS} s")
+                    raise OSError(f"the download took over {int(deadline - started)} s")
                 h.update(chunk)
                 out.write(chunk)
             # read(n) returns b"" when the connection drops early, as if the
@@ -451,8 +484,18 @@ def _forget_other_targets(st: dict, key: str) -> bool:
     return changed
 
 
+def _give_up(root: str, st: dict, key: str, version: str, current: str, why: str) -> None:
+    st["blocked"][key] = short_error(why)
+    st["retryAt"].pop(key, None)
+    st["tries"].pop(key, None)
+    save_slots(root, st)
+    report(root, "failed", version, why, current)
+
+
 def maybe_update(root: str, st: dict, now: float, *, is_event_live=event_live, download=fetch,
-                 url_template: str = RELEASE_URL) -> None:
+                 url_template: str = RELEASE_URL, deadline=None) -> None:
+    """`deadline` (time.monotonic()) is when the download and unpack must be
+    done for the switch to fit inside the task's time limit."""
     want = target(root)
     key = f"{want['version']}:{want['sha256']}" if want else ""
     if _forget_other_targets(st, key):
@@ -465,51 +508,62 @@ def maybe_update(root: str, st: dict, now: float, *, is_event_live=event_live, d
         return                                     # already running the pinned bytes
     if key in st["blocked"]:
         return
+    current = slot_version(root, active)
+    other = _other(active)
+    in_other = (st["slots"].get(other) or {}).get("sha256") == sha and slot_version(root, other) == version
+    if key not in st["retryAt"] and key not in st["tries"] and not in_other:
+        # A new target: wait a random part of an hour, so a fleet pin doesn't
+        # have every unit download in the same five minutes.
+        st["retryAt"][key] = now + FIRST_SPREAD_SECONDS * _jitter()
+        save_slots(root, st)
     if st["retryAt"].get(key, 0) > now:
         return
     if is_event_live():
         return
-    current = slot_version(root, active)
-    other = _other(active)
-    if (st["slots"].get(other) or {}).get("sha256") == sha and slot_version(root, other) == version:
+    if in_other:
         _switch(root, st, other, version, sha)     # a rollback to the build still in the other slot
         return
+    deadline = time.monotonic() + TASK_LIMIT_SECONDS - STAGE_RESERVE_SECONDS if deadline is None else deadline
+    until = deadline - DOWNLOAD_TIMEOUT_SECONDS    # a read can block that long past the last check
+    if until - time.monotonic() < MIN_DOWNLOAD_SECONDS:
+        log(root, f"not enough of the task's time left to download {version}; a later tick will")
+        return
+    tries = int(st["tries"].get(key) or 0)
+    if tries >= MAX_TRIES:
+        # The last try was counted but never reported: the task's time limit
+        # (or a crash) stopped it part way.
+        _give_up(root, st, key, version, current,
+                 f"gave up after {tries} failed tries; the last never finished (the task's time limit?)")
+        return
+    # Count this try before it starts, so one the time limit kills still counts.
+    tries += 1
+    st["tries"][key] = tries
+    st["retryAt"][key] = now + _retry_gap(tries)
     url = url_template.format(version=version)
     tmp = os.path.join(root, DOWNLOAD_FILE)
-    log(root, f"downloading {version} from {url}")
+    log(root, f"downloading {version} from {url} (try {tries} of {MAX_TRIES})")
     # The other slot is about to be replaced: stop vouching for what's in it
     # until it's known whether it was (stage leaves it whole either way).
     kept = st["slots"].pop(other, None)
-    if kept is not None:
-        save_slots(root, st)
+    save_slots(root, st)
     try:
-        got = download(url, tmp)
+        got = download(url, tmp, until)
         if got != sha:
             raise Rejected(f"its SHA-256 is {got[:12]}..., not the pinned {sha[:12]}...")
         stage(root, tmp, version, other)
     except Rejected as e:
-        st["blocked"][key] = short_error(e)
-        st["retryAt"].pop(key, None)
-        st["tries"].pop(key, None)
-        save_slots(root, st)
-        report(root, "failed", version, str(e), current)
+        _give_up(root, st, key, version, current, str(e))
         return
     except (OSError, ValueError) as e:
-        # The network, a full disk, a slot in use: worth another try later,
-        # backing off so a unit on a bad link doesn't pull 64 MB an hour, and
-        # giving up after five, until the target changes.
+        # The network, a full disk, a slot in use: worth another try later
+        # (already booked above, backing off so a unit on a bad link doesn't
+        # pull 64 MB an hour), giving up after five, until the target changes.
         cause = f"{type(e).__name__}: {e.strerror or e}" if isinstance(e, OSError) else f"{type(e).__name__}: {e}"
-        tries = int(st["tries"].get(key) or 0) + 1
-        if tries >= MAX_NETWORK_TRIES:
-            cause = f"gave up after {tries} network failures; the last: {short_error(cause)}"
-            st["blocked"][key] = short_error(cause)
-            st["retryAt"].pop(key, None)
-            st["tries"].pop(key, None)
+        if tries >= MAX_TRIES:
+            _give_up(root, st, key, version, current,
+                     f"gave up after {tries} failed tries; the last: {short_error(cause)}")
         else:
-            st["tries"][key] = tries
-            st["retryAt"][key] = now + RETRY_AFTER_SECONDS * 2 ** (tries - 1)
-        save_slots(root, st)
-        report(root, "failed", version, cause, current)
+            report(root, "failed", version, cause, current)
         return
     finally:
         try:
@@ -524,6 +578,12 @@ def maybe_update(root: str, st: dict, now: float, *, is_event_live=event_live, d
     st["slots"][other] = {"version": version, "sha256": sha, "installedAt": now}
     st["retryAt"].pop(key, None)
     st["tries"].pop(key, None)
+    if is_event_live():
+        # An event started during the download: keep the new build in the
+        # other slot and switch to it on the first tick after the event.
+        save_slots(root, st)
+        log(root, f"{version} is ready in slot {other}; an event started, so it waits")
+        return
     _switch(root, st, other, version, sha)
 
 
@@ -531,6 +591,7 @@ def maybe_update(root: str, st: dict, now: float, *, is_event_live=event_live, d
 
 def tick(root: str, argv: list, *, is_event_live=event_live, run=run_slot, download=fetch,
          url_template: str = RELEASE_URL, now=None) -> int:
+    began = time.monotonic()                # the task's limit counts from about here
     now = time.time() if now is None else now
     if "--dry-run" not in argv:
         sweep(root)
@@ -584,7 +645,8 @@ def tick(root: str, argv: list, *, is_event_live=event_live, run=run_slot, downl
         return 1
     if took > UPDATE_AFTER_TICK_MAX_SECONDS:
         return 0
-    maybe_update(root, st, now, is_event_live=is_event_live, download=download, url_template=url_template)
+    maybe_update(root, st, now, is_event_live=is_event_live, download=download, url_template=url_template,
+                 deadline=began + TASK_LIMIT_SECONDS - STAGE_RESERVE_SECONDS)
     return 0
 
 
