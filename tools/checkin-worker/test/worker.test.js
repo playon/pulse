@@ -797,3 +797,66 @@ test("switching a unit off the way the README says keeps its agent pin", async (
   assert.equal(body.control.mode, "off");
   assert.deepEqual(body.control.agent, { version: "0.1.0", sha256: SHA_B });
 });
+
+// PV-19: the five never-filled telemetry columns stay out of every view.
+const UNFILLED = ["tel_risk_count", "tel_reboot_pending", "tel_poe_draw_w", "tel_clock_offset_s", "tel_camera_macs"];
+
+test("no view exposes the never-filled telemetry columns", () => {
+  const db = env.DB.raw;
+  const views = db.prepare("SELECT name FROM sqlite_master WHERE type = 'view'").all();
+  assert.ok(views.length >= 4);
+  const gone = new Set([...UNFILLED, "risk_count", "reboot_pending", "poe_draw_w", "clock_offset_s", "camera_macs"]);
+  for (const { name } of views) {
+    const cols = db.prepare(`SELECT name FROM pragma_table_info('${name}')`).all().map((c) => c.name);
+    for (const c of cols) assert.ok(!gone.has(c), `${name}.${c}`);
+  }
+});
+
+test("checkins_et lists every checkins column except the unfilled five", () => {
+  const db = env.DB.raw;
+  const names = (t) => db.prepare(`SELECT name FROM pragma_table_info('${t}')`).all().map((c) => c.name);
+  const et = new Set(names("checkins_et"));
+  for (const c of names("checkins")) {
+    assert.equal(et.has(c), !UNFILLED.includes(c), `checkins_et vs checkins.${c} (add new columns to the view)`);
+  }
+  assert.ok(et.has("received_at_et") && et.has("sent_at_et"));
+});
+
+// PV-20
+test("readiness.status outside PASS/WARN/FAIL is stored as null", async () => {
+  const items = [
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000301", readiness: { status: "FIAL" } }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000302", readiness: { status: "WARN" } }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000303", reason: "heartbeat", readiness: undefined, status: "pass" }),
+  ];
+  await post({ secret: SECRET, checkins: items });
+  const get = (id) => env.DB.raw.prepare("SELECT readiness_status s FROM checkins WHERE checkin_id = ?").get(id).s;
+  assert.equal(get(items[0].checkinId), null);
+  assert.equal(get(items[1].checkinId), "WARN");
+  assert.equal(get(items[2].checkinId), null);
+});
+
+test("alert counts distinct units by venue, not by the retired serial and hostname", async () => {
+  await post({ secret: SECRET, checkins: [
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000311", venueId: "V1", vpuName: "A", hostname: undefined, serialNumber: undefined }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000312", venueId: "V1", vpuName: "A", hostname: undefined, serialNumber: undefined }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000313", venueId: "V2", vpuName: "B", hostname: undefined, serialNumber: undefined }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000314", venueId: undefined, vpuName: "C", hostname: undefined, serialNumber: undefined }),
+  ] });
+  const res = await runAlertCheck(env, new Date());
+  assert.equal(res.count, 4);
+  assert.equal(res.units, 3);
+});
+
+// PV-28: venue-keyed units read through checkins_unit, retention through
+// idx_checkins_received, and the serial/hostname index is gone.
+test("check-in indexes match how venue-keyed units are read", () => {
+  const db = env.DB.raw;
+  const plan = (sql) => db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all().map((r) => r.detail).join(" | ");
+  const idx = db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'checkins'").all().map((r) => r.name);
+  assert.ok(!idx.includes("idx_checkins_unit"));
+  const unit = "COALESCE(venue_id, vpu_name, hostname, serial_number) = ?";
+  assert.match(plan(`SELECT received_at FROM checkins WHERE ${unit} ORDER BY received_at DESC LIMIT 50`), /checkins_unit/);
+  assert.match(plan(`SELECT sent_at FROM checkins WHERE ${unit} AND received_at >= ?`), /checkins_unit/);
+  assert.match(plan("DELETE FROM checkins WHERE received_at < ?"), /idx_checkins_received/);
+});
