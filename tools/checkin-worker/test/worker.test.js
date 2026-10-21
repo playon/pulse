@@ -847,3 +847,16 @@ test("alert counts distinct units by venue, not by the retired serial and hostna
   assert.equal(res.count, 4);
   assert.equal(res.units, 3);
 });
+
+// PV-28: venue-keyed units read through checkins_unit, retention through
+// idx_checkins_received, and the serial/hostname index is gone.
+test("check-in indexes match how venue-keyed units are read", () => {
+  const db = env.DB.raw;
+  const plan = (sql) => db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all().map((r) => r.detail).join(" | ");
+  const idx = db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'checkins'").all().map((r) => r.name);
+  assert.ok(!idx.includes("idx_checkins_unit"));
+  const unit = "COALESCE(venue_id, vpu_name, hostname, serial_number) = ?";
+  assert.match(plan(`SELECT received_at FROM checkins WHERE ${unit} ORDER BY received_at DESC LIMIT 50`), /checkins_unit/);
+  assert.match(plan(`SELECT sent_at FROM checkins WHERE ${unit} AND received_at >= ?`), /checkins_unit/);
+  assert.match(plan("DELETE FROM checkins WHERE received_at < ?"), /idx_checkins_received/);
+});
