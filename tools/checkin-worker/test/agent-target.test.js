@@ -3,6 +3,7 @@ import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync, createSign } from "node:crypto";
 import worker from "../src/index.js";
+import { forgetReleaseChecks } from "../src/agent-target.js";
 import { fakeD1 } from "./fake-d1.js";
 
 const TEAM = "pulse-test.cloudflareaccess.com";
@@ -22,8 +23,9 @@ let hashFiles;       // tag -> text (or a status number)
 beforeEach(() => {
   env = {
     ROLE: "admin", DB: fakeD1(), ACCESS_TEAM_DOMAIN: TEAM, ACCESS_AUD: `${ADMIN_AUD}, ${VITALS_AUD}`,
-    FLEET_CONTROL_EDITORS: `${EDITOR},someone@playonsports.com`,
+    FLEET_CONTROL_EDITORS: `${EDITOR},someone@playonsports.com`, GITHUB_TOKEN: "gh-test",
   };
+  forgetReleaseChecks();
   calls = [];
   releases = { "agent-v0.2.0": release("0.2.0", { digest: `sha256:${SHA}` }) };
   hashFiles = { "agent-v0.2.0": `${SHA}  pulse-agent-0.2.0.zip\n` };
@@ -85,7 +87,10 @@ async function call(body, { jwt = token(), type = "application/json", method = "
   return { status: r.status, body: await r.json(), headers: r.headers };
 }
 
-function row(scope) {
+function pin(scope) {
+  return env.DB.raw.prepare("SELECT * FROM agent_target WHERE scope = ?").get(scope);
+}
+function control(scope) {
   return env.DB.raw.prepare("SELECT * FROM monitor_control WHERE scope = ?").get(scope);
 }
 function log() {
@@ -102,7 +107,7 @@ test("no token, a forged token, the wrong audience: 403 and nothing written", as
     assert.equal(r.status, 403);
     assert.equal(r.body.error, "forbidden");
   }
-  assert.equal(row("fleet").agent_version, null);
+  assert.equal(pin("fleet"), undefined);
   assert.equal(log().length, 0);
 });
 
@@ -140,14 +145,11 @@ test("sets the fleet target after checking the release, and records who and when
     { ok: true, scope: "fleet", target: { version: "0.2.0", sha256: SHA }, previous: null,
       setBy: EDITOR, setAt: undefined, note: "canary went well" },
   );
-  const f = row("fleet");
-  assert.equal(f.agent_version, "0.2.0");
-  assert.equal(f.agent_sha256, SHA);
-  assert.equal(f.agent_set_by, EDITOR);
-  assert.equal(f.agent_set_at, r.body.setAt);
-  assert.equal(f.agent_note, "canary went well");
-  assert.equal(f.mode, "on");                       // the mode and its note are left alone
-  assert.equal(f.note, "default");
+  const f = pin("fleet");
+  assert.deepEqual([f.version, f.sha256, f.set_by, f.set_at, f.note],
+                   ["0.2.0", SHA, EDITOR, r.body.setAt, "canary went well"]);
+  const c = control("fleet");                       // the mode row is left alone
+  assert.deepEqual([c.mode, c.note, c.agent_version], ["on", "default", null]);
   const [entry] = log();
   assert.equal(entry.scope, "fleet");
   assert.equal(entry.version, "0.2.0");
@@ -155,22 +157,26 @@ test("sets the fleet target after checking the release, and records who and when
   assert.ok(calls.some((c) => c.url.includes("/releases/tags/agent-v0.2.0")));
 });
 
-test("the ingest hands the new target to units", async () => {
-  await call(SET);
-  const ingestEnv = { ...env, ROLE: "ingest" };
+// What a unit hears back from the ingest Worker.
+async function reply(venueId = "V42", vpuName = "Main Gym") {
   const r = await worker.fetch(new Request("https://w.test/checkin", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ checkins: [{ checkinId: "11111111-2222-3333-4444-555555555555",
-      sentAt: new Date().toISOString(), venueId: "V42", vpuName: "Main Gym", readiness: { status: "PASS" } }] }),
-  }), ingestEnv);
-  assert.deepEqual((await r.json()).control.agent, { version: "0.2.0", sha256: SHA });
+    body: JSON.stringify({ checkins: [{ checkinId: crypto.randomUUID(),
+      sentAt: new Date().toISOString(), venueId, vpuName, readiness: { status: "PASS" } }] }),
+  }), { ...env, ROLE: "ingest" });
+  return (await r.json()).control;
+}
+
+test("the ingest hands the new target to units", async () => {
+  await call(SET);
+  assert.deepEqual((await reply()).agent, { version: "0.2.0", sha256: SHA });
 });
 
-test("a unit row: created for a known unit, keyed by venue id, else VPU name; mode untouched", async () => {
+test("a unit pin: for a known unit, keyed by venue id, else VPU name; no mode row is made", async () => {
   let r = await call({ scope: "V42", target: { version: "0.2.0", sha256: SHA } });
   assert.equal(r.status, 200);
-  assert.equal(row("V42").agent_version, "0.2.0");
-  assert.equal(row("V42").mode, "on");
+  assert.equal(pin("V42").version, "0.2.0");
+  assert.equal(control("V42"), undefined);
   r = await call({ scope: "Gym Two", target: { version: "0.2.0", sha256: SHA } });
   assert.equal(r.status, 200);
   r = await call({ scope: "Main Gym", target: { version: "0.2.0", sha256: SHA } });   // has a venue id: not its key
@@ -178,14 +184,33 @@ test("a unit row: created for a known unit, keyed by venue id, else VPU name; mo
   assert.equal(r.body.error, "unknown-scope");
   r = await call({ scope: "V99", target: { version: "0.2.0", sha256: SHA } });
   assert.equal(r.status, 404);
-  assert.equal(row("V99"), undefined);
+  assert.equal(pin("V99"), undefined);
 });
 
-test("a held-back unit keeps its mode when its pin changes", async () => {
-  env.DB.raw.exec("INSERT INTO monitor_control (scope, mode, note) VALUES ('V42', 'off', 'leak hunt')");
+test("fleet OFF: setting and clearing a unit's pin leaves the unit off", async () => {
+  env.DB.raw.exec("UPDATE monitor_control SET mode = 'off', note = 'leak hunt' WHERE scope = 'fleet'");
+  assert.deepEqual(await reply(), { mode: "off", skip: [] });
+  let r = await call({ scope: "V42", target: { version: "0.2.0", sha256: SHA } });
+  assert.equal(r.status, 200);
+  assert.deepEqual(await reply(), { mode: "off", skip: [], agent: { version: "0.2.0", sha256: SHA } });
+  r = await call({ scope: "V42", target: null });
+  assert.equal(r.status, 200);
+  assert.deepEqual(await reply(), { mode: "off", skip: [] });
+  assert.equal(control("V42"), undefined);          // no stray mode row left behind
+  // The fleet's own pin doesn't touch its mode either.
+  await call(SET);
+  assert.deepEqual(await reply(), { mode: "off", skip: [], agent: { version: "0.2.0", sha256: SHA } });
+  await call({ scope: "fleet", target: null });
+  assert.deepEqual(await reply(), { mode: "off", skip: [] });
+  assert.equal(control("fleet").mode, "off");
+});
+
+test("a held-back unit keeps its mode, skip and note when its pin changes", async () => {
+  env.DB.raw.exec(`INSERT INTO monitor_control (scope, mode, skip, note) VALUES ('V42', 'off', '["Get-PoePower.ps1"]', 'leak hunt')`);
   await call({ scope: "V42", target: { version: "0.2.0", sha256: SHA } });
-  const v = row("V42");
-  assert.deepEqual([v.mode, v.note, v.agent_version], ["off", "leak hunt", "0.2.0"]);
+  await call({ scope: "V42", target: null });
+  const v = control("V42");
+  assert.deepEqual([v.mode, v.skip, v.note], ["off", '["Get-PoePower.ps1"]', "leak hunt"]);
 });
 
 test("clearing: the unit follows the fleet again; the fleet stops moving anyone", async () => {
@@ -195,21 +220,73 @@ test("clearing: the unit follows the fleet again; the fleet stops moving anyone"
   assert.equal(r.status, 200);
   assert.deepEqual(r.body.previous, { version: "0.2.0", sha256: SHA });
   assert.equal(r.body.target, null);
-  assert.equal(row("V42").agent_version, null);
+  assert.equal(pin("V42"), undefined);
   r = await call({ scope: "fleet", target: null });
   assert.equal(r.status, 200);
-  assert.equal(row("fleet").agent_version, null);
-  assert.equal(row("fleet").agent_sha256, null);
+  assert.equal(pin("fleet"), undefined);
   assert.deepEqual(log().map((l) => [l.scope, l.version, l.previous_version]),
     [["fleet", "0.2.0", null], ["V42", "0.2.0", null], ["V42", null, "0.2.0"], ["fleet", null, "0.2.0"]]);
-  // Clearing needs no release check.
+  // Clearing needs no release check, and the second set reused the first's.
+  assert.equal(calls.filter((c) => c.url.includes("api.github.com")).length, 1);
+});
+
+test("clearing what isn't pinned writes nothing, not even a log row", async () => {
+  for (const scope of ["V42", "fleet"]) {
+    const r = await call({ scope, target: null });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.previous, null);
+    assert.equal(pin(scope), undefined);
+  }
+  assert.equal(control("V42"), undefined);
+  assert.equal(log().length, 0);
+  assert.equal((await call({ scope: "V99", target: null })).status, 404);
+});
+
+test("clearing works without GITHUB_TOKEN; setting refuses to run without it", async () => {
+  await call(SET);
+  delete env.GITHUB_TOKEN;
+  forgetReleaseChecks();
+  const r = await call(SET);
+  assert.equal(r.status, 500);
+  assert.equal(r.body.error, "not-configured");
+  assert.equal(calls.filter((c) => c.url.includes("api.github.com")).length, 1);
+  assert.equal((await call({ scope: "fleet", target: null })).status, 200);
+  assert.equal(pin("fleet"), undefined);
+});
+
+test("a 100-unit rollout asks GitHub once", async () => {
+  for (let i = 0; i < 100; i++) seenUnit(`U${i}`, `Unit ${i}`);
+  for (let i = 0; i < 100; i++) {
+    assert.equal((await call({ scope: `U${i}`, target: { version: "0.2.0", sha256: SHA } })).status, 200);
+  }
+  assert.equal(calls.filter((c) => c.url.includes("api.github.com")).length, 1);
+  assert.equal(env.DB.raw.prepare("SELECT COUNT(*) AS n FROM agent_target").get().n, 100);
+});
+
+test("a failed check isn't remembered", async () => {
+  releases["agent-v0.2.0"] = 503;
+  assert.equal((await call(SET)).status, 502);
+  releases["agent-v0.2.0"] = release("0.2.0", { digest: `sha256:${SHA}` });
+  assert.equal((await call(SET)).status, 200);
   assert.equal(calls.filter((c) => c.url.includes("api.github.com")).length, 2);
 });
 
-test("clearing a unit with no row creates none", async () => {
-  const r = await call({ scope: "V42", target: null });
-  assert.equal(r.status, 200);
-  assert.equal(row("V42"), undefined);
+test("a pin set by hand in monitor_control moves to agent_target in the migration", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { readdirSync, readFileSync } = await import("node:fs");
+  const dir = new URL("../migrations/", import.meta.url).pathname;
+  const db = new DatabaseSync(":memory:");
+  for (const f of readdirSync(dir).filter((n) => n.endsWith(".sql")).sort()) {
+    if (f.startsWith("0020")) {
+      db.exec(`UPDATE monitor_control SET agent_version = '0.1.0', agent_sha256 = '${SHA}' WHERE scope = 'fleet'`);
+      db.exec("INSERT INTO monitor_control (scope, mode) VALUES ('V42', 'off')");
+    }
+    db.exec(readFileSync(`${dir}${f}`, "utf8"));
+  }
+  assert.deepEqual(db.prepare("SELECT scope, version, sha256 FROM agent_target").all().map((r) => ({ ...r })),
+                   [{ scope: "fleet", version: "0.1.0", sha256: SHA }]);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM monitor_control WHERE agent_version IS NOT NULL").get().n, 0);
+  assert.equal(db.prepare("SELECT mode FROM monitor_control WHERE scope = 'V42'").get().mode, "off");
 });
 
 // ── the release check ──
@@ -222,7 +299,7 @@ test("no such release, a draft, no zip asset: 422 and nothing saved", async () =
     assert.equal(r.status, 422, version);
     assert.equal(r.body.error, "release-not-found");
   }
-  assert.equal(row("fleet").agent_version, null);
+  assert.equal(pin("fleet"), undefined);
   assert.equal(log().length, 0);
 });
 
@@ -230,7 +307,7 @@ test("a hash that isn't the release's: 422 hash-mismatch", async () => {
   const r = await call({ scope: "fleet", target: { version: "0.2.0", sha256: "b".repeat(64) } });
   assert.equal(r.status, 422);
   assert.equal(r.body.error, "hash-mismatch");
-  assert.equal(row("fleet").agent_version, null);
+  assert.equal(pin("fleet"), undefined);
 });
 
 test("GitHub's digest and the .sha256 file must agree; either alone is enough", async () => {
@@ -239,8 +316,10 @@ test("GitHub's digest and the .sha256 file must agree; either alone is enough", 
   releases["agent-v0.2.0"] = release("0.2.0", { digest: undefined });       // only the file
   hashFiles["agent-v0.2.0"] = `${SHA}  pulse-agent-0.2.0.zip\n`;
   assert.equal((await call(SET)).status, 200);
+  forgetReleaseChecks();                                                                     // each case asks afresh
   releases["agent-v0.2.0"] = release("0.2.0", { digest: `sha256:${SHA}`, sha256File: false });  // only the digest
   assert.equal((await call(SET)).status, 200);
+  forgetReleaseChecks();
   releases["agent-v0.2.0"] = release("0.2.0", { digest: undefined, sha256File: false });        // neither
   assert.equal((await call(SET)).body.error, "release-has-no-hash");
 });
@@ -260,7 +339,7 @@ test("GitHub down or rate-limited: 502 and nothing saved (fail closed)", async (
   };
   r = await call(SET);
   assert.equal(r.status, 502);
-  assert.equal(row("fleet").agent_version, null);
+  assert.equal(pin("fleet"), undefined);
   assert.equal(log().length, 0);
 });
 
@@ -316,7 +395,7 @@ test("the note is cleaned and capped", async () => {
   assert.equal(r.status, 200);
   assert.ok(r.body.note.startsWith("a b c d z"));
   assert.equal(r.body.note.length, 200);
-  assert.equal(row("fleet").agent_note, r.body.note);
+  assert.equal(pin("fleet").note, r.body.note);
 });
 
 test("the read-only admin pages still refuse writes", async () => {
