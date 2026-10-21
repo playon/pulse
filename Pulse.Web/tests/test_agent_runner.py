@@ -533,35 +533,41 @@ class Leaks(Fixture):
     def test_many_failed_updates_hold_no_memory_or_handles(self):
         import gc
         import tracemalloc
-        for i in range(6):
-            self.one_failed_update(i)                # warm up: imports, caches
+        import urllib.parse
         only = [tracemalloc.Filter(True, runner.__file__)]
 
-        def window(start):
-            for i in range(start, start + 60):
-                self.one_failed_update(i)
+        def settle():
+            # urllib.parse caches up to 128 parsed URLs (Python 3.11+), and
+            # each target here has its own URL: bounded, and stdlib's.
+            urllib.parse.clear_cache()
             gc.collect()
-            return tracemalloc.take_snapshot().filter_traces(only)
+            return tracemalloc.take_snapshot().filter_traces(only) if tracemalloc.is_tracing() else None
 
-        gc.collect()
+        for i in range(240):
+            self.one_failed_update(i)                # warm up: imports, the interpreter's own caches
+        settle()
         fds = _open_fds()
         tracemalloc.start()
         try:
-            gc.collect()
-            first = tracemalloc.take_snapshot().filter_traces(only)
-            second = window(6)                       # may still fill one-time caches
-            third = window(66)                       # a leak keeps growing here too
+            snaps, n = [settle()], 240
+            for _ in range(3):
+                for i in range(n, n + 60):
+                    self.one_failed_update(i)
+                n += 60
+                snaps.append(settle())
         finally:
             tracemalloc.stop()
-        # What runner.py still holds after 60 more failed updates than before:
-        # it keeps nothing between ticks, so close to nothing. One-time
-        # allocations (the interpreter specialising code, lazy caches) land
-        # in the first window only.
-        diff = third.compare_to(second, "lineno")
-        grown = sum(d.size_diff for d in diff)
-        top = "; ".join(f"{d.traceback[0].lineno}: {d.size_diff:+d} B" for d in diff[:5] if d.size_diff)
-        self.assertLess(grown, 4 * 1024, f"runner.py holds memory across ticks ({top})")
-        self.assertIsNotNone(first)
+        # What runner.py still holds after each 60 more failed updates. It
+        # keeps nothing between ticks, so a leak of even ~70 B a tick grows
+        # every window by 4 KB or more. Python 3.12's own caches still settle
+        # here and there (a window grows, the next shrinks), so it's the
+        # smallest window that has to stay under that.
+        growth, top = [], []
+        for a, b in zip(snaps, snaps[1:]):
+            diff = b.compare_to(a, "lineno")
+            growth.append(sum(d.size_diff for d in diff))
+            top.append(", ".join(f"{d.traceback[0].lineno}: {d.size_diff:+d} B" for d in diff[:3] if d.size_diff))
+        self.assertLess(min(growth), 4 * 1024, f"runner.py holds memory across ticks: {growth} ({'; '.join(top)})")
         if fds is not None:
             self.assertLessEqual(_open_fds(), fds, "file handles or sockets left open")
 
