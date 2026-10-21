@@ -111,7 +111,9 @@ def release_notes(web_root: str, version: str, sha: str) -> str:
 {sha}
 ```
 
-Pin it (check-in Worker README, "which agent build a unit runs"):
+Pin it from Pulse Vitals, which sets it through the admin Worker's
+`POST /agent-target` after checking this release's hash (PV-85). By hand, as a
+last resort (check-in Worker README, "which agent build a unit runs"):
 
 ```sql
 -- one unit first

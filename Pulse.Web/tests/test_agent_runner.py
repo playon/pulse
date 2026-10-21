@@ -272,6 +272,13 @@ class Update(Fixture):
         self.assertEqual(self.downloads, [])
         self.assertEqual(self.ticks, [("a", ["--dry-run"])])
 
+    def test_a_dry_run_sweeps_nothing(self):
+        path = os.path.join(self.root, runner.DOWNLOAD_FILE)
+        with open(path, "w") as fh:
+            fh.write("half")
+        self.tick(argv=["--dry-run"])
+        self.assertTrue(os.path.exists(path))
+
 
 class Refused(Fixture):
     def _refused(self, data, expect):
@@ -329,6 +336,359 @@ class UpdateReport(unittest.TestCase):
             finally:
                 checkin._AGENT_VERSION, checkin._AGENT_UPDATE_PATH = saved
         self.assertEqual(beat["agentUpdate"], {"status": "applied", "version": "0.2.0"})
+
+
+# ── Leaks: repeated failed updates leave nothing behind (PV-85) ─────────────
+
+class _Release(http.server.BaseHTTPRequestHandler):
+    """Serves /<mode>/<version>.zip: ok, drop (the connection breaks off),
+    slow (a trickle) or 404."""
+    zips = {}
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        mode, version = self.path.strip("/").split("/")[:2]
+        data = self.zips.get(version.replace(".zip", ""), b"")
+        try:
+            if mode == "missing":
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str({"ok": len(data), "drop": len(data), "slow": 40 * 70000}[mode]))
+            self.end_headers()
+            if mode == "ok":
+                self.wfile.write(data)
+            elif mode == "drop":
+                self.wfile.write(data[:len(data) // 2])
+            elif mode == "slow":
+                for _ in range(40):
+                    self.wfile.write(b"x" * 70000)
+                    self.wfile.flush()
+                    time.sleep(0.05)
+        except OSError:
+            pass                                 # the runner hung up: expected
+
+
+def _open_fds():
+    for d in ("/dev/fd", "/proc/self/fd"):
+        if os.path.isdir(d):
+            return len(os.listdir(d))
+    return None
+
+
+def _corrupt(data):
+    """A zip whose directory reads fine but whose blob fails its CRC."""
+    i = data.index(b"BLOBBLOB") + 100
+    return data[:i] + bytes([data[i] ^ 0xFF]) + data[i + 1:]
+
+
+class Leaks(Fixture):
+    ALLOWED = {"slots", "runtime", runner.SLOTS_FILE, runner.UPDATE_FILE, runner.QUEUE_FILE,
+               runner.LOG_FILE, runner.LOG_FILE + ".1"}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Release)
+        cls.server.daemon_threads = True
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.base = f"http://127.0.0.1:{cls.server.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def real_tick(self, mode, advance=300):
+        """A tick whose download is real HTTP to the local release server."""
+        self.now += advance
+        return runner.tick(self.root, [], is_event_live=lambda: False, run=self._run,
+                           url_template=self.base + "/" + mode + "/{version}.zip", now=self.now)
+
+    def assert_clean(self):
+        left = set(os.listdir(self.root)) - self.ALLOWED
+        self.assertEqual(left, set(), "left behind in the root")
+        self.assertLessEqual(set(os.listdir(os.path.join(self.root, "slots"))), {"a", "b"})
+        st = self.slots()
+        for field in ("blocked", "retryAt", "tries"):
+            self.assertLessEqual(len(st.get(field) or {}), 1, field)
+        self.assertEqual(st["active"], "a")
+        self.assertEqual(runner.slot_version(self.root, "a"), "0.1.0")
+
+    def failing(self, i):
+        """Target i, and how it fails: (mode, sha) per kind."""
+        version = f"0.2.{i}"
+        good = _zip_bytes(version)
+        kind = ("hash", "corrupt", "drop", "missing", "notzip", "probation")[i % 6]
+        if kind == "hash":
+            _Release.zips[version] = good
+            return "ok", "f" * 64, kind
+        if kind == "corrupt":
+            bad = _corrupt(_zip_bytes(version, extra={"app/blob.bin": b"BLOBBLOB" + os.urandom(4000)}))
+            _Release.zips[version] = bad
+            return "ok", hashlib.sha256(bad).hexdigest(), kind
+        if kind == "notzip":
+            bad = b"<html>captive portal</html>" * 50
+            _Release.zips[version] = bad
+            return "ok", hashlib.sha256(bad).hexdigest(), kind
+        if kind == "probation":
+            _Release.zips[version] = good
+            return "ok", hashlib.sha256(good).hexdigest(), kind
+        _Release.zips[version] = good
+        return kind, hashlib.sha256(good).hexdigest(), kind
+
+    def one_failed_update(self, i):
+        _Release.zips.clear()
+        del self.ticks[:], self.downloads[:]
+        mode, sha, kind = self.failing(i)
+        version = f"0.2.{i}"
+        self.pin(version, sha)
+        self.tick_ok["b"] = kind != "probation"
+        self.real_tick(mode)
+        if kind == "probation":
+            self.assertEqual(self.slots()["active"], "b")
+            self.real_tick(mode)                      # it crashes: back to a
+        u = self.update()
+        self.assertEqual(u["version"], version, kind)
+        self.assertIn(u["status"], ("failed", "rolled-back"), kind)
+        self.assertNotIn(self.root, u.get("error", ""), kind)
+        self.assertNotIn("\\", u.get("error", ""), kind)
+        self.assert_clean()
+        return kind
+
+    def test_each_failure_leaves_the_unit_on_its_build_and_nothing_behind(self):
+        kinds = [self.one_failed_update(i) for i in range(6)]
+        self.assertEqual(len(set(kinds)), 6)
+
+    def test_a_refused_target_is_not_retried_until_the_target_changes(self):
+        for i in (0, 1, 4, 5):                      # hash, corrupt, not a zip, crashed in probation
+            self.one_failed_update(i)
+            n = len(self.downloads), self.update()["at"]
+            for _ in range(3):
+                self.real_tick("ok", advance=RETRY_DAY)
+            self.assertEqual(self.update()["at"], n[1], "tried again")
+        mode, sha, _ = self.failing(0)
+        self.pin("0.2.0", sha)                      # back to the first one: a change, so it's tried
+        before = self.update()["at"]
+        self.real_tick(mode)
+        self.assertNotEqual(self.update()["at"], before)
+
+    def _drop_until_given_up(self, version):
+        _Release.zips[version] = _zip_bytes(version)
+        sha = hashlib.sha256(_Release.zips[version]).hexdigest()
+        key = f"{version}:{sha}"
+        self.pin(version, sha)
+        gaps, attempts = [], 0
+        for _ in range(5):
+            at = (self.update() or {}).get("at")
+            self.real_tick("drop", advance=0)
+            attempts += self.update()["at"] != at
+            st = self.slots()
+            if key in st["retryAt"]:
+                gaps.append(st["retryAt"][key] - self.now)
+                self.now += gaps[-1]
+        return key, sha, gaps, attempts
+
+    def test_a_network_failure_backs_off_then_gives_up_after_five(self):
+        key, sha, gaps, attempts = self._drop_until_given_up("0.3.0")
+        self.assertEqual(gaps, [3600, 7200, 14400, 28800])
+        self.assertEqual(attempts, 5)
+        st = self.slots()
+        self.assertIn(key, st["blocked"])
+        self.assertEqual((st["retryAt"], st["tries"]), ({}, {}))
+        u = self.update()
+        self.assertEqual((u["status"], u["version"]), ("failed", "0.3.0"))
+        self.assertIn("gave up after 5 network failures", u["error"])
+        self.assertIn("broke off", u["error"])                 # the last cause
+        self.assertNotIn(self.root, u["error"])
+        at = u["at"]
+        for _ in range(3):
+            self.real_tick("ok", advance=RETRY_DAY)            # served fine now: still no 6th attempt
+        self.assertEqual(self.update()["at"], at)
+        self.assertEqual(self.slots()["active"], "a")
+        self.assert_clean()
+
+    def test_a_given_up_target_is_tried_again_after_it_changes(self):
+        key, sha, _, _ = self._drop_until_given_up("0.3.0")
+        self.pin("0.3.1", "b" * 64)                             # another target...
+        self.real_tick("missing", advance=1)
+        st = self.slots()
+        self.assertNotIn(key, st["blocked"])
+        self.assertEqual(st["tries"], {"0.3.1:" + "b" * 64: 1})  # ...counted on its own
+        self.pin("0.3.0", sha)                                  # ...then back: a fresh start
+        self.real_tick("ok", advance=1)
+        st = self.slots()
+        self.assertEqual(st["active"], "b")
+        self.assertEqual((st["blocked"], st["retryAt"], st["tries"]), ({}, {}, {}))
+
+    def test_clearing_the_target_resets_the_count(self):
+        key, sha, _, _ = self._drop_until_given_up("0.3.0")
+        with open(os.path.join(self.root, runner.QUEUE_FILE), "w") as fh:
+            json.dump({"queue": [], "control": {"mode": "on", "skip": []}}, fh)
+        self.real_tick("ok", advance=1)
+        self.assertEqual(self.slots()["blocked"], {})
+        self.pin("0.3.0", sha)
+        self.real_tick("ok", advance=1)
+        self.assertEqual(self.slots()["active"], "b")
+
+    def test_a_success_resets_the_count(self):
+        _Release.zips["0.3.0"] = _zip_bytes("0.3.0")
+        sha = hashlib.sha256(_Release.zips["0.3.0"]).hexdigest()
+        self.pin("0.3.0", sha)
+        for _ in range(3):
+            self.real_tick("drop", advance=0)
+            self.now = self.slots()["retryAt"]["0.3.0:" + sha]
+        self.assertEqual(self.slots()["tries"], {"0.3.0:" + sha: 3})
+        self.real_tick("ok", advance=1)
+        st = self.slots()
+        self.assertEqual(st["active"], "b")
+        self.assertEqual((st["retryAt"], st["tries"]), ({}, {}))
+
+    def test_a_download_that_trickles_is_cut_off(self):
+        saved = runner.DOWNLOAD_DEADLINE_SECONDS
+        runner.DOWNLOAD_DEADLINE_SECONDS = 0.2
+        try:
+            _Release.zips["0.3.0"] = _zip_bytes("0.3.0")
+            self.pin("0.3.0", "a" * 64)
+            started = time.monotonic()
+            self.real_tick("slow")
+        finally:
+            runner.DOWNLOAD_DEADLINE_SECONDS = saved
+        self.assertLess(time.monotonic() - started, 1.5)
+        self.assertIn("took over", self.update()["error"])
+        self.assert_clean()
+
+    def test_what_a_killed_runner_leaves_is_swept(self):
+        for path in (runner.DOWNLOAD_FILE, runner.SLOTS_FILE + ".tmp", runner.UPDATE_FILE + ".tmp"):
+            with open(os.path.join(self.root, path), "wb") as fh:
+                fh.write(b"half")
+        os.makedirs(os.path.join(self.root, "slots", "b.new", "app"))
+        self.tick()
+        self.assert_clean()
+        self.assertFalse(os.path.exists(os.path.join(self.root, "slots", "b")))
+
+    def test_killed_between_the_two_renames_puts_the_old_slot_back(self):
+        self._slot("b", "0.0.9")
+        os.replace(os.path.join(self.root, "slots", "b"), os.path.join(self.root, "slots", "b.old"))
+        os.makedirs(os.path.join(self.root, "slots", "b.new", "app"))
+        self.tick()
+        self.assertEqual(runner.slot_version(self.root, "b"), "0.0.9")
+        self.assertEqual(sorted(os.listdir(os.path.join(self.root, "slots"))), ["a", "b"])
+
+    def test_a_failed_update_keeps_the_build_in_the_other_slot(self):
+        self._slot("b", "0.0.9")
+        st = self.slots()
+        st["slots"]["b"] = {"version": "0.0.9", "sha256": "9" * 64}
+        self._write_slots(st)
+        self.one_failed_update(1)                    # a damaged zip: refused before any rename
+        self.assertEqual(runner.slot_version(self.root, "b"), "0.0.9")
+        self.assertEqual(self.slots()["slots"]["b"]["sha256"], "9" * 64)
+
+    def test_many_failed_updates_hold_no_memory_or_handles(self):
+        import gc
+        import tracemalloc
+        import urllib.parse
+        only = [tracemalloc.Filter(True, runner.__file__)]
+
+        def settle():
+            # urllib.parse caches up to 128 parsed URLs (Python 3.11+), and
+            # each target here has its own URL: bounded, and stdlib's.
+            urllib.parse.clear_cache()
+            gc.collect()
+            return tracemalloc.take_snapshot().filter_traces(only) if tracemalloc.is_tracing() else None
+
+        for i in range(240):
+            self.one_failed_update(i)                # warm up: imports, the interpreter's own caches
+        settle()
+        fds = _open_fds()
+        tracemalloc.start()
+        try:
+            snaps, n = [settle()], 240
+            for _ in range(3):
+                for i in range(n, n + 60):
+                    self.one_failed_update(i)
+                n += 60
+                snaps.append(settle())
+        finally:
+            tracemalloc.stop()
+        # What runner.py still holds after each 60 more failed updates. It
+        # keeps nothing between ticks, so a leak of even ~70 B a tick grows
+        # every window by 4 KB or more. Python 3.12's own caches still settle
+        # here and there (a window grows, the next shrinks), so it's the
+        # smallest window that has to stay under that.
+        growth, top = [], []
+        for a, b in zip(snaps, snaps[1:]):
+            diff = b.compare_to(a, "lineno")
+            growth.append(sum(d.size_diff for d in diff))
+            top.append(", ".join(f"{d.traceback[0].lineno}: {d.size_diff:+d} B" for d in diff[:3] if d.size_diff))
+        self.assertLess(min(growth), 4 * 1024, f"runner.py holds memory across ticks: {growth} ({'; '.join(top)})")
+        if fds is not None:
+            self.assertLessEqual(_open_fds(), fds, "file handles or sockets left open")
+
+
+RETRY_DAY = 25 * 3600
+
+
+@unittest.skipIf(sys.platform == "win32", "the process-group check is POSIX; the VPU smoke covers taskkill /T")
+class Processes(unittest.TestCase):
+    """A tick that runs over is killed with everything it started."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="pulse-runner-proc-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        app = os.path.join(self.root, "slots", "a", "app")
+        os.makedirs(app)
+        self.pidfile = os.path.join(self.root, "child.pid")
+        with open(os.path.join(app, "monitor_once.py"), "w") as fh:
+            fh.write(
+                "import subprocess, sys, time\n"
+                f"p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                f"open({self.pidfile!r}, 'w').write(str(p.pid))\n"
+                "sys.stderr.write('x' * 100000 + '\\nlast line\\n')\n"
+                "sys.stderr.flush()\n"
+                "time.sleep(60)\n")
+
+    def _alive(self, pid):
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            try:
+                done, _ = os.waitpid(pid, os.WNOHANG)    # reap it if it's ours
+                if done:
+                    return False
+            except ChildProcessError:
+                pass
+            time.sleep(0.05)
+        return True
+
+    def test_a_tick_over_time_takes_its_children_with_it(self):
+        for _ in range(3):
+            fds = _open_fds()
+            ok, note = runner.run_slot(self.root, "a", [], timeout=1.5)
+            self.assertFalse(ok)
+            self.assertIn("ran over", note)
+            with open(self.pidfile) as fh:
+                child = int(fh.read())
+            self.assertFalse(self._alive(child), "the tick's child outlived it")
+            if fds is not None:
+                self.assertLessEqual(_open_fds(), fds)
+
+    def test_a_tick_still_runs_when_its_stderr_file_cant_be_opened(self):
+        with open(os.path.join(self.root, "slots", "a", "app", "monitor_once.py"), "w") as fh:
+            fh.write("import sys\nsys.exit(0)\n")
+        os.makedirs(os.path.join(self.root, runner.STDERR_FILE))     # a directory: open() fails
+        self.assertEqual(runner.run_slot(self.root, "a", []), (True, "ok"))
+
+    def test_a_failed_tick_reports_its_last_stderr_line_without_holding_it(self):
+        with open(os.path.join(self.root, "slots", "a", "app", "monitor_once.py"), "w") as fh:
+            fh.write("import sys\nsys.stderr.write('y' * 1000000 + '\\nRuntimeError: broken\\n')\nsys.exit(3)\n")
+        ok, note = runner.run_slot(self.root, "a", [])
+        self.assertEqual((ok, note), (False, "exit 3: RuntimeError: broken"))
+        self.assertLessEqual(os.path.getsize(os.path.join(self.root, runner.STDERR_FILE)), 1100000)
 
 
 # ── End to end: real zips, real HTTP, real monitor ticks ────────────────────

@@ -124,7 +124,7 @@ Pulse.Web uses semver (`MAJOR.MINOR.PATCH`) with a two-channel pipeline. Dev sta
 
 **How a unit runs and updates the agent** (PV-49): enrolling from Settings installs `C:\PulseFleetMonitor\agent_runner.py` (a copy of `pulse_agent/runner.py`), a shared Python runtime and two slots. The scheduled task runs the runner; the runner runs the active slot's `monitor_once.py` with the root as its data folder, and moves the unit to whatever build fleet control pins (download from the fixed `agent-v*` URL, SHA-256 check, probation, automatic rollback). The runner is the one part an update can't replace or undo, so keep it stdlib only and small, and test any change to it with `tests/test_agent_runner.py`, which runs real ticks from real zips.
 
-**Releasing the agent:** bump `pulse_agent/VERSION`, rename the changelog's `[Unreleased]` to that version, merge, then push `agent-v<version>` on that commit. `.github/workflows/agent-release.yml` runs the tests, builds `pulse-agent-<version>.zip` with `tools/agent-release/build_agent_zip.py` (reproducible: rebuild from the tag to check the hash) and publishes it with its SHA-256 and the SQL to pin it. Publishing moves no unit. Units move only when fleet control pins the version and hash (`tools/checkin-worker/README.md`). A released version is never replaced: the workflow refuses an existing tag. The runner builds the download URL from the tag pattern and asset name, so don't change either without changing the agent's runner (`pulse_agent/runner.py`, PV-49 slice 4).
+**Releasing the agent:** bump `pulse_agent/VERSION`, rename the changelog's `[Unreleased]` to that version, merge, then push `agent-v<version>` on that commit. `.github/workflows/agent-release.yml` runs the tests, builds `pulse-agent-<version>.zip` with `tools/agent-release/build_agent_zip.py` (reproducible: rebuild from the tag to check the hash) and publishes it with its SHA-256 and the SQL to pin it. Publishing moves no unit. Units move only when fleet control pins the version and hash. Pulse Vitals sets that pin through the admin Worker's `POST /agent-target`, which checks it against the published release first (`tools/checkin-worker/README.md`). Vitals never writes the table itself. A released version is never replaced: the workflow refuses an existing tag. The runner builds the download URL from the tag pattern and asset name, so don't change either without changing the agent's runner (`pulse_agent/runner.py`, PV-49 slice 4).
 
 #### Promotion workflow
 
@@ -169,6 +169,7 @@ The fleet dashboard Pulse Vitals (`playon/pulse-vitals`, private) is built on wh
 | When the monitor posts | `Pulse.Web/app/pulse_agent/monitor.py` (`plan_tick`, `plan_post`) |
 | The findings and readiness verdict the agent reports | `Pulse.Web/app/main.py` (the engine, shared with Diagnostics) |
 | Ingest validation and storage | `tools/checkin-worker/src/ingest.js` |
+| The agent-target write Vitals calls (`POST /agent-target`, PV-85) | `tools/checkin-worker/src/agent-target.js` |
 | Schema and the views Vitals reads | `tools/checkin-worker/migrations/` |
 
 When you change any of them:

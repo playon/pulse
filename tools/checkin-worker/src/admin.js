@@ -1,4 +1,5 @@
 import { accessIdentity } from "./access.js";
+import { handleAgentTarget } from "./agent-target.js";
 
 const UNIT_COLUMNS = [
   "venue_id", "vpu_name", "model", "pulse_version",
@@ -13,6 +14,9 @@ const CHECKIN_COLUMNS = [
 ];
 
 export async function handleAdmin(request, env) {
+  // The one write: the agent target, for Pulse Vitals (PV-85). It does its own
+  // Access check and its own editor check.
+  if (new URL(request.url).pathname === "/agent-target") return handleAgentTarget(request, env);
   if (request.method !== "GET") return new Response("Method not allowed", { status: 405 });
   const who = await accessIdentity(request, env);
   if (!who) return new Response("Forbidden", { status: 403 });

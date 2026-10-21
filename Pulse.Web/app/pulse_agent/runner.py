@@ -31,11 +31,23 @@ Each tick:
 
 The URL is built here, from the version alone: fleet control can only pick
 among published agent-v* releases of playon/pulse, and a zip that doesn't
-match the pinned hash is refused. A download that fails for a network reason
-is retried after an hour; a zip that fails a check is not retried.
+match the pinned hash is refused.
+
+A failed update leaves the unit on the build it runs and says why in
+agent-update.json. A zip that fails a check, and a build that was rolled back,
+are not tried again until fleet control names a different target (clearing
+it counts). A download that fails for a network reason is retried after an
+hour, then two, four and eight; the fifth failure gives the target up the
+same way.
+
+Nothing an update does outlives it: the download, a half-unpacked slot and
+the slot being replaced are swept at the start of every tick (a killed runner
+leaves them), a tick that runs over is killed with everything it started, and
+the state file only keeps entries for the current target.
 """
 
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -43,8 +55,10 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 import zipfile
+import zlib
 
 RELEASE_URL = "https://github.com/playon/pulse/releases/download/agent-v{version}/pulse-agent-{version}.zip"
 SLOTS_FILE = "agent-slots.json"
@@ -53,6 +67,7 @@ QUEUE_FILE = "pulse-monitor-checkin-queue.json"
 MARKER_FILE = "agent-tick.running"
 LOG_FILE = "agent-runner.log"
 DOWNLOAD_FILE = "agent-download.tmp"
+STDERR_FILE = "agent-tick.stderr"           # the last tick's stderr, read for its last line
 SLOT_NAMES = ("a", "b")
 
 VERSION_RE = re.compile(r"^\d{1,4}\.\d{1,4}\.\d{1,6}$")   # the Worker's TARGET_VERSION_RE
@@ -62,10 +77,13 @@ TICK_TIMEOUT_SECONDS = 240                  # the task kills everything at 300
 # An update after a tick that took longer than this waits for a quicker
 # tick, so the download and unpack fit inside the task's 300 s.
 UPDATE_AFTER_TICK_MAX_SECONDS = 120
-DOWNLOAD_TIMEOUT_SECONDS = 60
+DOWNLOAD_TIMEOUT_SECONDS = 60             # per read
+DOWNLOAD_DEADLINE_SECONDS = 120            # the whole download
 MAX_ZIP_BYTES = 64 * 1024 * 1024
 MAX_UNPACKED_BYTES = 128 * 1024 * 1024
-RETRY_AFTER_SECONDS = 3600
+RETRY_AFTER_SECONDS = 3600                 # doubles per failure: 1, 2, 4, 8 h
+MAX_NETWORK_TRIES = 5                      # then the target is given up, like a refused one
+ERROR_MAX = 200
 LOG_MAX_BYTES = 512 * 1024
 REQUIRED_FILES = ("app/monitor_once.py", "app/main.py", "app/pulse_agent/VERSION", "app/requirements.txt")
 
@@ -124,11 +142,25 @@ def slot_version(root: str, name: str) -> str:
     return _read_text(os.path.join(slot_dir(root, name), "app", "pulse_agent", "VERSION"))
 
 
+_PATH_RE = re.compile(r"""(?<![A-Za-z])[A-Za-z]:[\\/][^\s'"]*|\\\\[^\s'"]+|(?<![\w:/.])/[^\s'"]+""")
+
+
+def short_error(text: str) -> str:
+    """An error fit to post: one line, no file paths, no computer name."""
+    text = _PATH_RE.sub("<path>", str(text))
+    for var in ("COMPUTERNAME", "USERNAME"):
+        name = os.environ.get(var) or ""
+        if len(name) >= 3:
+            text = re.sub(re.escape(name), "<host>" if var == "COMPUTERNAME" else "<user>", text, flags=re.I)
+    return " ".join(text.split())[:ERROR_MAX]
+
+
 def report(root: str, status: str, version: str, error: str = "", from_version: str = "") -> None:
     """The outcome the monitor's posts carry as agentUpdate (for a day)."""
     rec = {"status": status, "version": version, "from": from_version or None, "at": time.time()}
+    error = short_error(error) if error else ""
     if error:
-        rec["error"] = error[:256]
+        rec["error"] = error
     try:
         _write_json(os.path.join(root, UPDATE_FILE), rec)
     except OSError:
@@ -150,44 +182,110 @@ def event_live() -> bool:
     return "vpu.exe" in (r.stdout or "").lower()
 
 
-def run_slot(root: str, name: str, args: list) -> tuple:
+def _kill_tree(proc) -> None:
+    """Kill a tick and everything it started (PowerShell collectors)."""
+    if sys.platform == "win32":
+        try:
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True,
+                           timeout=30, creationflags=_CREATE_NO_WINDOW)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    else:
+        try:
+            os.killpg(proc.pid, 9)
+        except OSError:
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def _last_line(path: str) -> str:
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 4096))
+            tail = fh.read().decode("utf-8", "replace").strip().splitlines()
+    except OSError:
+        return ""
+    return tail[-1] if tail else ""
+
+
+def run_slot(root: str, name: str, args: list, timeout: float = TICK_TIMEOUT_SECONDS) -> tuple:
     """Run one monitor tick from a slot. (ok, note)."""
     script = os.path.join(slot_dir(root, name), "app", "monitor_once.py")
     if not os.path.isfile(script):
         return False, f"slot {name} has no app/monitor_once.py"
     env = dict(os.environ, PULSE_MONITOR_DATA=root)
-    kw = {"env": env, "cwd": os.path.dirname(script), "timeout": TICK_TIMEOUT_SECONDS,
-          "capture_output": True, "text": True}
+    kw = {"env": env, "cwd": os.path.dirname(script), "stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL}
     if sys.platform == "win32":
         kw["creationflags"] = _CREATE_NO_WINDOW
+    else:
+        kw["start_new_session"] = True      # its own group, so a kill takes its children too
+    err_path = os.path.join(root, STDERR_FILE)
     try:
-        r = subprocess.run([sys.executable, script] + list(args), **kw)
-    except subprocess.TimeoutExpired:
-        return False, f"the tick ran over {TICK_TIMEOUT_SECONDS} s"
+        # stderr goes to a file, not memory: one file, rewritten each tick.
+        # If it can't be opened (something still holds it), the tick runs
+        # without it rather than not at all.
+        try:
+            err = open(err_path, "wb")
+        except OSError:
+            err, err_path = subprocess.DEVNULL, ""
+        try:
+            proc = subprocess.Popen([sys.executable, script] + list(args), stderr=err, **kw)
+            try:
+                code = proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                _kill_tree(proc)
+                proc.wait()
+                return False, f"the tick ran over {int(timeout)} s"
+        finally:
+            if err is not subprocess.DEVNULL:
+                err.close()
     except OSError as e:
-        return False, f"couldn't start the tick: {e}"
-    if r.returncode != 0:
-        tail = (r.stderr or "").strip().splitlines()
-        return False, f"exit {r.returncode}" + (f": {tail[-1][:200]}" if tail else "")
+        return False, f"couldn't start the tick: {e.strerror or type(e).__name__}"
+    if code != 0:
+        tail = _last_line(err_path) if err_path else ""
+        return False, f"exit {code}" + (f": {tail}" if tail else "")
     return True, "ok"
 
 
 def fetch(url: str, dest: str) -> str:
     """Download url to dest, returning its SHA-256. Raises OSError on a
-    network failure, Rejected when it's too big."""
+    network failure (an HTTP error, a dropped connection, too slow), Rejected
+    when it's too big. Every socket and file is closed on every path."""
     h = hashlib.sha256()
     n = 0
+    deadline = time.monotonic() + DOWNLOAD_DEADLINE_SECONDS
     req = urllib.request.Request(url, headers={"User-Agent": "Pulse-agent-runner"})
-    with urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT_SECONDS) as resp, open(dest, "wb") as out:
-        while True:
-            chunk = resp.read(1 << 16)
-            if not chunk:
-                break
-            n += len(chunk)
-            if n > MAX_ZIP_BYTES:
-                raise Rejected(f"the download is over {MAX_ZIP_BYTES // (1024 * 1024)} MB")
-            h.update(chunk)
-            out.write(chunk)
+    try:
+        with urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT_SECONDS) as resp, open(dest, "wb") as out:
+            length = resp.headers.get("Content-Length")
+            while True:
+                chunk = resp.read(1 << 16)
+                if not chunk:
+                    break
+                n += len(chunk)
+                if n > MAX_ZIP_BYTES:
+                    raise Rejected(f"the download is over {MAX_ZIP_BYTES // (1024 * 1024)} MB")
+                if time.monotonic() > deadline:
+                    raise OSError(f"the download took over {DOWNLOAD_DEADLINE_SECONDS} s")
+                h.update(chunk)
+                out.write(chunk)
+            # read(n) returns b"" when the connection drops early, as if the
+            # file had ended: without this a cut download fails the hash
+            # check and is refused for good instead of retried.
+            if length is not None and length.isdigit() and n != int(length):
+                raise OSError(f"the download broke off at {n} of {length} bytes")
+    except urllib.error.HTTPError as e:
+        e.close()                           # an HTTPError holds the response open
+        raise OSError(f"HTTP {e.code}") from None
+    except urllib.error.URLError as e:
+        raise OSError(f"couldn't reach the release: {getattr(e.reason, 'strerror', None) or e.reason}") from None
+    except http.client.HTTPException as e:
+        # IncompleteRead and friends: a dropped connection, not an OSError.
+        raise OSError(f"the download broke off: {type(e).__name__}") from None
     return h.hexdigest()
 
 
@@ -213,7 +311,7 @@ def load_slots(root: str) -> dict:
         st = {"active": next((n for n in SLOT_NAMES if os.path.isdir(slot_dir(root, n))), "a")}
     st.setdefault("previous", None)
     st.setdefault("probation", None)
-    for key in ("slots", "blocked", "retryAt"):
+    for key in ("slots", "blocked", "retryAt", "tries"):
         if not isinstance(st.get(key), dict):
             st[key] = {}
     return st
@@ -243,32 +341,73 @@ def _safe_members(zf: zipfile.ZipFile) -> list:
 
 
 def stage(root: str, zip_path: str, version: str, name: str) -> None:
-    """Unpack a checked zip into slot `name`, replacing what's there."""
+    """Unpack a checked zip into slot `name`, replacing what's there.
+
+    It unpacks beside the slot (<slot>.new), moves the old slot aside
+    (<slot>.old), moves the new one in, then deletes the old. Each move is
+    one rename, so a failure or a kill leaves either the old slot or the new
+    one in place, never half of one; sweep() clears the leftovers."""
+    dest = slot_dir(root, name)
+    tmp, old = dest + ".new", dest + ".old"
     try:
         zf = zipfile.ZipFile(zip_path)
-    except (zipfile.BadZipFile, OSError) as e:
-        raise Rejected(f"not a zip: {e}")
-    with zf:
-        members = _safe_members(zf)
-        names = {m.filename for m in members}
-        missing = [f for f in REQUIRED_FILES if f not in names]
-        if missing:
-            raise Rejected("the zip has no " + ", ".join(missing))
-        inside = zf.read("app/pulse_agent/VERSION").decode("utf-8", "replace").strip()
-        if inside != version:
-            raise Rejected(f"the zip says it is {inside}, not {version}")
-        have = _read_text(os.path.join(root, "runtime", "requirements.txt"))
-        need = zf.read("app/requirements.txt").decode("utf-8", "replace")
-        if not have or _requirements(have) != _requirements(need):
-            raise Rejected("it needs Python packages this unit's runtime doesn't have: opt the unit in again from Pulse")
-        dest = slot_dir(root, name)
-        tmp = dest + ".new"
+    except (zipfile.BadZipFile, OSError, EOFError) as e:
+        raise Rejected(f"not a zip: {type(e).__name__}")
+    try:
+        with zf:
+            members = _safe_members(zf)
+            names = {m.filename for m in members}
+            missing = [f for f in REQUIRED_FILES if f not in names]
+            if missing:
+                raise Rejected("the zip has no " + ", ".join(missing))
+            inside = zf.read("app/pulse_agent/VERSION").decode("utf-8", "replace").strip()
+            if inside != version:
+                raise Rejected(f"the zip says it is {inside[:20]}, not {version}")
+            have = _read_text(os.path.join(root, "runtime", "requirements.txt"))
+            need = zf.read("app/requirements.txt").decode("utf-8", "replace")
+            if not have or _requirements(have) != _requirements(need):
+                raise Rejected("it needs Python packages this unit's runtime doesn't have: opt the unit in again from Pulse")
+            shutil.rmtree(tmp, ignore_errors=True)
+            zf.extractall(tmp, members)
+    except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError) as e:
         shutil.rmtree(tmp, ignore_errors=True)
-        zf.extractall(tmp, members)
-    shutil.rmtree(dest, ignore_errors=True)
-    if os.path.exists(dest):
-        raise OSError(f"couldn't clear slot {name}")
-    os.replace(tmp, dest)
+        raise Rejected(f"the zip is damaged: {type(e).__name__}")
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    shutil.rmtree(old, ignore_errors=True)
+    try:
+        if os.path.exists(dest):
+            os.replace(dest, old)           # fails whole if a file in it is open
+        os.replace(tmp, dest)
+    except OSError:
+        shutil.rmtree(tmp, ignore_errors=True)
+        if os.path.isdir(old) and not os.path.exists(dest):
+            os.replace(old, dest)           # put the old slot back
+        raise
+    shutil.rmtree(old, ignore_errors=True)
+
+
+def sweep(root: str) -> None:
+    """Clear what a killed update leaves: the download, a half-unpacked slot,
+    a slot moved aside, a half-written state file."""
+    for path in (os.path.join(root, DOWNLOAD_FILE), os.path.join(root, SLOTS_FILE + ".tmp"),
+                 os.path.join(root, UPDATE_FILE + ".tmp")):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    for name in SLOT_NAMES:
+        for suffix in (".new", ".old"):
+            path = slot_dir(root, name) + suffix
+            if os.path.isdir(path):
+                if suffix == ".old" and not os.path.exists(slot_dir(root, name)):
+                    try:
+                        os.replace(path, slot_dir(root, name))   # killed between the two renames
+                        continue
+                    except OSError:
+                        pass
+                shutil.rmtree(path, ignore_errors=True)
 
 
 def _other(name: str) -> str:
@@ -288,7 +427,7 @@ def rollback(root: str, st: dict, why: str) -> None:
     p = st.get("probation") or {}
     bad, good = st["active"], st.get("previous")
     key = f"{p.get('version')}:{p.get('sha256')}"
-    st["blocked"][key] = "rolled back: " + why
+    st["blocked"][key] = short_error("rolled back: " + why)
     st["probation"] = None
     if good and os.path.isfile(os.path.join(slot_dir(root, good), "app", "monitor_once.py")):
         st["active"], st["previous"] = good, bad
@@ -300,16 +439,30 @@ def rollback(root: str, st: dict, why: str) -> None:
                p.get("from") or "")
 
 
+def _forget_other_targets(st: dict, key: str) -> bool:
+    """Keep refusals and retry times only for the current target: a new
+    target (or none) is what lets an old one be tried again, and it keeps
+    the state file from growing."""
+    changed = False
+    for field in ("blocked", "retryAt", "tries"):
+        for k in [k for k in st[field] if k != key]:
+            del st[field][k]
+            changed = True
+    return changed
+
+
 def maybe_update(root: str, st: dict, now: float, *, is_event_live=event_live, download=fetch,
                  url_template: str = RELEASE_URL) -> None:
     want = target(root)
+    key = f"{want['version']}:{want['sha256']}" if want else ""
+    if _forget_other_targets(st, key):
+        save_slots(root, st)
     if not want:
         return
     version, sha = want["version"], want["sha256"]
     active = st["active"]
     if (st["slots"].get(active) or {}).get("sha256") == sha:
         return                                     # already running the pinned bytes
-    key = f"{version}:{sha}"
     if key in st["blocked"]:
         return
     if st["retryAt"].get(key, 0) > now:
@@ -324,29 +477,53 @@ def maybe_update(root: str, st: dict, now: float, *, is_event_live=event_live, d
     url = url_template.format(version=version)
     tmp = os.path.join(root, DOWNLOAD_FILE)
     log(root, f"downloading {version} from {url}")
+    # The other slot is about to be replaced: stop vouching for what's in it
+    # until it's known whether it was (stage leaves it whole either way).
+    kept = st["slots"].pop(other, None)
+    if kept is not None:
+        save_slots(root, st)
     try:
         got = download(url, tmp)
         if got != sha:
             raise Rejected(f"its SHA-256 is {got[:12]}..., not the pinned {sha[:12]}...")
         stage(root, tmp, version, other)
     except Rejected as e:
-        st["blocked"][key] = str(e)
+        st["blocked"][key] = short_error(e)
+        st["retryAt"].pop(key, None)
+        st["tries"].pop(key, None)
         save_slots(root, st)
         report(root, "failed", version, str(e), current)
         return
     except (OSError, ValueError) as e:
-        # The network, a full disk, a slot in use: worth another try later.
-        st["retryAt"][key] = now + RETRY_AFTER_SECONDS
+        # The network, a full disk, a slot in use: worth another try later,
+        # backing off so a unit on a bad link doesn't pull 64 MB an hour, and
+        # giving up after five, until the target changes.
+        cause = f"{type(e).__name__}: {e.strerror or e}" if isinstance(e, OSError) else f"{type(e).__name__}: {e}"
+        tries = int(st["tries"].get(key) or 0) + 1
+        if tries >= MAX_NETWORK_TRIES:
+            cause = f"gave up after {tries} network failures; the last: {short_error(cause)}"
+            st["blocked"][key] = short_error(cause)
+            st["retryAt"].pop(key, None)
+            st["tries"].pop(key, None)
+        else:
+            st["tries"][key] = tries
+            st["retryAt"][key] = now + RETRY_AFTER_SECONDS * 2 ** (tries - 1)
         save_slots(root, st)
-        report(root, "failed", version, f"{type(e).__name__}: {e}", current)
+        report(root, "failed", version, cause, current)
         return
     finally:
         try:
             os.remove(tmp)
         except OSError:
             pass
+        if (kept and st["active"] == active and other not in st["slots"]
+                and slot_version(root, other) == kept.get("version")
+                and os.path.isfile(os.path.join(slot_dir(root, other), "app", "monitor_once.py"))):
+            st["slots"][other] = kept                  # the failed update never touched it
+            save_slots(root, st)
     st["slots"][other] = {"version": version, "sha256": sha, "installedAt": now}
     st["retryAt"].pop(key, None)
+    st["tries"].pop(key, None)
     _switch(root, st, other, version, sha)
 
 
@@ -355,6 +532,8 @@ def maybe_update(root: str, st: dict, now: float, *, is_event_live=event_live, d
 def tick(root: str, argv: list, *, is_event_live=event_live, run=run_slot, download=fetch,
          url_template: str = RELEASE_URL, now=None) -> int:
     now = time.time() if now is None else now
+    if "--dry-run" not in argv:
+        sweep(root)
     st = load_slots(root)
     marker = os.path.join(root, MARKER_FILE)
     if os.path.exists(marker):

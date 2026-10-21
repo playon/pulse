@@ -9,7 +9,7 @@ on the ian.moore@playonsports.com Cloudflare account:
 | Worker | Who calls it | What it does |
 |---|---|---|
 | `pulse-checkin` — https://pulse-checkin.pulse-checkin-worker.workers.dev | VPUs (public) | `POST /checkin` stores check-ins; `GET /health`; daily cron posts to Slack when too few arrived |
-| `pulse-checkin-admin` — https://pulse-checkin-admin.pulse-checkin-worker.workers.dev | People, behind Cloudflare Access | `/` unit table, `/units.csv`, `/checkins.csv?days=30` |
+| `pulse-checkin-admin` — https://pulse-checkin-admin.pulse-checkin-worker.workers.dev | People, behind Cloudflare Access | `/` unit table, `/units.csv`, `/checkins.csv?days=30`, and the one write, `POST /agent-target` (Pulse Vitals sets the agent build, below) |
 
 They are separate Workers because Cloudflare Access on a `workers.dev`
 hostname covers the whole hostname, and VPUs have to POST without logging in.
@@ -114,6 +114,70 @@ The agent builds the download URL itself (`playon/pulse` release
 only choose among published releases. The columns refuse anything but
 `N.N.N` and 64 lowercase hex characters.
 
+### Setting it: `POST /agent-target` (PV-85)
+
+Pulse Vitals sets and clears the target through the **admin** Worker, never by
+writing the database (Vitals is read-only against `pulse-checkins`). It calls
+over a service binding to `pulse-checkin-admin` and forwards its viewer's
+`Cf-Access-Jwt-Assertion`, so the change is made, and recorded, as that person.
+
+```http
+POST /agent-target
+Content-Type: application/json
+Cf-Access-Jwt-Assertion: <the viewer's Access token>
+
+{ "scope": "fleet", "target": { "version": "0.2.0", "sha256": "<64 hex>" }, "note": "why" }
+{ "scope": "<venue id, else VPU name>", "target": null, "note": "back with the fleet" }
+```
+
+`200` returns `{ ok: true, scope, target, previous, setBy, setAt, note }`.
+Every failure is `{ ok: false, error, message }` and writes nothing:
+
+| Status | `error` | When |
+|---|---|---|
+| 400 | `bad-request` | not exactly `{scope, target, note?}`: unknown fields (a `url` included), a malformed version or hash, a scope with spaces at the ends or control characters |
+| 403 | `forbidden` | no valid Access token for this team, wrong audience, Access not configured |
+| 403 | `not-an-editor` | the token's email isn't in `FLEET_CONTROL_EDITORS` (unset: nobody) |
+| 404 | `unknown-scope` | no unit has checked in with that venue id (or VPU name, for a unit with no venue id) |
+| 405 / 413 / 415 | `method-not-allowed` / `too-large` / `unsupported-media-type` | not POST, a body over 4 KB, not `application/json` |
+| 422 | `release-not-found` | no published (non-draft) `agent-v<version>` with an uploaded `pulse-agent-<version>.zip` |
+| 422 | `hash-mismatch` | the release's SHA-256 isn't the one sent |
+| 422 | `release-has-no-hash` | the release publishes no SHA-256 to check against |
+| 502 | `release-check-failed` | GitHub couldn't be asked (down, rate limited): try again |
+| 500 | `storage` | the D1 write failed |
+
+Before saving a target the Worker asks GitHub for that release. It compares
+the zip asset's `digest` (GitHub's own SHA-256) and the release's
+`pulse-agent-<version>.zip.sha256` file. Both must match when present, and at
+least one must be. Both URLs are built from the version. Clearing needs no
+check. Setting a unit creates its `monitor_control` row (mode `on`) when there
+is none; it never changes a row's `mode`, `skip` or `note`. Clearing a unit
+makes it follow the fleet row again.
+
+Each change is stored on the row (`agent_set_by`, `agent_set_at`,
+`agent_note`) and appended to `agent_target_log` with the target it replaced
+(migration 0018).
+
+**A unit that refused a target** (bad hash, damaged zip, rolled back after
+its new build failed, or five failed downloads) doesn't try it again until its
+target changes. To make it retry, clear the target or set another one, let the
+unit check in, then set the target again. A download that fails for a network
+reason is retried on its own after 1 h, 2 h, 4 h and 8 h. The fifth failure
+gives up, with `agent_update_error` starting "gave up after 5 network
+failures".
+
+Setup for the endpoint, all on `pulse-checkin-admin`:
+
+- `ACCESS_AUD`: the admin app's AUD tag **and** Pulse Vitals' Access app AUD tag,
+  comma separated. Tokens of any other audience are refused.
+- `FLEET_CONTROL_EDITORS`: comma-separated emails that may change the target.
+- Optional secret `GITHUB_TOKEN` (`npx wrangler secret put GITHUB_TOKEN --env admin`,
+  read-only public access is enough) to avoid GitHub's unauthenticated rate limit.
+- In Vitals' `wrangler.toml`: `[[services]] binding = "CHECKIN_ADMIN"`,
+  `service = "pulse-checkin-admin"`.
+
+Break-glass, by hand (no release check, no record of who; prefer the endpoint):
+
 ```bash
 # move the fleet to 0.2.0 (sha256 of that release's zip)
 npx wrangler d1 execute pulse-checkins --remote --command "UPDATE monitor_control SET agent_version='0.2.0', agent_sha256='<64 hex>', note='why', updated_at=datetime('now') WHERE scope='fleet'"
@@ -126,7 +190,8 @@ npx wrangler d1 execute pulse-checkins --remote --command "UPDATE monitor_contro
 What each unit runs and how its last update went are in `unit_latest`
 (`agent_version`, `agent_update_status`, `agent_update_version`,
 `agent_update_error`). Apply migration 0017 before deploying this Worker: it
-writes those columns.
+writes those columns. Apply 0018 before deploying the admin Worker with
+`/agent-target`.
 
 This is the lesson from Canopy Leaf's rollout: its memory leak took four months
 of hand-edited cron jobs to find (#leaf-deploy-coordination). Each monitor

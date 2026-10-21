@@ -17,7 +17,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- Runner (PV-85): a download cut off part way is now retried instead of
+  refused for good. A cut-off download used to look complete, so it failed the
+  hash check and was blocked as a bad zip. A zip whose contents are damaged is
+  now refused and reported, not left half-unpacked with nothing reported. Both
+  fixes take effect on the next enroll, because an update never replaces the
+  runner.
+- Runner: a failed update leaves nothing behind. A killed download, a
+  half-unpacked slot and a slot moved aside are cleared on the next tick. A
+  tick that runs over is killed together with the PowerShell processes it
+  started. HTTP errors close their connection. The other slot is swapped in
+  one rename, so a failure leaves the old build in place, never half of one.
+
 ### Changed
+- Runner: `agentUpdate.error` is one short line with no file paths and no
+  computer name.
+- Runner: a target that was refused or rolled back is tried again only after
+  fleet control names a different target, or clears it. Before, it was never
+  tried again. A network failure is retried after 1 h, 2 h, 4 h and 8 h. The
+  fifth network failure gives the target up the same way, and
+  `agentUpdate.error` says so with the last cause ("gave up after 5 network
+  failures; the last: ..."). It used to retry every hour, forever. The count
+  is kept for the current target only, and starts again when the target
+  changes or an update succeeds.
+- Runner: `agent-slots.json` only keeps refusals and retry times for the
+  current target, so it no longer grows with every target ever pinned.
 - A unit missing one of its main cameras (1 of 2 on an S2) now reports readiness FAIL, with the `cam-partial` finding critical. It was WARN. A multi-camera head can't stream with a camera missing. Verdict change only; no new fields.
 
 ### Added

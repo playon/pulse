@@ -1,6 +1,6 @@
 # Two Workers from one codebase, sharing one D1 database:
 #   pulse-checkin        public ingest for VPUs + the daily "no check-ins" Slack alert
-#   pulse-checkin-admin  read-only views, behind Cloudflare Access
+#   pulse-checkin-admin  read-only views + POST /agent-target, behind Cloudflare Access
 # They are split because Access on a workers.dev hostname covers the whole
 # hostname, and the VPUs must be able to POST without an Access login.
 
@@ -40,7 +40,13 @@ workers_dev = true
 ROLE = "admin"
 # From Zero Trust > Access > Applications > (this app) > Overview.
 ACCESS_TEAM_DOMAIN = "REPLACE_WITH_TEAM.cloudflareaccess.com"
+# Comma separated: this app's AUD tag and Pulse Vitals' (it forwards its
+# viewer's token over a service binding to POST /agent-target, PV-85).
 ACCESS_AUD = "REPLACE_WITH_APPLICATION_AUD_TAG"
+# Who may set the agent target (POST /agent-target). Empty: nobody.
+FLEET_CONTROL_EDITORS = ""
+# Optional secret (wrangler secret put GITHUB_TOKEN --env admin): the release
+# check's GitHub API calls, past the unauthenticated rate limit.
 
 [[env.admin.d1_databases]]
 binding = "DB"
