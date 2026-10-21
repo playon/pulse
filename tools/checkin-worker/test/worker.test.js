@@ -797,3 +797,27 @@ test("switching a unit off the way the README says keeps its agent pin", async (
   assert.equal(body.control.mode, "off");
   assert.deepEqual(body.control.agent, { version: "0.1.0", sha256: SHA_B });
 });
+
+// PV-19: the five never-filled telemetry columns stay out of every view.
+const UNFILLED = ["tel_risk_count", "tel_reboot_pending", "tel_poe_draw_w", "tel_clock_offset_s", "tel_camera_macs"];
+
+test("no view exposes the never-filled telemetry columns", () => {
+  const db = env.DB.raw;
+  const views = db.prepare("SELECT name FROM sqlite_master WHERE type = 'view'").all();
+  assert.ok(views.length >= 4);
+  const gone = new Set([...UNFILLED, "risk_count", "reboot_pending", "poe_draw_w", "clock_offset_s", "camera_macs"]);
+  for (const { name } of views) {
+    const cols = db.prepare(`SELECT name FROM pragma_table_info('${name}')`).all().map((c) => c.name);
+    for (const c of cols) assert.ok(!gone.has(c), `${name}.${c}`);
+  }
+});
+
+test("checkins_et lists every checkins column except the unfilled five", () => {
+  const db = env.DB.raw;
+  const names = (t) => db.prepare(`SELECT name FROM pragma_table_info('${t}')`).all().map((c) => c.name);
+  const et = new Set(names("checkins_et"));
+  for (const c of names("checkins")) {
+    assert.equal(et.has(c), !UNFILLED.includes(c), `checkins_et vs checkins.${c} (add new columns to the view)`);
+  }
+  assert.ok(et.has("received_at_et") && et.has("sent_at_et"));
+});
