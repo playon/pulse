@@ -47,6 +47,7 @@ from powershell import (
 )
 import peer
 import cloud_api
+import software_review as _software_review
 
 _web_root = _os.path.dirname(_app_dir)
 SETTINGS_PATH = _os.path.join(_web_root, "pulse-settings.json")
@@ -1089,7 +1090,7 @@ _CONCERNING_SOFTWARE = {
         "patterns": [
             "CrowdStrike", "SentinelOne", "Sophos", "Carbon Black", "Bitdefender",
             "McAfee", "Norton", "Symantec", "Trend Micro", "Kaspersky", "ESET",
-            "Webroot", "Cylance", "Cortex XDR",
+            "Webroot", "Cylance", "Cortex XDR", "Datto EDR",
         ],
     },
     "crypto_miner": {
@@ -1146,7 +1147,7 @@ _CONCERNING_SOFTWARE = {
         # VNC variants (TightVNC, RealVNC) are often standard on VPUs — left out
         # to avoid false positives.
         "patterns": [
-            "TeamViewer", "AnyDesk", "Splashtop", "GoToMyPC",
+            "TeamViewer", "AnyDesk", "Splashtop", "GoToMyPC", "Datto RMM",
             "ConnectWise Control", "ScreenConnect", "Chrome Remote Desktop",
         ],
     },
@@ -1177,6 +1178,15 @@ _CONCERNING_SOFTWARE = {
 }
 
 
+def _is_chrome_webapp(sw) -> bool:
+    """A Chrome web-app shortcut (Gmail, Docs, a "Google Drive" PWA...). Windows
+    lists these as installed programs with publisher `Google\\Chrome`. They are
+    a browser bookmark, not the product the name suggests, so the risk lists
+    must not match them (a Drive PWA is not the Drive sync client)."""
+    pub = (sw.get("publisher") or "").strip().lower().replace("/", "\\")
+    return pub == "google\\chrome"
+
+
 def _detect_concerning_software(installed_sw) -> dict:
     """Categorize installed software into concerning buckets.
     Returns {category_key: [{name, version, matched}, ...]}.
@@ -1188,7 +1198,7 @@ def _detect_concerning_software(installed_sw) -> dict:
     seen_names = set()  # dedupe — installers often appear under multiple keys
     for sw in installed_sw.get("software") or []:
         name = (sw.get("displayName") or "").strip()
-        if not name:
+        if not name or _is_chrome_webapp(sw):
             continue
         name_lc = name.lower()
         if name_lc in seen_names:
@@ -1217,7 +1227,7 @@ def _enrich_software_with_concerns(installed_sw):
         name_lc = (sw.get("displayName") or "").strip().lower()
         if not name_lc:
             continue
-        for cat_key, cat in _CONCERNING_SOFTWARE.items():
+        for cat_key, cat in ([] if _is_chrome_webapp(sw) else _CONCERNING_SOFTWARE.items()):
             for pattern in cat["patterns"]:
                 if pattern.lower() in name_lc:
                     sw["concern"] = {
@@ -1231,6 +1241,8 @@ def _enrich_software_with_concerns(installed_sw):
                     break
             if "concern" in sw:
                 break
+        # approved | risk | informational, by name only (software_review.py)
+        sw["review"] = _software_review.classify(sw.get("displayName"), sw.get("concern"))
     return installed_sw
 
 
