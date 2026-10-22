@@ -318,6 +318,7 @@ try {
         $msg = [string]$ev.Message
         if ($msg -notmatch 'Application popup:\s*(?<exe>[^\s]+\.exe)\s*-\s*(?<title>[^:]*):\s*(?<text>.*)$') { continue }
         $exeName = $Matches['exe']
+        $popupTitle = $Matches['title'].Trim()
         if (-not [System.IO.File]::Exists((Join-Path $PIX_BIN $exeName))) { continue }
         $text = $Matches['text'].Trim()
         $dll = $null
@@ -325,14 +326,16 @@ try {
         $key = ($exeName + '|' + $text).ToLower()
         if (-not $popupIndex.ContainsKey($key)) {
             $g = [pscustomobject]@{
-                exe = $exeName; title = $Matches['title'].Trim(); text = $text; dll = $dll
+                exe = $exeName; title = $popupTitle; text = $text; dll = $dll
                 n = 0; first = $ev.TimeCreated; last = $ev.TimeCreated
+                times = New-Object 'System.Collections.Generic.List[string]'
             }
             $popupIndex[$key] = $g
             $popupGroups.Add($g)
         }
         $g = $popupIndex[$key]
         $g.n = $g.n + 1
+        $null = $g.times.Add($ev.TimeCreated.ToString($TS, $INV))
         if ($ev.TimeCreated -lt $g.first) { $g.first = $ev.TimeCreated }
         if ($ev.TimeCreated -gt $g.last) { $g.last = $ev.TimeCreated }
         if ($exeName -ieq 'VPU.exe') { $vpuPopupTimes.Add($ev.TimeCreated) }
@@ -341,6 +344,7 @@ try {
         [pscustomobject]@{
             exe = $g.exe; title = $g.title; text = $g.text; dll = $g.dll; count = $g.n
             first = $g.first.ToString($TS, $INV); last = $g.last.ToString($TS, $INV)
+            times = $g.times.ToArray()
         }
     })
 

@@ -2057,6 +2057,11 @@ def _lmi_findings(lmi_log) -> list:
 # and reads the loader-error popups Windows logs (System, Application Popup 26).
 START_ERROR_LIVE_SECONDS = 2 * 3600    # agent retries every ~7-11 min in an event
 START_ERROR_RECENT_SECONDS = 24 * 3600
+# PV-84: a forced close waits 15 s for gRPC; the two observed CEF popups
+# were 4 s apart during child cleanup. 30 s either side covers that teardown,
+# not the next launch. Only the known CEF DLL-init error is downgraded:
+# there is no process lineage in these logs to identify other VPU children.
+START_ERROR_TEARDOWN_SECONDS = 30
 
 _PIX_EXE_ROLE = {
     "vpu.exe": "Pixellot's video program (VPU.exe)",
@@ -2086,7 +2091,54 @@ def _join_names(names) -> str:
     return ", ".join(names[:-1]) + ", and " + names[-1]
 
 
-def _binary_findings(binaries) -> list:
+def _binary_startup_popups(binaries, graphics_delivery):
+    """Keep startup failures separate from the known CEF teardown artifact.
+
+    Older collectors and incomplete log reads retain the original verdict.
+    Per-occurrence stamps matter: one grouped message can contain both a
+    shutdown popup and a real startup failure.
+    """
+    popups = [p for p in (binaries.get("popups") or []) if p.get("count")]
+    context = graphics_delivery or {}
+    if context.get("error") or context.get("lifecycleReadComplete") is not True:
+        return popups, 0
+    lifecycle = context.get("vpuLifecycle") or []
+    exits = [t for p in lifecycle if p.get("kind") == "teardown"
+             if (t := _ps_time(p.get("at"))) is not None]
+    starts = [t for p in lifecycle if p.get("kind") == "start"
+              if (t := _ps_time(p.get("at"))) is not None]
+    starts += [t for p in (binaries.get("vpuProcesses") or [])
+               if (t := _ps_time(p.get("created"))) is not None]
+    from datetime import timedelta
+    window = timedelta(seconds=START_ERROR_TEARDOWN_SECONDS)
+
+    def during_teardown(at):
+        return any(abs(at - exit_at) <= window and not any(
+            exit_at <= start <= max(at, exit_at) + window for start in starts
+        ) for exit_at in exits)
+
+    active, shutdown_count = [], 0
+    for popup in popups:
+        if ((popup.get("exe") or "").lower() != "cefworker.exe"
+                or "0xc0000142" not in (popup.get("text") or "").lower()):
+            active.append(popup)
+            continue
+        times = [_ps_time(t) for t in (popup.get("times") or [])]
+        if not times and popup["count"] == 1:
+            times = [_ps_time(popup.get("last"))]
+        if len(times) != popup["count"] or any(t is None for t in times):
+            active.append(popup)
+            continue
+        remaining = [t for t in times if not during_teardown(t)]
+        shutdown_count += len(times) - len(remaining)
+        if remaining:
+            active.append(dict(popup, count=len(remaining),
+                               first=min(remaining).strftime("%Y-%m-%dT%H:%M:%S%z"),
+                               last=max(remaining).strftime("%Y-%m-%dT%H:%M:%S%z")))
+    return active, shutdown_count
+
+
+def _binary_findings(binaries, graphics_delivery=None) -> list:
     if not binaries or binaries.get("error"):
         return []
     now = _ps_time(binaries.get("now"))
@@ -2171,14 +2223,35 @@ def _binary_findings(binaries) -> list:
     # load). How recent decides whether it still stops tonight's game.
     if not popups:
         return []
-    latest = max(popups, key=lambda p: _ps_time(p.get("last")) or _ps_time("1970-01-01T00:00:00+00:00"))
+    startup_popups, shutdown_count = _binary_startup_popups(binaries, graphics_delivery)
+    evidence = " ".join([popup_line(p) for p in popups] + ([stuck_line] if stuck_line else []))
+    details = [f"{p.get('exe')}: {p.get('text')}" for p in popups][:8]
+    if shutdown_count:
+        evidence += (
+            f" {shutdown_count} CEFWorker.exe DLL-init popup(s) fell within "
+            f"{START_ERROR_TEARDOWN_SECONDS} seconds of VPU teardown in Pixellot's agent log, "
+            "with no new VPU launch in that window; these are shutdown evidence, not startup failures."
+        )
+    if not startup_popups and not stuck:
+        return [{
+            "code": "pixellot-shutdown-popup",
+            "severity": "info",
+            "category": "Pixellot",
+            "title": "CEFWorker.exe showed a Windows error while the VPU was shutting down",
+            "recommendation": (
+                "The CEFWorker.exe DLL-init errors coincided with VPU teardown. They do not "
+                "show that a game failed to start; the Windows popups are kept below for support."
+            ),
+            "evidence": evidence,
+            "details": details,
+        }]
+    latest = max(startup_popups or popups,
+                 key=lambda p: _ps_time(p.get("last")) or _ps_time("1970-01-01T00:00:00+00:00"))
     last = _ps_time(latest.get("last"))
     age = (now - last).total_seconds() if now and last else None
     exe = latest.get("exe") or "VPU.exe"
     who = _PIX_EXE_ROLE.get(exe.lower(), exe)
     text = (latest.get("text") or "").strip()
-    evidence = " ".join([popup_line(p) for p in popups] + ([stuck_line] if stuck_line else []))
-    details = [f"{p.get('exe')}: {p.get('text')}" for p in popups][:8]
 
     if stuck or (age is not None and age <= START_ERROR_LIVE_SECONDS):
         return [{
@@ -2357,7 +2430,7 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
     probes_attempted = probe_results is not None
 
     # ── Pixellot program can't start (missing DLL / loader error) ──
-    findings.extend(_binary_findings(binaries))
+    findings.extend(_binary_findings(binaries, graphics_delivery))
 
     # ── Wi-Fi uplink, internet on a camera port, Wi-Fi card off ──
     findings.extend(_uplink_findings(network_config, wifi))

@@ -1557,6 +1557,72 @@ class TestPixellotBinaries(unittest.TestCase):
         self.assertEqual([f["code"] for f in past], ["pixellot-start-error-past"])
         self.assertIn("1 time,", past[0]["recommendation"])
 
+    def _cef_popup(self, *times):
+        return {"exe": "CEFWorker.exe", "title": "Application Error",
+                "text": "The application was unable to start correctly (0xc0000142).",
+                "count": len(times), "first": min(times), "last": max(times), "times": list(times)}
+
+    def _teardown(self, at="2026-10-15T11:00:00-04:00", **overrides):
+        return dict({"lifecycleReadComplete": True,
+                     "vpuLifecycle": [{"kind": "teardown", "at": at}]}, **overrides)
+
+    def test_cef_teardown_is_info_and_keeps_windows_evidence(self):
+        popup = self._cef_popup("2026-10-15T11:00:04-04:00", "2026-10-15T11:00:08-04:00")
+        b = self._bin(popups=[popup])
+        dash = main._build_dashboard({}, {}, {"services": []}, {}, binaries=b,
+                                     graphics_delivery=self._teardown())
+        f = next(f for f in dash["findings"] if f["code"] == "pixellot-shutdown-popup")
+        self.assertEqual(f["severity"], "info")
+        self.assertNotEqual(dash["readiness"]["status"], "FAIL")
+        self.assertIn("2 times", f["evidence"])
+        self.assertIn("Application Popup event 26", f["evidence"])
+        self.assertIn("0xc0000142", " ".join(f["details"]))
+        self.assertIn("30 seconds", f["evidence"])
+
+    def test_cef_popup_without_teardown_still_blocks(self):
+        b = self._bin(popups=[self._cef_popup("2026-10-15T11:00:04-04:00")])
+        for context in (None, self._teardown(vpuLifecycle=[]),
+                        self._teardown(lifecycleReadComplete=False),
+                        self._teardown(error=True)):
+            with self.subTest(context=context):
+                self.assertEqual(main._binary_findings(b, context)[0]["severity"], "critical")
+
+    def test_teardown_window_is_inclusive_in_both_directions(self):
+        from datetime import timedelta
+        at = main._ps_time("2026-10-15T11:00:00-04:00")
+        for seconds in (-31, -30, 0, 30, 31):
+            popup = self._cef_popup((at + timedelta(seconds=seconds)).isoformat())
+            with self.subTest(seconds=seconds):
+                finding = main._binary_findings(self._bin(popups=[popup]), self._teardown())[0]
+                self.assertEqual(finding["severity"], "info" if abs(seconds) <= 30 else "critical")
+
+    def test_new_vpu_launch_preserves_cef_blocker(self):
+        b = self._bin(popups=[self._cef_popup("2026-10-15T11:00:04-04:00")])
+        context = self._teardown()
+        context["vpuLifecycle"].append({"kind": "start", "at": "2026-10-15T11:00:02-04:00"})
+        self.assertEqual(main._binary_findings(b, context)[0]["code"], "pixellot-start-error")
+        b["vpuProcesses"][0]["created"] = "2026-10-15T11:00:02-04:00"
+        self.assertEqual(main._binary_findings(b, self._teardown())[0]["severity"], "critical")
+
+    def test_only_known_cef_dll_init_error_is_downgraded(self):
+        popup = self._cef_popup("2026-10-15T11:00:04-04:00")
+        for error in (dict(popup, exe="VPU.exe"), dict(popup, exe="Agent.exe"),
+                      dict(popup, text="A required DLL was not found.")):
+            with self.subTest(popup=error):
+                self.assertEqual(main._binary_findings(self._bin(popups=[error]), self._teardown())[0]["severity"], "critical")
+        self.assertEqual(main._binary_findings(self._bin(popups=[popup], stuck=True), self._teardown())[0]["severity"], "critical")
+        self.assertEqual(main._binary_findings(self._bin(popups=[popup], missing=["libcef.dll"]), self._teardown())[0]["code"], "pixellot-dll-missing")
+
+    def test_mixed_popup_group_keeps_real_failure_age(self):
+        popup = self._cef_popup("2026-10-14T20:00:00-04:00", "2026-10-15T11:00:04-04:00")
+        f = main._binary_findings(self._bin(popups=[popup]), self._teardown())[0]
+        self.assertEqual(f["code"], "pixellot-start-error-recent")
+        self.assertIn("2 times", f["evidence"])
+        self.assertIn("1 CEFWorker.exe", f["evidence"])
+        # An old grouped collector has no per-occurrence timestamps: don't guess.
+        del popup["times"]
+        self.assertEqual(main._binary_findings(self._bin(popups=[popup]), self._teardown())[0]["severity"], "critical")
+
     def test_several_missing_dlls(self):
         f = main._binary_findings(self._bin(missing=["libcef.dll", "chrome_elf.dll", "a.dll", "b.dll"]))
         self.assertIn("libcef.dll, chrome_elf.dll, a.dll, and 1 more are missing", f[0]["title"])
