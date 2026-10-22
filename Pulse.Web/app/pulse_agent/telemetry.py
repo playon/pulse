@@ -22,12 +22,11 @@ from pulse_agent.engine import engine
 # this carries what Pixellot can't see from outside the box. The hardware
 # inventory came with PV-64; the camera card, restart history, disk space and
 # health, components, applications, programs and the Windows/clock environment
-# with PV-65 to PV-76, for Vitals' unit tabs. The full findings copy,
-# recordings and the card's PoE read (PV-66, its own PR after a GIE74 soak) are
-# still left out. Kept small on purpose: Unity writes
-# must be, and the check-in Worker drops a document over 16 KB
-# (_fit_telemetry). Leaves out hostname, BIOS serial, disk serials and camera
-# serials.
+# with PV-65 to PV-76, for Vitals' unit tabs. The full findings copy and
+# recordings are still left out. The card's PoE read is hourly (PV-66), not
+# the live tab's 2-second poll. Kept small on purpose: Unity writes must be,
+# and the check-in Worker drops a document over 16 KB (_fit_telemetry).
+# Leaves out hostname, BIOS serial, disk serials and camera serials.
 _TELEMETRY_SCHEMA = "pulse.telemetry/v1"
 def _port_names() -> dict:
     # Built per call: the RTMP purpose is the engine's, and main.py binds the
@@ -107,15 +106,15 @@ def _telemetry_cameras(raw: dict) -> dict:
 
 
 async def _collect_telemetry_extras(raw: dict, skip_intrusive: bool = False) -> None:
-    """Collectors the telemetry needs beyond the dashboard pass: boots and
-    power loss, the scoreboard source, calibration, the Windows patch level
-    and clock drift. Fills `raw`; each part fails soft. Not the camera card's
-    PoE: SmartPoE.dll waits for a day of passes on a GIE74 (PV-66).
-    `skip_intrusive` is accepted for symmetry. None of them probes the venue
-    network the way Test-NetworkPorts does: Test-NtpDrift sends one NTP sample
-    to the unit's own time source, which Windows does on its own anyway."""
-    del skip_intrusive
-    reboots, sc, calib, ubr, ntp = await asyncio.gather(
+    """Collectors beyond the dashboard pass. PoE is allowed only on an
+    I210/I211 camera card, outside an event; its own model gate and persistent
+    three-unfinished-attempt sentinel still run in an isolated process.
+    monitor_once caches PoE results, including crashes, timeouts and a
+    latched guard, for an hour. No failed process is retried in this pass.
+    """
+    card = _camera_card(raw.get("network_config"))
+    read_poe = not skip_intrusive and card is not None and card["poeSupported"] is True
+    reboots, sc, calib, ubr, ntp, poe = await asyncio.gather(
         engine.run_ps("Get-RebootHistory.ps1", timeout=30),
         # Straight to the collector, not _run_sc_status: that also appends to
         # the ScoreConnect config history, which is the interactive tab's job.
@@ -128,6 +127,7 @@ async def _collect_telemetry_extras(raw: dict, skip_intrusive: bool = False) -> 
         # PV-75. One registry read (6 h cache) and one NTP sample (1 h cache).
         engine.run_ps("Get-WindowsUbr.ps1", timeout=10),
         engine.run_ps("Test-NtpDrift.ps1", timeout=20),
+        engine.run_ps("Get-PoePower.ps1", timeout=20) if read_poe else asyncio.sleep(0),
         return_exceptions=True,
     )
 
@@ -135,7 +135,7 @@ async def _collect_telemetry_extras(raw: dict, skip_intrusive: bool = False) -> 
         return v if isinstance(v, dict) and not v.get("error") else None
     raw.update(reboots=ok(reboots),
                scoreconnect=sc if isinstance(sc, dict) else None,
-               calibration=ok(calib), ubr=ok(ubr), ntp=ok(ntp))
+               calibration=ok(calib), ubr=ok(ubr), ntp=ok(ntp), poe=ok(poe))
 
 
 def _prefix_to_mask(prefix) -> Optional[str]:
@@ -687,8 +687,7 @@ _NIC_CHIPS = (("82574l", "82574L"), ("i210", "I210"), ("i211", "I211"), ("i350",
               ("i354", "I354"), ("82576", "82576"), ("82580", "82580"))
 _NIC_FAMILY = {"82574L": "GIE64 series", "I210": "GIE74 series", "I211": "GIE74 series",
                "I350": "GIE74P-AN", "I354": "GIE74P-AN"}
-# Only the I210/I211 cards report PoE; the GIE64 and GIE74P-AN can't. The read
-# itself (`poe`, PV-66) isn't sent yet, so the key is absent, not null.
+# Only the I210/I211 cards report PoE; the GIE64 and GIE74P-AN can't.
 _NIC_POE = {"I210": True, "I211": True, "82574L": False, "I350": False, "I354": False}
 _NIC_MAX_PORTS = 8
 
@@ -727,7 +726,35 @@ def _round(v, places: int) -> Optional[float]:
 
 
 def _telemetry_nic(raw: dict) -> Optional[dict]:
-    return _camera_card(raw.get("network_config"))
+    card = _camera_card(raw.get("network_config"))
+    if card is not None:
+        card["poe"] = _telemetry_poe(raw.get("poe")) if card["poeSupported"] is True else None
+    return card
+
+
+def _telemetry_poe(poe) -> Optional[dict]:
+    """Only card figures, never driver paths or error text. A failed port is
+    unknown, not off. Do not infer a rating or recompute the Molex flag from
+    independently drifting budget samples; keep the collector's flag."""
+    if not isinstance(poe, dict) or poe.get("error") or poe.get("supported") is not True or poe.get("available") is not True:
+        return None
+    budget = poe.get("budget")
+    if not isinstance(budget, dict):
+        return None
+    ports = []
+    for p in _rows(poe.get("ports")):
+        port = p.get("port")
+        if type(port) is not int or not 1 <= port <= 4 or any(r["port"] == port for r in ports):
+            continue
+        read = p.get("readOk") is True
+        ports.append({"port": port,
+                      "on": p.get("poeOn") if read and isinstance(p.get("poeOn"), bool) else None,
+                      "volts": _num(p.get("voltage")) if read else None,
+                      "amps": _num(p.get("current")) if read else None,
+                      "watts": _num(p.get("watts")) if read else None})
+    return {"budget": {k: _num(budget.get(k)) for k in ("totalW", "consumedW", "remainingW", "tempC")},
+            "underPowered": budget.get("underPowered") if isinstance(budget.get("underPowered"), bool) else None,
+            "ports": ports}
 
 
 # ── Streaming components and installed applications (PV-71) ─────────────────
@@ -1006,6 +1033,16 @@ def _fingerprint_view(t: dict) -> dict:
         if isinstance(hw.get("disks"), list):
             hw["disks"] = [{k: v for k, v in d.items() if k != "powerOnHours"} for d in hw["disks"]]
         t["hardware"] = hw
+    cameras = t.get("cameras")
+    nic = cameras.get("nic") if isinstance(cameras, dict) else None
+    poe = nic.get("poe") if isinstance(nic, dict) else None
+    if isinstance(poe, dict):
+        # Card drift must not turn a healthy heartbeat into a full report.
+        # Availability, the Molex flag and a port's power state still post.
+        t["cameras"] = {**cameras, "nic": {**nic, "poe": {
+            "underPowered": poe.get("underPowered"),
+            "ports": [{"port": p["port"], "on": p["on"]} for p in poe.get("ports") or []],
+        }}}
     return t
 
 

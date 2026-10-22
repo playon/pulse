@@ -17,6 +17,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- Camera-card power in Vitals (PV-66): hourly card budget, temperature and per-port power on supported GIE74 cards; unsupported or unreadable cards remain unknown, with the native driver's three-crash stop retained.
+
 ## [0.2.2] - 2026-10-21
 
 The first published agent: the zip fleet control can pin, with its SHA-256.

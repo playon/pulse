@@ -319,18 +319,24 @@ async def run_ps(
     }
 
     try:
-        if _PS_BATCH and not DEMO_MODE:
+        # A native SmartPoE access violation must not kill the other collectors
+        # in the shared batch process. Its on-disk crash sentinel spans ticks.
+        if _PS_BATCH and not DEMO_MODE and script_name != "Get-PoePower.ps1":
             RUNNING_TASKS[task_id]["active"] = True
             result = await _batch_submit(script_name, args, timeout)
         else:
             async with _get_semaphore():
                 RUNNING_TASKS[task_id]["active"] = True
                 result = await _run_ps_inner(script_name, args, timeout, task_id, cancel_evt)
-        # Only cache successful results. Errors should retry on next call.
+        # Errors normally retry on the next call. Only the scheduled native
+        # PoE probe caches a failure too, so even a crash/timeout costs at
+        # most one isolated attempt per hour. Interactive calls still retry.
         if use_cache and isinstance(result, dict) and not result.get("error"):
             _RESULT_CACHE[key] = (time.monotonic(), result)
             if not args:
                 _disk_cache_put(script_name, result)
+        elif use_cache and isinstance(result, dict) and not args and script_name == "Get-PoePower.ps1":
+            _disk_cache_put(script_name, result)
         future.set_result(result)
         return result
     except Exception as e:
