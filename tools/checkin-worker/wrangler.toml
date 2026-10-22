@@ -38,16 +38,20 @@ workers_dev = true
 
 [env.admin.vars]
 ROLE = "admin"
-# From Zero Trust > Access > Applications > (this app) > Overview.
-ACCESS_TEAM_DOMAIN = "REPLACE_WITH_TEAM.cloudflareaccess.com"
-# Comma separated: this app's AUD tag and Pulse Vitals' (it forwards its
-# viewer's token over a service binding to POST /agent-target, PV-85).
-ACCESS_AUD = "REPLACE_WITH_APPLICATION_AUD_TAG"
-# Who may set the agent target (POST /agent-target). Empty: nobody.
-FLEET_CONTROL_EDITORS = ""
-# Required secret to set a target (wrangler secret put GITHUB_TOKEN --env admin):
-# the release check's GitHub API calls. Without it POST /agent-target answers
-# 500 not-configured rather than fail at random on the shared-IP rate limit.
+# The Zero Trust team domain (the same team as Pulse Vitals).
+ACCESS_TEAM_DOMAIN = "young-shape-07d0.cloudflareaccess.com"
+# Comma separated: this app's AUD tag (Zero Trust > Access controls >
+# Applications > pulse-checkin-admin - Cloudflare Workers) and Pulse Vitals'
+# (it forwards its viewer's token over a service binding to POST /agent-target,
+# PV-85). The AUD tag is an identifier, not a secret.
+ACCESS_AUD = "f0243adfb73f076a8b35cf56b7ae8b906ff8e822a7f75a32332a2ea77a04797f,f5e7af1459db6633995beaf852967ff2ec3985e8a7f279e468db11c251eab909"
+# Secrets, set with `wrangler secret put <NAME> --env admin`, never here (this
+# repo is public, and a deploy would overwrite a plain variable of the same name):
+#   FLEET_CONTROL_EDITORS  comma-separated emails that may set the agent target
+#                          (POST /agent-target). Unset or empty: nobody.
+#   GITHUB_TOKEN           the release check's GitHub API calls. Without it
+#                          POST /agent-target answers 500 not-configured rather
+#                          than fail at random on the shared-IP rate limit.
 
 [[env.admin.d1_databases]]
 binding = "DB"

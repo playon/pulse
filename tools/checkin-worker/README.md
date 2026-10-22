@@ -181,7 +181,10 @@ Setup for the endpoint, all on `pulse-checkin-admin`:
 
 - `ACCESS_AUD`: the admin app's AUD tag **and** Pulse Vitals' Access app AUD tag,
   comma separated. Tokens of any other audience are refused.
-- `FLEET_CONTROL_EDITORS`: comma-separated emails that may change the target.
+- Secret `FLEET_CONTROL_EDITORS` (`npx wrangler secret put FLEET_CONTROL_EDITORS --env admin`):
+  comma-separated emails that may change the target. A secret, not a variable in
+  `wrangler.toml`, because this repo is public and a deploy overwrites a plain
+  variable of the same name.
 - Secret `GITHUB_TOKEN` (`npx wrangler secret put GITHUB_TOKEN --env admin`;
   a fine-grained token with read-only access to public repositories is
   enough). Required to set a target: without it the endpoint answers
