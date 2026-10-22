@@ -44,6 +44,50 @@ A client should drop an entry from its queue on any of those three statuses and
 keep it on anything else: a non-200 response, `ok` not true, or a network error.
 Limits are 50 check-ins or 64 KB per request, and 30 requests per minute per IP.
 
+### Shared executable contract (PV-42 / PV-25)
+
+`contract/pulse.telemetry.v1.schema.json` is JSON Schema draft 2020-12 for
+both a check-in envelope and a telemetry document. `$defs/checkin`,
+`$defs/telemetry` and `$defs/request` can also be selected explicitly.
+Only `checkinId` is required in an envelope; only `schema` is required in a
+telemetry document. Optional fields describe the canonical wire types and
+bounds, not every malformed value ingest can normalize or discard. Byte caps
+and future clock skew remain ingest rules rather than JSON Schema rules.
+Unknown properties are allowed, including inside every telemetry block: v1
+additions are compatible. Put new stored data inside telemetry, not the envelope.
+
+`$defs/producedTelemetry` and `$defs/producedCheckin` additionally require the
+current builders' field names, including nullable unknown readings. They do
+not change which older documents ingest accepts. A rename in the builder
+therefore fails the Python contract tests rather than silently becoming an
+unknown additive field. A schema change must be intentional and additive.
+
+`contract/golden-checkins.json` contains heartbeat, launch, FAIL state-change,
+WARN periodic and invalid-ID examples, plus expected stored and view
+projections. All identities are visibly FAKE; IPs use RFC 5737 documentation
+addresses and MACs are locally administered. No bench data belongs here.
+The heartbeat-only `units` view has null identity because it selects identity
+from a versioned report; `unit_latest`, which Vitals reads, retains the key.
+
+Run the producer checks with:
+
+```bash
+cd Pulse.Web
+python -m pip install -r app/requirements.txt -r tests/requirements.txt
+python -m unittest tests.test_checkin_contract tests.test_telemetry -v
+cd ../tools/checkin-worker
+npm test
+```
+
+`jsonschema` is test-only, never a fleet/runtime dependency. The Worker tests
+ingest each example through the real handler and migrations, certifying the
+stored projections Vitals uses instead of duplicating ingest's mapper.
+In `playon/pulse-vitals`, `npm run sync-schema -- <pulse-ref>` copies migrations
+and `contract/`; `npm run check-schema -- <pulse-ref>` rejects drift in either.
+Its API tests seed those certified projections and pass telemetry unchanged.
+Coordinate changes with that repo's `docs/contract.md` and link both PRs.
+
+
 Check-ins from the fleet monitor (`Pulse.Web/app/monitor_once.py`) add optional
 fields, stored by migration `0002_monitor.sql`:
 

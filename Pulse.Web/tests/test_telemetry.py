@@ -32,6 +32,10 @@ class TestBuildTelemetry(unittest.TestCase):
         asyncio.run(agent_telemetry._collect_telemetry_extras(cls.raw))
         cls.t = agent_telemetry._build_telemetry(cls.dash, cls.raw, "2026-10-13T19:00:00Z")
 
+    def test_demo_document_validates_against_shared_schema(self):
+        from tests.test_checkin_contract import validator
+        validator("producedTelemetry").validate(self.t)
+
     def test_the_fields_ian_kept(self):
         t = self.t
         self.assertEqual(t["schema"], "pulse.telemetry/v1")

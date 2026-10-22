@@ -17,6 +17,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- Shared synthetic check-in examples and schema checks (PV-42 / PV-25) catch agent-to-Vitals field drift before release; no change to what units report.
+
 ## [0.2.2] - 2026-10-21
 
 The first published agent: the zip fleet control can pin, with its SHA-256.

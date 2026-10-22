@@ -1,0 +1,670 @@
+{
+  "description": "PV-42 synthetic examples only. RFC 5737 IPs and locally administered MACs; no real unit data. stored omits received_at/raw/telemetry, which the tests check separately. Views are projections, not complete rows.",
+  "receivedAt": "2026-10-20T12:01:00.000Z",
+  "examples": [
+    {
+      "name": "heartbeat",
+      "checkin": {
+        "checkinId": "golden-heartbeat-0001",
+        "sentAt": "2026-10-20T12:00:00Z",
+        "reason": "heartbeat",
+        "venueId": "FAKE-VENUE-HEARTBEAT",
+        "vpuName": "FAKE VPU heartbeat",
+        "status": "PASS",
+        "agentVersion": "0.0.0"
+      },
+      "expected": {
+        "ingest": "inserted",
+        "stored": {
+          "checkin_id": "golden-heartbeat-0001",
+          "sent_at": "2026-10-20T12:00:00.000Z",
+          "venue_id": "FAKE-VENUE-HEARTBEAT",
+          "vpu_name": "FAKE VPU heartbeat",
+          "model": null,
+          "pulse_version": null,
+          "agent_version": "0.0.0",
+          "reason": "heartbeat",
+          "source": "pulse",
+          "channel": null,
+          "os_build": null,
+          "ubr": null,
+          "readiness_status": "PASS",
+          "readiness_policy": null,
+          "readiness_blockers": null,
+          "readiness_risks": null,
+          "tel_status": null,
+          "tel_status_since": null,
+          "tel_headline": null,
+          "tel_blocker_count": null,
+          "tel_pixellot_version": null,
+          "tel_cameras_expected": null,
+          "tel_cameras_detected": null,
+          "tel_streaming_path": null,
+          "tel_system_type": null,
+          "tel_blockers": null,
+          "tel_cameras_slow": null,
+          "tel_ports_failed": null,
+          "tel_services_down": null,
+          "tel_scoreboard_source": null,
+          "tel_scoreboard_ok": null,
+          "tel_ip": null,
+          "tel_subnet_mask": null,
+          "tel_gateway": null,
+          "tel_dns1": null,
+          "tel_dns2": null,
+          "tel_dhcp": null,
+          "tel_last_boot": null,
+          "tel_unexpected_7d": null,
+          "tel_mac": null,
+          "tel_internet_reachable": null,
+          "delta_status": null,
+          "delta_prev_status": null,
+          "delta_opened": null,
+          "delta_resolved": null,
+          "monitor_pass": null,
+          "monitor_seconds": null,
+          "monitor_ps_runs": null,
+          "monitor_cpu_seconds": null,
+          "monitor_cpu_percent": null,
+          "monitor_processes": null,
+          "monitor_memory_peak_mb": null,
+          "event_live": null
+        },
+        "views": {
+          "units": [
+            {
+              "venue_id": null,
+              "vpu_name": null,
+              "readiness_status": null,
+              "monitor_posts": 1,
+              "run_count": 0
+            }
+          ],
+          "unit_status": [],
+          "transitions": []
+        },
+        "api": {
+          "state": "unknown",
+          "verdict": null,
+          "lastKind": "heartbeat"
+        }
+      }
+    },
+    {
+      "name": "startup",
+      "checkin": {
+        "checkinId": "golden-startup-0001",
+        "sentAt": "2026-10-20T12:00:00Z",
+        "reason": "startup",
+        "venueId": "FAKE-VENUE-STARTUP",
+        "vpuName": "FAKE VPU startup",
+        "model": "FAKE Test Workstation",
+        "pulseVersion": "0.0.0-test",
+        "channel": "dev",
+        "osBuild": "17763",
+        "ubr": 9999,
+        "readiness": {
+          "status": "PASS",
+          "policyVersion": "1",
+          "blockers": [],
+          "risks": []
+        }
+      },
+      "expected": {
+        "ingest": "inserted",
+        "stored": {
+          "checkin_id": "golden-startup-0001",
+          "sent_at": "2026-10-20T12:00:00.000Z",
+          "venue_id": "FAKE-VENUE-STARTUP",
+          "vpu_name": "FAKE VPU startup",
+          "model": "FAKE Test Workstation",
+          "pulse_version": "0.0.0-test",
+          "agent_version": null,
+          "reason": "startup",
+          "source": "pulse",
+          "channel": "dev",
+          "os_build": "17763",
+          "ubr": "9999",
+          "readiness_status": "PASS",
+          "readiness_policy": "1",
+          "readiness_blockers": "[]",
+          "readiness_risks": "[]",
+          "tel_status": null,
+          "tel_status_since": null,
+          "tel_headline": null,
+          "tel_blocker_count": null,
+          "tel_pixellot_version": null,
+          "tel_cameras_expected": null,
+          "tel_cameras_detected": null,
+          "tel_streaming_path": null,
+          "tel_system_type": null,
+          "tel_blockers": null,
+          "tel_cameras_slow": null,
+          "tel_ports_failed": null,
+          "tel_services_down": null,
+          "tel_scoreboard_source": null,
+          "tel_scoreboard_ok": null,
+          "tel_ip": null,
+          "tel_subnet_mask": null,
+          "tel_gateway": null,
+          "tel_dns1": null,
+          "tel_dns2": null,
+          "tel_dhcp": null,
+          "tel_last_boot": null,
+          "tel_unexpected_7d": null,
+          "tel_mac": null,
+          "tel_internet_reachable": null,
+          "delta_status": null,
+          "delta_prev_status": null,
+          "delta_opened": null,
+          "delta_resolved": null,
+          "monitor_pass": null,
+          "monitor_seconds": null,
+          "monitor_ps_runs": null,
+          "monitor_cpu_seconds": null,
+          "monitor_cpu_percent": null,
+          "monitor_processes": null,
+          "monitor_memory_peak_mb": null,
+          "event_live": null
+        },
+        "views": {
+          "units": [
+            {
+              "venue_id": "FAKE-VENUE-STARTUP",
+              "vpu_name": "FAKE VPU startup",
+              "readiness_status": "PASS",
+              "monitor_posts": 0,
+              "run_count": 1
+            }
+          ],
+          "unit_status": [],
+          "transitions": []
+        },
+        "api": {
+          "state": "unmonitored",
+          "verdict": "PASS",
+          "lastKind": "startup"
+        }
+      }
+    },
+    {
+      "name": "fail-state-change",
+      "checkin": {
+        "checkinId": "golden-fail-state-change-0001",
+        "sentAt": "2026-10-20T12:00:00Z",
+        "reason": "state-change",
+        "venueId": "FAKE-VENUE-FAIL-STATE-CHANGE",
+        "vpuName": "FAKE VPU fail-state-change",
+        "model": "FAKE Test Workstation",
+        "pulseVersion": "0.0.0-test",
+        "telemetry": {
+          "schema": "pulse.telemetry/v1",
+          "statusSince": "2026-10-20T11:30:00Z",
+          "checkedAt": "2026-10-20T12:00:00Z",
+          "pixellotVersion": "0.0.0-test",
+          "runnerVersion": null,
+          "network": {
+            "internetReachable": true,
+            "streamingPath": "rtmp-1935",
+            "portsFailed": [
+              "Clock sync (UDP 123)"
+            ],
+            "internet": {
+              "adapter": "FAKE Internet",
+              "mac": "02:00:00:00:00:01",
+              "ip": "192.0.2.10",
+              "subnetMask": "255.255.255.0",
+              "gateway": "192.0.2.1",
+              "dns1": "192.0.2.53",
+              "dns2": null,
+              "dhcp": false
+            }
+          },
+          "cameras": {
+            "systemType": "S2",
+            "expected": 2,
+            "detected": 2,
+            "slow": 0,
+            "ports": [
+              {
+                "port": "Port 1",
+                "portMac": "02:00:00:00:01:01",
+                "state": "camera",
+                "linkMbps": 1000,
+                "expectedMbps": 1000,
+                "slow": false,
+                "cameraModel": "FAKE Camera",
+                "cameraMac": "02:00:00:00:02:01",
+                "cameraFirmware": "0.0.0-test"
+              }
+            ],
+            "nic": {
+              "model": "GIE74 series",
+              "chip": "I210",
+              "portCount": 4,
+              "poeSupported": true
+            }
+          },
+          "servicesDown": [],
+          "services": [
+            {
+              "name": "agent",
+              "state": "running"
+            },
+            {
+              "name": "coordinator",
+              "state": "running"
+            },
+            {
+              "name": "keepagentup",
+              "state": "running"
+            },
+            {
+              "name": "vpu",
+              "state": "stopped"
+            },
+            {
+              "name": "scoreconnect",
+              "state": "running"
+            }
+          ],
+          "applications": [],
+          "applicationsTotal": 0,
+          "programs": null,
+          "scoreboard": {
+            "source": "scoreconnect",
+            "ok": true,
+            "scoreLinkConnected": false,
+            "dataFlowing": false,
+            "dataStatus": "No scoreboard data",
+            "sport": "FAKE Basketball",
+            "ocr": null,
+            "scoreConnect": null
+          },
+          "power": {
+            "lastBoot": "2026-10-19T08:00:00Z",
+            "unexpectedShutdowns7d": 1
+          },
+          "calibration": null,
+          "hardware": null,
+          "environment": null,
+          "status": "FAIL",
+          "headline": "FAKE clock sync blocked",
+          "blockers": [
+            "FAKE clock sync blocked"
+          ]
+        },
+        "agentVersion": "0.0.0",
+        "delta": {
+          "status": "FAIL",
+          "prevStatus": "PASS",
+          "opened": [
+            {
+              "code": "fake-ntp-blocked",
+              "class": "blocker",
+              "title": "FAKE clock sync blocked",
+              "since": "2026-10-20T11:30:00Z"
+            }
+          ],
+          "resolved": []
+        },
+        "monitor": {
+          "pass": "full",
+          "seconds": 12.5,
+          "psRuns": 7,
+          "cpuSeconds": 2.5,
+          "cpuPercent": 5,
+          "processes": 8,
+          "memoryPeakMb": 64,
+          "eventLive": false
+        }
+      },
+      "expected": {
+        "ingest": "inserted",
+        "stored": {
+          "checkin_id": "golden-fail-state-change-0001",
+          "sent_at": "2026-10-20T12:00:00.000Z",
+          "venue_id": "FAKE-VENUE-FAIL-STATE-CHANGE",
+          "vpu_name": "FAKE VPU fail-state-change",
+          "model": "FAKE Test Workstation",
+          "pulse_version": "0.0.0-test",
+          "agent_version": "0.0.0",
+          "reason": "state-change",
+          "source": "pulse",
+          "channel": null,
+          "os_build": null,
+          "ubr": null,
+          "readiness_status": null,
+          "readiness_policy": null,
+          "readiness_blockers": null,
+          "readiness_risks": null,
+          "tel_status": "FAIL",
+          "tel_status_since": "2026-10-20T11:30:00Z",
+          "tel_headline": "FAKE clock sync blocked",
+          "tel_blocker_count": 1,
+          "tel_pixellot_version": "0.0.0-test",
+          "tel_cameras_expected": 2,
+          "tel_cameras_detected": 2,
+          "tel_streaming_path": "rtmp-1935",
+          "tel_system_type": "S2",
+          "tel_blockers": "[\"FAKE clock sync blocked\"]",
+          "tel_cameras_slow": 0,
+          "tel_ports_failed": "[\"Clock sync (UDP 123)\"]",
+          "tel_services_down": "[]",
+          "tel_scoreboard_source": "scoreconnect",
+          "tel_scoreboard_ok": 1,
+          "tel_ip": "192.0.2.10",
+          "tel_subnet_mask": "255.255.255.0",
+          "tel_gateway": "192.0.2.1",
+          "tel_dns1": "192.0.2.53",
+          "tel_dns2": null,
+          "tel_dhcp": 0,
+          "tel_last_boot": "2026-10-19T08:00:00Z",
+          "tel_unexpected_7d": 1,
+          "tel_mac": "02:00:00:00:00:01",
+          "tel_internet_reachable": 1,
+          "delta_status": "FAIL",
+          "delta_prev_status": "PASS",
+          "delta_opened": "[{\"code\":\"fake-ntp-blocked\",\"class\":\"blocker\",\"title\":\"FAKE clock sync blocked\",\"since\":\"2026-10-20T11:30:00Z\"}]",
+          "delta_resolved": "[]",
+          "monitor_pass": "full",
+          "monitor_seconds": 12.5,
+          "monitor_ps_runs": 7,
+          "monitor_cpu_seconds": 2.5,
+          "monitor_cpu_percent": 5,
+          "monitor_processes": 8,
+          "monitor_memory_peak_mb": 64,
+          "event_live": 0
+        },
+        "views": {
+          "units": [
+            {
+              "venue_id": "FAKE-VENUE-FAIL-STATE-CHANGE",
+              "vpu_name": "FAKE VPU fail-state-change",
+              "readiness_status": "FAIL",
+              "monitor_posts": 1,
+              "run_count": 0
+            }
+          ],
+          "unit_status": [
+            {
+              "venue_id": "FAKE-VENUE-FAIL-STATE-CHANGE",
+              "status": "FAIL",
+              "headline": "FAKE clock sync blocked",
+              "blockers": "[\"FAKE clock sync blocked\"]",
+              "streaming_path": "rtmp-1935",
+              "ip": "192.0.2.10",
+              "mac": "02:00:00:00:00:01",
+              "cameras_expected": 2,
+              "cameras_detected": 2,
+              "cameras_slow": 0,
+              "scoreboard_ok": 1,
+              "score_link_connected": 0,
+              "scoreboard_data_flowing": 0
+            }
+          ],
+          "transitions": [
+            {
+              "venue_id": "FAKE-VENUE-FAIL-STATE-CHANGE",
+              "kind": "opened",
+              "code": "fake-ntp-blocked",
+              "class": "blocker",
+              "title": "FAKE clock sync blocked",
+              "since": "2026-10-20T11:30:00Z",
+              "status_after": "FAIL"
+            }
+          ]
+        },
+        "api": {
+          "state": "FAIL",
+          "verdict": "FAIL",
+          "lastKind": "state-change"
+        }
+      }
+    },
+    {
+      "name": "warn-periodic",
+      "checkin": {
+        "checkinId": "golden-warn-periodic-0001",
+        "sentAt": "2026-10-20T12:00:00Z",
+        "reason": "periodic",
+        "venueId": "FAKE-VENUE-WARN-PERIODIC",
+        "vpuName": "FAKE VPU warn-periodic",
+        "model": "FAKE Test Workstation",
+        "pulseVersion": "0.0.0-test",
+        "telemetry": {
+          "schema": "pulse.telemetry/v1",
+          "statusSince": "2026-10-20T11:30:00Z",
+          "checkedAt": "2026-10-20T12:00:00Z",
+          "pixellotVersion": "0.0.0-test",
+          "runnerVersion": null,
+          "network": {
+            "internetReachable": true,
+            "streamingPath": "zixi-2088",
+            "portsFailed": [],
+            "internet": {
+              "adapter": "FAKE Internet",
+              "mac": "02:00:00:00:00:01",
+              "ip": "192.0.2.10",
+              "subnetMask": "255.255.255.0",
+              "gateway": "192.0.2.1",
+              "dns1": "192.0.2.53",
+              "dns2": null,
+              "dhcp": false
+            }
+          },
+          "cameras": {
+            "systemType": "S2",
+            "expected": 2,
+            "detected": 2,
+            "slow": 1,
+            "ports": [
+              {
+                "port": "Port 1",
+                "portMac": "02:00:00:00:01:01",
+                "state": "camera",
+                "linkMbps": 100,
+                "expectedMbps": 1000,
+                "slow": true,
+                "cameraModel": "FAKE Camera",
+                "cameraMac": "02:00:00:00:02:01",
+                "cameraFirmware": "0.0.0-test"
+              }
+            ],
+            "nic": {
+              "model": "GIE74 series",
+              "chip": "I210",
+              "portCount": 4,
+              "poeSupported": true
+            }
+          },
+          "servicesDown": [],
+          "services": [
+            {
+              "name": "agent",
+              "state": "running"
+            },
+            {
+              "name": "coordinator",
+              "state": "running"
+            },
+            {
+              "name": "keepagentup",
+              "state": "running"
+            },
+            {
+              "name": "vpu",
+              "state": "stopped"
+            },
+            {
+              "name": "scoreconnect",
+              "state": "running"
+            }
+          ],
+          "applications": [],
+          "applicationsTotal": 0,
+          "programs": null,
+          "scoreboard": {
+            "source": "scoreconnect",
+            "ok": true,
+            "scoreLinkConnected": false,
+            "dataFlowing": false,
+            "dataStatus": "No scoreboard data",
+            "sport": "FAKE Basketball",
+            "ocr": null,
+            "scoreConnect": null
+          },
+          "power": {
+            "lastBoot": "2026-10-19T08:00:00Z",
+            "unexpectedShutdowns7d": 1
+          },
+          "calibration": null,
+          "hardware": null,
+          "environment": null,
+          "status": "WARN",
+          "headline": "FAKE camera link is slow",
+          "blockers": []
+        },
+        "agentVersion": "0.0.0",
+        "delta": {
+          "status": "WARN",
+          "prevStatus": "PASS",
+          "opened": [
+            {
+              "code": "fake-nic-slow",
+              "class": "risk",
+              "title": "FAKE camera link is slow",
+              "since": "2026-10-20T11:30:00Z"
+            }
+          ],
+          "resolved": []
+        },
+        "monitor": {
+          "pass": "full",
+          "seconds": 12.5,
+          "psRuns": 7,
+          "cpuSeconds": 2.5,
+          "cpuPercent": 5,
+          "processes": 8,
+          "memoryPeakMb": 64,
+          "eventLive": false
+        }
+      },
+      "expected": {
+        "ingest": "inserted",
+        "stored": {
+          "checkin_id": "golden-warn-periodic-0001",
+          "sent_at": "2026-10-20T12:00:00.000Z",
+          "venue_id": "FAKE-VENUE-WARN-PERIODIC",
+          "vpu_name": "FAKE VPU warn-periodic",
+          "model": "FAKE Test Workstation",
+          "pulse_version": "0.0.0-test",
+          "agent_version": "0.0.0",
+          "reason": "periodic",
+          "source": "pulse",
+          "channel": null,
+          "os_build": null,
+          "ubr": null,
+          "readiness_status": null,
+          "readiness_policy": null,
+          "readiness_blockers": null,
+          "readiness_risks": null,
+          "tel_status": "WARN",
+          "tel_status_since": "2026-10-20T11:30:00Z",
+          "tel_headline": "FAKE camera link is slow",
+          "tel_blocker_count": 0,
+          "tel_pixellot_version": "0.0.0-test",
+          "tel_cameras_expected": 2,
+          "tel_cameras_detected": 2,
+          "tel_streaming_path": "zixi-2088",
+          "tel_system_type": "S2",
+          "tel_blockers": "[]",
+          "tel_cameras_slow": 1,
+          "tel_ports_failed": "[]",
+          "tel_services_down": "[]",
+          "tel_scoreboard_source": "scoreconnect",
+          "tel_scoreboard_ok": 1,
+          "tel_ip": "192.0.2.10",
+          "tel_subnet_mask": "255.255.255.0",
+          "tel_gateway": "192.0.2.1",
+          "tel_dns1": "192.0.2.53",
+          "tel_dns2": null,
+          "tel_dhcp": 0,
+          "tel_last_boot": "2026-10-19T08:00:00Z",
+          "tel_unexpected_7d": 1,
+          "tel_mac": "02:00:00:00:00:01",
+          "tel_internet_reachable": 1,
+          "delta_status": "WARN",
+          "delta_prev_status": "PASS",
+          "delta_opened": "[{\"code\":\"fake-nic-slow\",\"class\":\"risk\",\"title\":\"FAKE camera link is slow\",\"since\":\"2026-10-20T11:30:00Z\"}]",
+          "delta_resolved": "[]",
+          "monitor_pass": "full",
+          "monitor_seconds": 12.5,
+          "monitor_ps_runs": 7,
+          "monitor_cpu_seconds": 2.5,
+          "monitor_cpu_percent": 5,
+          "monitor_processes": 8,
+          "monitor_memory_peak_mb": 64,
+          "event_live": 0
+        },
+        "views": {
+          "units": [
+            {
+              "venue_id": "FAKE-VENUE-WARN-PERIODIC",
+              "vpu_name": "FAKE VPU warn-periodic",
+              "readiness_status": "WARN",
+              "monitor_posts": 1,
+              "run_count": 0
+            }
+          ],
+          "unit_status": [
+            {
+              "venue_id": "FAKE-VENUE-WARN-PERIODIC",
+              "status": "WARN",
+              "headline": "FAKE camera link is slow",
+              "blockers": "[]",
+              "streaming_path": "zixi-2088",
+              "ip": "192.0.2.10",
+              "mac": "02:00:00:00:00:01",
+              "cameras_expected": 2,
+              "cameras_detected": 2,
+              "cameras_slow": 1,
+              "scoreboard_ok": 1,
+              "score_link_connected": 0,
+              "scoreboard_data_flowing": 0
+            }
+          ],
+          "transitions": [
+            {
+              "venue_id": "FAKE-VENUE-WARN-PERIODIC",
+              "kind": "opened",
+              "code": "fake-nic-slow",
+              "class": "risk",
+              "title": "FAKE camera link is slow",
+              "since": "2026-10-20T11:30:00Z",
+              "status_after": "WARN"
+            }
+          ]
+        },
+        "api": {
+          "state": "WARN",
+          "verdict": "WARN",
+          "lastKind": "periodic"
+        }
+      }
+    },
+    {
+      "name": "invalid-id",
+      "checkin": {
+        "checkinId": "bad!",
+        "reason": "heartbeat",
+        "venueId": "FAKE-VENUE-INVALID",
+        "vpuName": "FAKE VPU invalid",
+        "status": "PASS"
+      },
+      "expected": {
+        "ingest": "invalid"
+      }
+    }
+  ]
+}

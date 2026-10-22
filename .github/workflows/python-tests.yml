@@ -14,11 +14,9 @@
 # differs between 3.9 and 3.12, so testing on the wrong minor hides or invents
 # failures.
 #
-# The tests themselves use stdlib unittest only, but they `import main` to test
-# it, and main.py imports FastAPI at module level -- so the app's runtime deps
-# have to be present or every test module fails to import. Installed from
-# Pulse.Web/app/requirements.txt, the same file run.bat installs on a VPU, so CI
-# and the fleet cannot drift apart.
+# The suite uses unittest plus the test-only JSON Schema validator. Runtime
+# dependencies still come from the same file run.bat installs on a VPU;
+# tests/requirements.txt is never installed on one.
 
 name: Python tests
 
@@ -29,6 +27,8 @@ on:
       - "Pulse.Web/app/**.py"
       - "Pulse.Web/tests/**.py"
       - "Pulse.Web/app/requirements.txt"
+      - "Pulse.Web/tests/requirements.txt"
+      - "tools/checkin-worker/**"
       # test_status_vocabulary.py parses these two directly -- it checks that
       # the status words the collectors EMIT match the cases app.js renders.
       # Without them the test cannot fire on the changes that break it: a
@@ -42,6 +42,8 @@ on:
       - "Pulse.Web/app/**.py"
       - "Pulse.Web/tests/**.py"
       - "Pulse.Web/app/requirements.txt"
+      - "Pulse.Web/tests/requirements.txt"
+      - "tools/checkin-worker/**"
       # test_status_vocabulary.py parses these two directly -- it checks that
       # the status words the collectors EMIT match the cases app.js renders.
       # Without them the test cannot fire on the changes that break it: a
@@ -66,14 +68,28 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: Pulse.Web/app/requirements.txt
+          cache-dependency-path: |
+            Pulse.Web/app/requirements.txt
+            Pulse.Web/tests/requirements.txt
 
-      - name: Install app dependencies
+      - name: Install app and test dependencies
         working-directory: Pulse.Web
-        run: python -m pip install --quiet -r app/requirements.txt
+        run: python -m pip install --quiet -r app/requirements.txt -r tests/requirements.txt
 
       - name: Run unittest suite
         working-directory: Pulse.Web
         run: python -m unittest discover -s tests -v
       - name: Agent release build (PV-49)
         run: python -m unittest discover -s tools/agent-release -v
+
+  worker:
+    name: Check-in Worker tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Ingest, migrations and golden contract
+        working-directory: tools/checkin-worker
+        run: npm test
