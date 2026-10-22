@@ -17,6 +17,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-21
+
+The first published agent: the zip fleet control can pin, with its SHA-256.
+It holds everything under 0.2.1 below and everything since. 0.2.1 itself was
+never published, and some dev-channel units report `agentVersion` 0.2.1 from
+earlier builds, so this one is 0.2.2: a unit that reports 0.2.2 is running
+this build.
+
 ### Fixed
 - Runner (PV-85): a download cut off part way is now retried instead of
   refused for good. A cut-off download used to look complete, so it failed the
