@@ -29,6 +29,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - Settings (dev channel only): a **Fleet Monitoring** card. **Opt in this unit** installs the fleet monitor, which checks every 5 minutes whether the VPU is ready to stream and reports to Pulse Vitals. The card shows when it last checked and reported, and **Opt out** removes it. A production launch on the same VPU doesn't affect it.
 
 ### Fixed
+- CEFWorker Windows errors during VPU shutdown no longer say the VPU cannot start; the errors remain visible as shutdown evidence for support.
 - A VPU missing one of its main cameras (for example 1 of 2 on an S2) now reads FAIL and says it won't stream. Before, it read only as a warning.
 - The readiness line no longer says "No risks tonight" right after "1 thing is stopping tonight's game". When something is stopping the game it leaves out the risk count unless there are risks.
 

@@ -104,8 +104,31 @@ function Get-CfgValue([string]$path, [string]$key) {
     return $null
 }
 
+# Lifecycle context for loader popups (PV-84). Keep only fixed markers and
+# timestamps, never the log line (which can contain venue/event details).
+function ConvertTo-VpuLifecycle([string]$line, [string]$kind) {
+    $eventKind = $null
+    if ($kind -eq 'vpu' -and $line.Contains('START NEW LOG SESSION >>> VPU.exe')) {
+        $eventKind = 'start'
+    }
+    elseif ($kind -eq 'agent' -and $line -match '\|vpu_Manager\s*\|') {
+        if ($line -match '\|ForceCloseApplication\s*\|Application has exited' -or
+            $line -match '\|KillAllNamedProcesses\s*\|Found [1-9][0-9]* instances of vpu\b') {
+            $eventKind = 'teardown'
+        }
+    }
+    if (-not $eventKind -or $line -notmatch '(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})') { return }
+    $at = [datetime]::MinValue
+    if ([datetime]::TryParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss',
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::AssumeLocal, [ref]$at)) {
+        [pscustomobject]@{ kind = $eventKind; at = $at.ToString('yyyy-MM-ddTHH:mm:sszzz') }
+    }
+}
+
 try {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $lifecycleCoverage = [pscustomobject]@{ complete = $true }
     $config = [pscustomobject]@{
         graphicEngineType  = Get-CfgValue (Join-Path $ConfigDir 'agentsetup.cfg') 'GraphicEngineType'
         graphicsEnabled    = Get-CfgValue (Join-Path $ConfigDir 'agentsetup.cfg') 'GraphicsEnabled'
@@ -131,7 +154,10 @@ try {
     function Add-Cand($kind, $name, $length, $zipPath) {
         $d = Get-NameDate $name
         if ($null -eq $d -or $d -lt $cutoff) { return }
-        if ($length -gt $maxEntryBytes) { return }
+        if ($length -gt $maxEntryBytes) {
+            $lifecycleCoverage.complete = $false
+            return
+        }
         $prev = $cands[$name]
         if ($null -eq $prev -or $length -gt $prev.length) {
             $cands[$name] = [pscustomobject]@{
@@ -151,6 +177,7 @@ try {
         if ($k) { Add-Cand $k $f.Name $f.Length $null }
     }
     $archive = Join-Path $LogDir 'archive'
+    if (-not $zipOk -and (Test-Path -LiteralPath $archive)) { $lifecycleCoverage.complete = $false }
     if ($zipOk -and (Test-Path -LiteralPath $archive)) {
         $zipCutoff = $cutoff.AddDays(-1)
         foreach ($z in @(Get-ChildItem -LiteralPath $archive -Filter 'log_*.zip' -File -ErrorAction SilentlyContinue)) {
@@ -163,7 +190,7 @@ try {
                         if ($k) { Add-Cand $k $e.Name $e.Length $z.FullName }
                     }
                 } finally { $zip.Dispose() }
-            } catch { }
+            } catch { $lifecycleCoverage.complete = $false }
         }
     }
 
@@ -226,6 +253,8 @@ try {
     $setLast = $null; $setValue = $null
     $noDataLines = 0; $invalidDataLines = 0; $noDataLast = $null
     $readErrors = 0
+    $lifecycle = New-Object 'System.Collections.Generic.List[object]'
+    $lifecycleClipped = $false
 
     foreach ($src in $sources) {
         if ($sw.Elapsed.TotalSeconds -gt $BudgetSeconds) { $truncated = $true; break }
@@ -235,6 +264,7 @@ try {
             else { $text = Read-SharedText (Join-Path $LogDir $src.name) $maxLiveBytes }
         } catch { $readErrors++; continue }
         $scanned[$src.kind]++
+        if (-not $src.zip -and $src.length -gt $maxLiveBytes) { $lifecycleClipped = $true }
 
         if ($src.kind -eq 'gm') {
             $gl = @(Find-Lines $text 'graphics client')
@@ -263,6 +293,10 @@ try {
             }
         }
         elseif ($src.kind -eq 'vpu') {
+            foreach ($line in @(Find-Lines $text 'START NEW LOG SESSION >>> VPU.exe')) {
+                $entry = ConvertTo-VpuLifecycle $line 'vpu'
+                if ($entry) { $null = $lifecycle.Add($entry) }
+            }
             foreach ($m in @(@(Find-Lines $text 'SendGraphicsInfo') | ForEach-Object { $rxVpu.Match($_) } | Where-Object { $_.Success })) {
                 $ev = $events[$m.Groups[1].Value.ToLower()]
                 # Only events GraphicsManager knows about; a VPU-only id
@@ -271,6 +305,10 @@ try {
             }
         }
         else {
+            foreach ($line in (@(Find-Lines $text 'ForceCloseApplication') + @(Find-Lines $text 'KillAllNamedProcesses'))) {
+                $entry = ConvertTo-VpuLifecycle $line 'agent'
+                if ($entry) { $null = $lifecycle.Add($entry) }
+            }
             foreach ($m in @(@(Find-Lines $text 'NONE_SELECTED') | ForEach-Object { $rxNone.Match($_) } | Where-Object { $_.Success })) {
                 $noneLines++
                 $t = $m.Groups[1].Value
@@ -296,6 +334,8 @@ try {
         readErrors       = $readErrors
         elapsedMs        = [int]$sw.ElapsedMilliseconds
         filesScanned     = [pscustomobject]@{ graphicsManager = $scanned['gm']; vpu = $scanned['vpu']; agent = $scanned['agent'] }
+        vpuLifecycle     = $lifecycle.ToArray()
+        lifecycleReadComplete = ($lifecycleCoverage.complete -and -not $truncated -and -not $readErrors -and -not $lifecycleClipped)
         config           = $config
         events           = $evList
         engineDisabled   = [pscustomobject]@{

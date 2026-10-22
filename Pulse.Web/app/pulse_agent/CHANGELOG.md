@@ -17,6 +17,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- PV-84: CEFWorker DLL-init popups during a confirmed VPU shutdown no longer mark the unit as failing to start. The popups remain in support evidence; uncorrelated errors, a new launch, missing files and a stuck VPU still block readiness.
+
 ## [0.2.2] - 2026-10-21
 
 The first published agent: the zip fleet control can pin, with its SHA-256.
