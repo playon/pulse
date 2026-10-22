@@ -19,13 +19,13 @@ Each tick:
 
   1. Run the active slot's app\\monitor_once.py, passing <root> as its data
      folder (PULSE_MONITOR_DATA), so state outlives a slot.
-  2. If that slot is new (on probation): the first tick with no event live is
+  2. If that slot is new (on probation): the first safe update window is
      a forced full pass, and three clean ticks commit it ("applied"). A tick
      that fails, crashes or never finishes switches back to the previous slot
      ("rolled-back"), and that version and hash are never tried again until
      fleet control names another target.
   3. Otherwise, if fleet control (the check-in reply, kept in the monitor's
-     queue file) names another build, and no event is live: download it from
+     queue file) names another build, and the update window is safe: download it from
      the fixed URL below, check its SHA-256 against the pin, unpack it into
      the other slot and switch. The next tick starts its probation.
 
@@ -45,12 +45,19 @@ A new target isn't fetched at once: each unit waits a random part of an hour
 first, and retries wait a random extra part of their gap, so a fleet pin
 doesn't pull the zip on every unit in the same five minutes.
 
+Updates (including rollback switches and probation's forced full pass) wait
+while VPU.exe runs, during a scheduled event, or in the 30 minutes before it.
+The UTC schedule is C:\\Pixellot\\Data\\Configuration\\dashboardEvents.json;
+missing, unreadable, malformed or over-three-hour-old schedules hold updates. Holds
+are logged without consuming an update try. Regular monitor passes still run.
+
 Nothing an update does outlives it: the download, a half-unpacked slot and
 the slot being replaced are swept at the start of every tick (a killed runner
 leaves them), a tick that runs over is killed with everything it started, and
 the state file only keeps entries for the current target.
 """
 
+from datetime import datetime, timezone
 import hashlib
 import http.client
 import json
@@ -71,7 +78,7 @@ import zlib
 # replaces the runner, so this says which units need enrolling again for a
 # runner fix. Bump it with any change to this file. None reported: a runner
 # from before PV-85's review fixes.
-RUNNER_VERSION = "2"
+RUNNER_VERSION = "3"
 
 RELEASE_URL = "https://github.com/playon/pulse/releases/download/agent-v{version}/pulse-agent-{version}.zip"
 SLOTS_FILE = "agent-slots.json"
@@ -83,6 +90,11 @@ DOWNLOAD_FILE = "agent-download.tmp"
 STDERR_FILE = "agent-tick.stderr"           # the last tick's stderr, read for its last line
 SLOT_NAMES = ("a", "b")
 
+SCHEDULE_FILE = r"C:\Pixellot\Data\Configuration\dashboardEvents.json"
+EVENT_LOOKAHEAD_SECONDS = 30 * 60
+# Empty lab schedule rewritten after 60m08s (PV-82, 2026-10-22); allow three
+# hourly refreshes. Not yet verified on a unit with real upcoming events.
+SCHEDULE_MAX_AGE_SECONDS = 3 * 60 * 60
 VERSION_RE = re.compile(r"^\d{1,4}\.\d{1,4}\.\d{1,6}$")   # the Worker's TARGET_VERSION_RE
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 PROBATION_CLEAN_TICKS = 3
@@ -208,7 +220,45 @@ def event_live() -> bool:
                            capture_output=True, text=True, timeout=20, creationflags=_CREATE_NO_WINDOW)
     except (OSError, subprocess.SubprocessError):
         return True                        # can't tell: assume live, do nothing risky
-    return "vpu.exe" in (r.stdout or "").lower()
+    return r.returncode != 0 or "vpu.exe" in (r.stdout or "").lower()
+
+
+def schedule_hold() -> str:
+    """Read the whole upcoming-events list; absent Z also means UTC."""
+    now = time.time()
+    try:
+        with open(SCHEDULE_FILE, "r", encoding="utf-8-sig") as fh:
+            if now - os.fstat(fh.fileno()).st_mtime > SCHEDULE_MAX_AGE_SECONDS:
+                return "schedule unknown"
+            events = json.load(fh)
+        if not isinstance(events, list):
+            return "schedule unknown"
+        upcoming = []
+        for event in events:
+            times = []
+            for field in ("start", "end"):
+                value = event[field]["$date"]
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                times.append(parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).timestamp())
+            start, end = times
+            if end < start:
+                return "schedule unknown"
+            if start <= now <= end or now <= start <= now + EVENT_LOOKAHEAD_SECONDS:
+                upcoming.append(start)
+        if upcoming:
+            at = datetime.fromtimestamp(min(upcoming), timezone.utc).isoformat().replace("+00:00", "Z")
+            return "event at " + at
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        return "schedule unknown"
+    return ""
+
+
+def update_allowed(root: str, is_event_live) -> bool:
+    reason = "event live" if is_event_live() else schedule_hold()
+    if reason:
+        log(root, "held: " + reason)
+        return False
+    return True
 
 
 def _kill_tree(proc) -> None:
@@ -456,8 +506,12 @@ def _switch(root: str, st: dict, new: str, version: str, sha: str) -> None:
     log(root, f"switched to slot {new} ({version}); on probation")
 
 
-def rollback(root: str, st: dict, why: str) -> None:
+def rollback(root: str, st: dict, why: str, *, is_event_live=event_live) -> None:
     p = st.get("probation") or {}
+    if not update_allowed(root, is_event_live):
+        p["rollback"] = why
+        save_slots(root, st)
+        return
     bad, good = st["active"], st.get("previous")
     key = f"{p.get('version')}:{p.get('sha256')}"
     st["blocked"][key] = short_error("rolled back: " + why)
@@ -508,6 +562,8 @@ def maybe_update(root: str, st: dict, now: float, *, is_event_live=event_live, d
         return                                     # already running the pinned bytes
     if key in st["blocked"]:
         return
+    if not update_allowed(root, is_event_live):
+        return
     current = slot_version(root, active)
     other = _other(active)
     in_other = (st["slots"].get(other) or {}).get("sha256") == sha and slot_version(root, other) == version
@@ -517,8 +573,6 @@ def maybe_update(root: str, st: dict, now: float, *, is_event_live=event_live, d
         st["retryAt"][key] = now + FIRST_SPREAD_SECONDS * _jitter()
         save_slots(root, st)
     if st["retryAt"].get(key, 0) > now:
-        return
-    if is_event_live():
         return
     if in_other:
         _switch(root, st, other, version, sha)     # a rollback to the build still in the other slot
@@ -578,11 +632,10 @@ def maybe_update(root: str, st: dict, now: float, *, is_event_live=event_live, d
     st["slots"][other] = {"version": version, "sha256": sha, "installedAt": now}
     st["retryAt"].pop(key, None)
     st["tries"].pop(key, None)
-    if is_event_live():
+    if not update_allowed(root, is_event_live):
         # An event started during the download: keep the new build in the
-        # other slot and switch to it on the first tick after the event.
+        # other slot and switch to it on the first safe update window.
         save_slots(root, st)
-        log(root, f"{version} is ready in slot {other}; an event started, so it waits")
         return
     _switch(root, st, other, version, sha)
 
@@ -604,14 +657,20 @@ def tick(root: str, argv: list, *, is_event_live=event_live, run=run_slot, downl
         except OSError:
             pass
         if st.get("probation"):
-            rollback(root, st, "the new build's tick never finished")
+            rollback(root, st, "the new build's tick never finished", is_event_live=is_event_live)
+    elif (st.get("probation") or {}).get("rollback"):
+        rollback(root, st, st["probation"]["rollback"], is_event_live=is_event_live)
     p = st.get("probation")
     dry_run = "--dry-run" in argv
     args = list(argv)
     forced = False
-    if p and p.get("needsFullPass") and not dry_run and "--force" not in args and not is_event_live():
-        args.append("--force")              # the new build reports in full at once
-        forced = True
+    if p and p.get("needsFullPass") and not dry_run and not p.get("rollback"):
+        if update_allowed(root, is_event_live):
+            if "--force" not in args:
+                args.append("--force")      # only probation's safe full pass
+            forced = True
+        else:
+            args = [arg for arg in args if arg != "--force"]
     try:
         with open(marker, "w") as fh:
             fh.write(str(now))
@@ -628,8 +687,10 @@ def tick(root: str, argv: list, *, is_event_live=event_live, run=run_slot, downl
         return 0 if ok else 1
     if p:
         if not ok:
-            rollback(root, st, note)
+            rollback(root, st, note, is_event_live=is_event_live)
             return 1
+        if p.get("rollback"):
+            return 0                       # keep regular passes running until rollback is safe
         if forced:
             p["needsFullPass"] = False
         p["clean"] = int(p.get("clean") or 0) + 1

@@ -17,6 +17,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- Runner (PV-82): updates, rollback switches and probation's forced full pass wait during events and for 30 minutes before the next scheduled event. Missing, unreadable, malformed or stale schedules hold updates without using a retry; regular readiness passes continue. Holds are recorded in the runner log. Takes effect on the next enroll, because updates never replace the runner.
+
 ## [0.2.2] - 2026-10-21
 
 The first published agent: the zip fleet control can pin, with its SHA-256.
