@@ -167,6 +167,28 @@ Each pin records who set it and when (`set_by`, `set_at`, `note`), and every
 change is appended to `agent_target_log` with the target it replaced
 (migration 0020).
 
+### Choosing a build: `GET /agent-releases` (PV-85)
+
+So an editor never finds or pastes a SHA-256, Vitals' target dialog asks the
+admin Worker, over the same service binding and with the viewer's token:
+
+- `GET /agent-releases` returns `{ ok: true, releases: [{ version, publishedAt }] }`:
+  the 10 newest published (non-draft) `agent-v<version>` releases that have an
+  uploaded `pulse-agent-<version>.zip`, as GitHub lists them. Releases for
+  anything else (`web-v*`) are left out.
+- `GET /agent-releases/<version>` returns `{ ok: true, version, sha256 }`, read
+  the same way the check above reads it: GitHub's digest of the zip and the
+  `.sha256` file, which must agree when both exist, and at least one must. No
+  hash, a digest and a file that disagree, or a release GitHub can't be asked
+  about is an error (`release-has-no-hash`, `hash-mismatch`,
+  `release-not-found`, `release-check-failed`), never a guess or an empty list.
+
+Both are read-only and need what `POST /agent-target` needs: a valid Access
+token from the admin or Vitals app, an email in `FLEET_CONTROL_EDITORS`, and
+the `GITHUB_TOKEN` secret. `POST /agent-target` still receives and re-checks
+`{ version, sha256 }`, so what the editor was shown is what gets saved, and a
+release that changed in between is refused with `hash-mismatch`.
+
 **A unit that refused a target** (bad hash, damaged zip, rolled back after
 its new build failed, or five failed downloads) doesn't try it again until its
 target changes. To make it retry, clear the target or set another one, let the

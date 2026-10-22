@@ -22,15 +22,28 @@ const MAX_BODY_BYTES = 4 * 1024;
 const MAX_NOTE = 200;
 const MAX_HASH_FILE_BYTES = 1024;
 const GITHUB_TIMEOUT_MS = 10_000;
+const TAG_RE = /^agent-v(\d{1,4}\.\d{1,4}\.\d{1,6})$/;
+const MAX_LISTED = 10;        // newest published builds the target dialog offers
 
-export async function handleAgentTarget(request, env) {
-  if (request.method !== "POST") return fail(405, "method-not-allowed", "POST only");
+// Who may use the fleet-control endpoints: a verified Access identity whose
+// email is in FLEET_CONTROL_EDITORS (unset: nobody). Returns { email } or { response }.
+async function requireEditor(request, env) {
   const who = await accessIdentity(request, env);
-  if (!who) return fail(403, "forbidden", "no valid Access identity");
+  if (!who) return { response: fail(403, "forbidden", "no valid Access identity") };
   const email = (who.email || "").toLowerCase();
   const editors = String(env.FLEET_CONTROL_EDITORS || "")
     .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
-  if (!email || !editors.includes(email)) return fail(403, "not-an-editor", "this identity can't change fleet control");
+  if (!email || !editors.includes(email)) {
+    return { response: fail(403, "not-an-editor", "this identity can't change fleet control") };
+  }
+  return { email };
+}
+
+export async function handleAgentTarget(request, env) {
+  if (request.method !== "POST") return fail(405, "method-not-allowed", "POST only");
+  const gate = await requireEditor(request, env);
+  if (gate.response) return gate.response;
+  const { email } = gate;
 
   if (!/^application\/json\b/i.test(request.headers.get("Content-Type") || "")) {
     return fail(415, "unsupported-media-type", "send application/json");
@@ -187,11 +200,19 @@ export function forgetReleaseChecks() {
   checked.clear();
 }
 
-async function lookUpRelease(env, version, sha256) {
-  const tag = `agent-v${version}`;
-  const asset = `pulse-agent-${version}.zip`;
+function githubHeaders(env) {
   const headers = { "User-Agent": "pulse-checkin-admin", Accept: "application/vnd.github+json" };
   if (env.GITHUB_TOKEN) headers.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
+  return headers;
+}
+
+// The SHA-256s a published release states for its zip: GitHub's own digest of
+// the asset and the .sha256 file the release workflow published. Every one
+// found goes in `hashes`; the callers decide what disagreement means.
+async function releaseHashes(env, version) {
+  const tag = `agent-v${version}`;
+  const asset = `pulse-agent-${version}.zip`;
+  const headers = githubHeaders(env);
   let release;
   try {
     const r = await timed(`https://api.github.com/repos/${REPO}/releases/tags/${tag}`, { headers });
@@ -228,10 +249,67 @@ async function lookUpRelease(env, version, sha256) {
     }
   }
   if (!hashes.length) return bad(422, "release-has-no-hash", `${tag} publishes no SHA-256 for ${asset}`);
-  if (hashes.some((h) => h !== sha256)) {
-    return bad(422, "hash-mismatch", `${asset} in ${tag} doesn't have that SHA-256`);
+  return { ok: true, hashes, tag, asset };
+}
+
+async function lookUpRelease(env, version, sha256) {
+  const found = await releaseHashes(env, version);
+  if (!found.ok) return found;
+  if (found.hashes.some((h) => h !== sha256)) {
+    return bad(422, "hash-mismatch", `${found.asset} in ${found.tag} doesn't have that SHA-256`);
   }
   return { ok: true };
+}
+
+// GET /agent-releases: the published agent builds the target dialog offers.
+// GET /agent-releases/<version>: that build's SHA-256, taken from GitHub, so an
+// editor never types or pastes one. Same gate as POST /agent-target (a verified
+// Access identity in FLEET_CONTROL_EDITORS) and the same fail-closed reading of
+// the release: no hash, or a digest and a .sha256 file that disagree, is an
+// error and never a guess. Read-only. POST /agent-target still checks the pair
+// it is sent, so what the editor was shown is what gets saved or refused.
+export async function handleAgentReleases(request, env) {
+  if (request.method !== "GET") return fail(405, "method-not-allowed", "GET only");
+  const gate = await requireEditor(request, env);
+  if (gate.response) return gate.response;
+  if (!env.GITHUB_TOKEN) {
+    return fail(500, "not-configured", "the admin Worker has no GITHUB_TOKEN secret, so it can't read releases");
+  }
+  const rest = new URL(request.url).pathname.slice("/agent-releases".length).replace(/^\//, "");
+  if (!rest) return listReleases(env);
+  if (!VERSION_RE.test(rest)) return fail(400, "bad-request", "version must be N.N.N");
+  const found = await releaseHashes(env, rest);
+  if (!found.ok) return fail(found.status, found.error, found.message);
+  const unique = [...new Set(found.hashes)];
+  if (unique.length !== 1) {
+    return fail(422, "hash-mismatch", `GitHub's digest and the .sha256 file for ${found.asset} disagree`);
+  }
+  return Response.json({ ok: true, version: rest, sha256: unique[0] }, { headers: { "Cache-Control": "no-store" } });
+}
+
+async function listReleases(env) {
+  let list;
+  try {
+    const r = await timed(`https://api.github.com/repos/${REPO}/releases?per_page=30`, { headers: githubHeaders(env) });
+    if (!r.ok) {
+      await r.body?.cancel();
+      return fail(502, "release-check-failed", `GitHub answered ${r.status}`);
+    }
+    list = await r.json();
+  } catch {
+    return fail(502, "release-check-failed", "couldn't reach GitHub");
+  }
+  if (!Array.isArray(list)) return fail(502, "release-check-failed", "GitHub's release list wasn't a list");
+  const releases = [];
+  for (const rel of list) {
+    const m = rel && !rel.draft && typeof rel.tag_name === "string" ? rel.tag_name.match(TAG_RE) : null;
+    if (!m) continue;
+    const version = m[1];
+    const zipped = (rel.assets || []).some((a) => a && a.name === `pulse-agent-${version}.zip` && a.state === "uploaded");
+    if (!zipped) continue;
+    releases.push({ version, publishedAt: typeof rel.published_at === "string" ? rel.published_at : null });
+  }
+  return Response.json({ ok: true, releases: releases.slice(0, MAX_LISTED) }, { headers: { "Cache-Control": "no-store" } });
 }
 
 async function timed(url, init) {
