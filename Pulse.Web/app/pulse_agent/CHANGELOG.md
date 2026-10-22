@@ -17,6 +17,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- Live events (PV-83): failed initialization launches are reported separately as startup hangs, not a running restart loop; a loop clears after five minutes of observed healthy on-air streaming, while launch history stays intact.
+
 ## [0.2.2] - 2026-10-21
 
 The first published agent: the zip fleet control can pin, with its SHA-256.
