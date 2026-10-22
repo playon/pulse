@@ -7,9 +7,9 @@
 **Status:** draft for DevOps and the NFHS Console (Oracle) team. Proof of
 concept running on one bench VPU since 2026-10-12.
 **Owner:** Ian Moore (Pulse). **Schema id:** `pulse.telemetry/v1`.
-**Scope:** the utilitarian payload (fields chosen 2026-10-13). A
-troubleshooting tier (full finding copy, every adapter, clock drift, PoE,
-GPUs, disks, recordings) comes later and will be additive.
+**Scope:** the utilitarian payload (fields chosen 2026-10-13), extended with
+hardware, clock drift and the camera card's hourly PoE read (PV-66). A full
+finding copy and recordings remain out of scope; new fields are additive.
 
 ## What this is
 
