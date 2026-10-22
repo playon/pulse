@@ -1,0 +1,1660 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/playon/pulse/tools/checkin-worker/contract/pulse.telemetry.v1.schema.json",
+  "title": "Pulse telemetry v1 and check-in envelope",
+  "description": "Canonical wire shapes, not an ingest replacement: malformed optional values are normalized or dropped by ingest.js. Only checkinId is mandatory in an envelope; only schema is mandatory in a telemetry document. Unknown fields remain allowed for additive v1 evolution. producedTelemetry and producedCheckin pin current builder field names (including nullable unknowns) to catch accidental renames. UTF-8 byte caps and clock skew are tested separately.",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/checkin"
+    },
+    {
+      "$ref": "#/$defs/telemetry"
+    }
+  ],
+  "$defs": {
+    "checkin": {
+      "type": "object",
+      "properties": {
+        "sentAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "hostname": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "serialNumber": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "venueId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "vpuName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "pulseVersion": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "channel": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "osBuild": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "ubr": {
+          "type": [
+            "string",
+            "integer",
+            "null"
+          ]
+        },
+        "checkinId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9-]{8,64}$"
+        },
+        "reason": {
+          "enum": [
+            "startup",
+            "periodic",
+            "state-change",
+            "heartbeat",
+            "paused",
+            "event-start",
+            "event-update",
+            "event-end"
+          ]
+        },
+        "status": {
+          "enum": [
+            "PASS",
+            "WARN",
+            "FAIL",
+            null
+          ]
+        },
+        "readiness": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "PASS",
+                "WARN",
+                "FAIL",
+                null
+              ]
+            },
+            "policyVersion": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 128
+            },
+            "blockers": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 128
+              },
+              "maxItems": 50
+            },
+            "risks": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 128
+              },
+              "maxItems": 50
+            }
+          },
+          "additionalProperties": true
+        },
+        "delta": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "PASS",
+                "WARN",
+                "FAIL",
+                null
+              ]
+            },
+            "prevStatus": {
+              "enum": [
+                "PASS",
+                "WARN",
+                "FAIL",
+                null
+              ]
+            },
+            "opened": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 128
+                  },
+                  "class": {
+                    "enum": [
+                      "blocker",
+                      "risk",
+                      "info",
+                      null
+                    ]
+                  },
+                  "title": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 128
+                  },
+                  "since": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 128
+                  }
+                },
+                "required": [
+                  "code"
+                ],
+                "additionalProperties": true
+              },
+              "maxItems": 25
+            },
+            "resolved": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 128
+                  },
+                  "class": {
+                    "enum": [
+                      "blocker",
+                      "risk",
+                      "info",
+                      null
+                    ]
+                  },
+                  "title": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 128
+                  },
+                  "since": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 128
+                  }
+                },
+                "required": [
+                  "code"
+                ],
+                "additionalProperties": true
+              },
+              "maxItems": 25
+            }
+          },
+          "additionalProperties": true
+        },
+        "monitor": {
+          "type": "object",
+          "properties": {
+            "pass": {
+              "enum": [
+                "full",
+                "partial",
+                null
+              ]
+            },
+            "seconds": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 3600
+            },
+            "psRuns": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 1000
+            },
+            "cpuSeconds": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 3600
+            },
+            "cpuPercent": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 100
+            },
+            "processes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 100000
+            },
+            "memoryPeakMb": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 65536
+            },
+            "eventLive": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        "telemetry": {
+          "$ref": "#/$defs/telemetry"
+        },
+        "event": {
+          "type": "object",
+          "properties": {
+            "schema": {
+              "const": "pulse.event/v1"
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "additionalProperties": true
+        },
+        "agentVersion": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "agentUpdate": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "applied",
+                "failed",
+                "rolled-back"
+              ]
+            },
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 64
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 256
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "checkinId"
+      ],
+      "additionalProperties": true
+    },
+    "telemetry": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "pulse.telemetry/v1"
+        },
+        "status": {
+          "enum": [
+            "PASS",
+            "WARN",
+            "FAIL",
+            null
+          ]
+        },
+        "statusSince": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "headline": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        },
+        "blockers": {
+          "type": "array",
+          "items": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 256
+          },
+          "maxItems": 10
+        },
+        "checkedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "pixellotVersion": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "runnerVersion": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9A-Za-z.\\-]{1,16}$"
+        },
+        "network": {
+          "type": "object",
+          "properties": {
+            "internetReachable": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "streamingPath": {
+              "enum": [
+                "zixi-2088",
+                "zixi-443",
+                "rtmp-1935",
+                "blocked",
+                null
+              ]
+            },
+            "portsFailed": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 128
+              },
+              "maxItems": 50
+            },
+            "internet": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "adapter": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 128
+                },
+                "ip": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 128
+                },
+                "subnetMask": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 128
+                },
+                "gateway": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 128
+                },
+                "dns1": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 128
+                },
+                "dns2": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 128
+                },
+                "mac": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "^([0-9A-F]{2}:){5}[0-9A-F]{2}$"
+                },
+                "dhcp": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              },
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
+        },
+        "cameras": {
+          "type": "object",
+          "properties": {
+            "systemType": {
+              "enum": [
+                "S1",
+                "S2",
+                "S2S",
+                null
+              ]
+            },
+            "expected": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 64
+            },
+            "detected": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 64
+            },
+            "slow": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 64
+            },
+            "ports": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "port": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 128
+                  },
+                  "portMac": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "pattern": "^([0-9A-F]{2}:){5}[0-9A-F]{2}$"
+                  },
+                  "state": {
+                    "enum": [
+                      "camera",
+                      "scoreboard camera",
+                      "no link",
+                      "linked, no camera answering",
+                      "internet cable",
+                      null
+                    ]
+                  },
+                  "linkMbps": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "maximum": 100000
+                  },
+                  "expectedMbps": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "maximum": 100000
+                  },
+                  "slow": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "cameraModel": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 128
+                  },
+                  "cameraMac": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "pattern": "^([0-9A-F]{2}:){5}[0-9A-F]{2}$"
+                  },
+                  "cameraFirmware": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 128
+                  }
+                },
+                "additionalProperties": true
+              },
+              "maxItems": 64
+            },
+            "nic": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "chip": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 128
+                },
+                "model": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 128
+                },
+                "portCount": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1,
+                  "maximum": 8
+                },
+                "poeSupported": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              },
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
+        },
+        "servicesDown": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 128
+          },
+          "maxItems": 50
+        },
+        "scoreboard": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "source": {
+              "enum": [
+                "ocr",
+                "scoreconnect",
+                null
+              ]
+            },
+            "ok": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "scoreLinkConnected": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "dataFlowing": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "dataStatus": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 128
+            },
+            "sport": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 80
+            },
+            "ocr": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "configured": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "issue": {
+                  "enum": [
+                    "ocr-not-connected",
+                    null
+                  ]
+                }
+              },
+              "additionalProperties": true
+            },
+            "scoreConnect": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "version": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 80
+                },
+                "firmware": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 80
+                },
+                "scoreLinkModel": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 80
+                },
+                "scoreLinkPort": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 80
+                },
+                "serialPort": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 80
+                },
+                "eventType": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 80
+                },
+                "botNumber": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 80
+                }
+              },
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
+        },
+        "power": {
+          "type": "object",
+          "properties": {
+            "lastBoot": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 128
+            },
+            "unexpectedShutdowns7d": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 1000
+            },
+            "pendingReboot": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "isPending": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "reasons": {
+                  "type": "array",
+                  "items": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 80
+                  },
+                  "maxItems": 5
+                }
+              },
+              "additionalProperties": true
+            },
+            "afterPowerLoss": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "status": {
+                  "enum": [
+                    "read",
+                    "error",
+                    "unsupported",
+                    null
+                  ]
+                },
+                "value": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 32
+                }
+              },
+              "additionalProperties": true
+            },
+            "deviceInstallRebootLastRun": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 128
+            },
+            "events": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "time": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 128
+                  },
+                  "category": {
+                    "enum": [
+                      "planned",
+                      "unexpected",
+                      null
+                    ]
+                  },
+                  "byPulse": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "source": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 80
+                  },
+                  "reasonText": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 80
+                  }
+                },
+                "additionalProperties": true
+              },
+              "maxItems": 20
+            }
+          },
+          "additionalProperties": true
+        },
+        "calibration": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "primary": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 40
+            },
+            "sports": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 40
+                  },
+                  "at": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 128
+                  }
+                },
+                "additionalProperties": true
+              },
+              "maxItems": 20
+            },
+            "ocr": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "calibrated": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 128
+                }
+              },
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
+        },
+        "hardware": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 80
+            },
+            "cpu": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 80
+                },
+                "cores": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 100000
+                },
+                "threads": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 100000
+                }
+              },
+              "additionalProperties": true
+            },
+            "memoryGb": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "disks": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 80
+                  },
+                  "sizeGb": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "maximum": 1000000000
+                  },
+                  "type": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 128
+                  },
+                  "health": {
+                    "enum": [
+                      "Healthy",
+                      "Warning",
+                      "Unhealthy",
+                      null
+                    ]
+                  },
+                  "wearPercent": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "maximum": 1000000000
+                  },
+                  "powerOnHours": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "maximum": 1000000000
+                  },
+                  "uncorrectedErrors": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "maximum": 1000000000
+                  }
+                },
+                "additionalProperties": true
+              },
+              "maxItems": 8
+            },
+            "gpus": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 80
+                  },
+                  "driver": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 32
+                  },
+                  "vramMb": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "maximum": 1000000000
+                  }
+                },
+                "additionalProperties": true
+              },
+              "maxItems": 4
+            },
+            "bios": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "version": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 32
+                },
+                "date": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                }
+              },
+              "additionalProperties": true
+            },
+            "volumes": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "object",
+                "properties": {
+                  "letter": {
+                    "type": "string",
+                    "pattern": "^[A-Z]$"
+                  },
+                  "sizeGb": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "maximum": 1000000000
+                  },
+                  "freeGb": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "maximum": 1000000000
+                  }
+                },
+                "additionalProperties": true
+              },
+              "maxItems": 8
+            },
+            "predictFailure": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        "services": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "enum": [
+                  "agent",
+                  "coordinator",
+                  "keepagentup",
+                  "vpu",
+                  "scoreconnect",
+                  "logmein",
+                  null
+                ]
+              },
+              "state": {
+                "enum": [
+                  "running",
+                  "stopped",
+                  "not-installed",
+                  "unknown",
+                  null
+                ]
+              }
+            },
+            "additionalProperties": true
+          },
+          "maxItems": 6
+        },
+        "applications": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 80
+              },
+              "version": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 32
+              },
+              "publisher": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 40
+              }
+            },
+            "additionalProperties": true
+          },
+          "maxItems": 150
+        },
+        "applicationsTotal": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "programs": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 128
+              },
+              "canStart": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "missing": {
+                "type": "array",
+                "items": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 40
+                },
+                "maxItems": 5
+              },
+              "loaderErrors": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "count": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "maximum": 1000000000
+                  },
+                  "last": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 128
+                  }
+                },
+                "additionalProperties": true
+              }
+            },
+            "additionalProperties": true
+          },
+          "maxItems": 50
+        },
+        "environment": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "os": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 128
+                },
+                "build": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 128
+                },
+                "ubr": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 1000000000
+                }
+              },
+              "additionalProperties": true
+            },
+            "timeZone": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "caption": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 80
+                },
+                "us": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              },
+              "additionalProperties": true
+            },
+            "clock": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "offsetSeconds": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "status": {
+                  "enum": [
+                    "ok",
+                    "warn",
+                    "fail",
+                    null
+                  ]
+                },
+                "source": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 80
+                },
+                "synced": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              },
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
+        },
+        "vodProcessing": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "schema"
+      ],
+      "additionalProperties": true
+    },
+    "producedTelemetry": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/telemetry"
+        },
+        {
+          "required": [
+            "schema",
+            "status",
+            "statusSince",
+            "headline",
+            "blockers",
+            "checkedAt",
+            "pixellotVersion",
+            "runnerVersion",
+            "network",
+            "cameras",
+            "servicesDown",
+            "scoreboard",
+            "power",
+            "calibration",
+            "hardware",
+            "services",
+            "applications",
+            "applicationsTotal",
+            "programs",
+            "environment"
+          ],
+          "properties": {
+            "network": {
+              "required": [
+                "internetReachable",
+                "streamingPath",
+                "portsFailed",
+                "internet"
+              ]
+            },
+            "cameras": {
+              "required": [
+                "systemType",
+                "expected",
+                "detected",
+                "slow",
+                "ports",
+                "nic"
+              ]
+            },
+            "power": {
+              "required": [
+                "lastBoot",
+                "unexpectedShutdowns7d"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "producedCheckin": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/checkin"
+        },
+        {
+          "required": [
+            "checkinId",
+            "sentAt",
+            "reason",
+            "venueId",
+            "vpuName"
+          ],
+          "properties": {
+            "telemetry": {
+              "$ref": "#/$defs/producedTelemetry"
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "reason": {
+                    "const": "heartbeat"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "status"
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "startup",
+                      "periodic",
+                      "state-change",
+                      "paused"
+                    ]
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "pulseVersion"
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "startup",
+                      "periodic",
+                      "state-change"
+                    ]
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "model"
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "periodic",
+                      "state-change"
+                    ]
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "telemetry"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "request": {
+      "type": "object",
+      "properties": {
+        "checkins": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": {
+            "$ref": "#/$defs/checkin"
+          }
+        }
+      },
+      "required": [
+        "checkins"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

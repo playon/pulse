@@ -8,7 +8,7 @@
     "migrate:local": "wrangler d1 migrations apply pulse-checkins --local",
     "migrate:remote": "wrangler d1 migrations apply pulse-checkins --remote",
     "deploy": "wrangler deploy --env=\"\" && wrangler deploy --env admin",
-    "test": "node --test test/"
+    "test": "node --test \"test/*.test.js\""
   },
   "devDependencies": {
     "wrangler": "^4.137.0"
