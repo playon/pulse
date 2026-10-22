@@ -84,7 +84,7 @@
           "transitions": []
         },
         "api": {
-          "state": "unknown",
+          "state": "unmonitored",
           "verdict": null,
           "lastKind": "heartbeat"
         }
