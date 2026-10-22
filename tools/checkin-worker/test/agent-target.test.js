@@ -19,6 +19,7 @@ let realFetch;
 let calls;
 let releases;        // tag -> release JSON (or a status number)
 let hashFiles;       // tag -> text (or a status number)
+let listing;         // GET /releases: an array (or a status number)
 
 beforeEach(() => {
   env = {
@@ -28,6 +29,7 @@ beforeEach(() => {
   forgetReleaseChecks();
   calls = [];
   releases = { "agent-v0.2.0": release("0.2.0", { digest: `sha256:${SHA}` }) };
+  listing = [release("0.2.0", { digest: `sha256:${SHA}` })];
   hashFiles = { "agent-v0.2.0": `${SHA}  pulse-agent-0.2.0.zip\n` };
   realFetch = globalThis.fetch;
   globalThis.fetch = async (input, init = {}) => {
@@ -45,6 +47,9 @@ beforeEach(() => {
       const t = hashFiles[m[1]];
       if (t === undefined) return new Response("Not Found", { status: 404 });
       return typeof t === "number" ? new Response("x", { status: t }) : new Response(t);
+    }
+    if (url.startsWith("https://api.github.com/repos/playon/pulse/releases?")) {
+      return typeof listing === "number" ? new Response("x", { status: listing }) : Response.json(listing);
     }
     throw new Error(`unexpected fetch ${url}`);
   };
@@ -403,4 +408,122 @@ test("the read-only admin pages still refuse writes", async () => {
     method: "POST", headers: { "Cf-Access-Jwt-Assertion": token({ aud: ADMIN_AUD }) },
   }), env);
   assert.equal(r.status, 405);
+});
+
+// ── GET /agent-releases: the builds the target dialog offers, and their hashes ──
+
+async function get(path, { jwt = token(), e = env } = {}) {
+  const headers = {};
+  if (jwt) headers["Cf-Access-Jwt-Assertion"] = jwt;
+  const r = await worker.fetch(new Request(`https://pulse-checkin-admin${path}`, { method: "GET", headers }), e);
+  return { status: r.status, body: await r.json(), headers: r.headers };
+}
+
+test("the list is the published agent builds, newest first, and nothing else", async () => {
+  const other = (tag, extra = {}) => ({ tag_name: tag, draft: false, assets: [], ...extra });
+  listing = [
+    { ...release("0.3.0", { digest: `sha256:${SHA}` }), published_at: "2026-10-22T12:00:00Z" },
+    release("0.2.5", { digest: `sha256:${SHA}`, draft: true }),                  // a draft isn't published
+    other("web-v1.4.1"),                                                         // Pulse.Web's own releases
+    other("agent-v0.2.4", { assets: [{ name: "notes.txt", state: "uploaded" }] }),  // no zip
+    other("agent-v0.2.3", { assets: [{ name: "pulse-agent-0.2.3.zip", state: "starter" }] }), // upload unfinished
+    other("agent-v../etc"),
+    release("0.2.0", { digest: `sha256:${SHA}` }),
+  ];
+  const r = await get("/agent-releases");
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.releases, [
+    { version: "0.3.0", publishedAt: "2026-10-22T12:00:00Z" },
+    { version: "0.2.0", publishedAt: null },
+  ]);
+  assert.equal(r.headers.get("cache-control"), "no-store");
+});
+
+test("the list is capped", async () => {
+  listing = Array.from({ length: 25 }, (_, i) => release(`0.${100 - i}.0`, { digest: `sha256:${SHA}` }));
+  const r = await get("/agent-releases");
+  assert.equal(r.body.releases.length, 10);
+  assert.equal(r.body.releases[0].version, "0.100.0");
+});
+
+test("GitHub down or answering with something else: 502, never an empty list that reads as 'none published'", async () => {
+  listing = 500;
+  assert.equal((await get("/agent-releases")).body.error, "release-check-failed");
+  listing = { message: "rate limited" };
+  const r = await get("/agent-releases");
+  assert.equal(r.status, 502);
+  assert.equal(r.body.error, "release-check-failed");
+});
+
+test("a build's hash comes from GitHub: the digest, the .sha256 file, or both when they agree", async () => {
+  assert.deepEqual((await get("/agent-releases/0.2.0")).body, { ok: true, version: "0.2.0", sha256: SHA });
+  releases["agent-v0.2.0"] = release("0.2.0", { digest: undefined });             // only the .sha256 file
+  assert.equal((await get("/agent-releases/0.2.0")).body.sha256, SHA);
+  releases["agent-v0.2.0"] = release("0.2.0", { digest: `sha256:${SHA}`, sha256File: false });  // only the digest
+  assert.equal((await get("/agent-releases/0.2.0")).body.sha256, SHA);
+});
+
+test("a hash is never guessed: disagreement, none published, no such release, GitHub down", async () => {
+  hashFiles["agent-v0.2.0"] = `${"b".repeat(64)}  pulse-agent-0.2.0.zip\n`;      // the file disagrees with the digest
+  let r = await get("/agent-releases/0.2.0");
+  assert.equal(r.status, 422);
+  assert.equal(r.body.error, "hash-mismatch");
+  assert.equal(r.body.sha256, undefined);
+
+  releases["agent-v0.2.0"] = release("0.2.0", { digest: undefined, sha256File: false });
+  assert.equal((await get("/agent-releases/0.2.0")).body.error, "release-has-no-hash");
+  assert.equal((await get("/agent-releases/9.9.9")).body.error, "release-not-found");
+  releases["agent-v0.2.0"] = 503;
+  assert.equal((await get("/agent-releases/0.2.0")).status, 502);
+});
+
+test("only a plain version is looked up", async () => {
+  for (const v of ["0.2", "0.2.0.1", "latest", "0.2.0%2F..%2Fx", "v0.2.0"]) {
+    const r = await get(`/agent-releases/${v}`);
+    assert.equal(r.status, 400, v);
+  }
+  assert.equal(calls.filter((c) => c.url.includes("github")).length, 0);
+});
+
+test("the list and the hash need an editor: no token, a forged one, someone else, no GITHUB_TOKEN", async () => {
+  const forged = token().replace(/\.[^.]+$/, ".AAAA");
+  for (const path of ["/agent-releases", "/agent-releases/0.2.0"]) {
+    for (const jwt of [null, forged, token({ aud: ["someone-else"] })]) {
+      const r = await get(path, { jwt });
+      assert.equal(r.status, 403, path);
+      assert.equal(r.body.error, "forbidden");
+    }
+    const r = await get(path, { jwt: token({ email: "stranger@example.com" }) });
+    assert.equal(r.status, 403);
+    assert.equal(r.body.error, "not-an-editor");
+  }
+  assert.equal(calls.filter((c) => c.url.includes("github")).length, 0);
+
+  const bare = { ...env, GITHUB_TOKEN: undefined };
+  assert.equal((await get("/agent-releases", { e: bare })).body.error, "not-configured");
+  assert.equal((await get("/agent-releases/0.2.0", { e: bare })).body.error, "not-configured");
+});
+
+test("the release endpoints only read", async () => {
+  for (const method of ["POST", "PUT", "DELETE"]) {
+    const r = await worker.fetch(new Request("https://pulse-checkin-admin/agent-releases", {
+      method, headers: { "Cf-Access-Jwt-Assertion": token() },
+    }), env);
+    assert.equal(r.status, 405);
+  }
+});
+
+test("what the dialog was shown is what gets saved, or refused if the release changed since", async () => {
+  const shown = (await get("/agent-releases/0.2.0")).body;
+  const saved = await call({ scope: "fleet", target: { version: shown.version, sha256: shown.sha256 } });
+  assert.equal(saved.status, 200);
+  assert.equal(pin("fleet").sha256, shown.sha256);
+
+  forgetReleaseChecks();
+  hashFiles["agent-v0.2.0"] = `${"c".repeat(64)}  pulse-agent-0.2.0.zip\n`;      // the release moved after the editor looked
+  releases["agent-v0.2.0"] = release("0.2.0", { digest: `sha256:${"c".repeat(64)}` });
+  const stale = await call({ scope: "fleet", target: { version: shown.version, sha256: shown.sha256 } });
+  assert.equal(stale.status, 422);
+  assert.equal(stale.body.error, "hash-mismatch");
+  assert.equal(pin("fleet").sha256, shown.sha256);                                 // the old pin is untouched
 });
