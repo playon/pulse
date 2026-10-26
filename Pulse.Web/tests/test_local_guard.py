@@ -165,6 +165,14 @@ class RealAppTests(unittest.TestCase):
         rec = self.call(path="/static/app.js", host="127.0.0.1:8765", sec_fetch_site="cross-site")
         self.assertEqual(rec.status, 403)
 
+    def test_diagnostics_that_run_on_the_vpu_do_not_answer_a_get(self):
+        # A browser too old to send Origin or Sec-Fetch-Site gets past the
+        # guard on a GET, so a GET must never start a capture, traceroute or
+        # ping. Headers here are exactly what such a browser sends.
+        for path in ("/api/network/capture", "/api/network/traceroute", "/api/network/local-ping"):
+            rec = self.call(path=path, host="127.0.0.1:8765")
+            self.assertEqual(rec.status, 405, path)
+
     def test_pulses_own_page_still_works(self):
         rec = self.call(path="/api/version", host="127.0.0.1:8765",
                         origin="http://127.0.0.1:8765", sec_fetch_site="same-origin")

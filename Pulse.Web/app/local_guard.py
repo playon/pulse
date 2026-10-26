@@ -22,8 +22,12 @@ Three checks, applied to every HTTP request and WebSocket handshake:
 A request with none of those headers is let through: curl, a script and a test
 send none, and a browser that predates Sec-Fetch-Site (before Chrome/Edge 76)
 sends no Origin on a cross-origin GET either, so it passes too. For that case
-only the Host check and the browser's own cross-origin read block apply; a
-per-launch token would close it, at the cost of changing every client call.
+only the Host check and the browser's own cross-origin read block apply, so a
+GET must never do anything: the routes that run a capture, traceroute or ping
+on the VPU are POST-only (tests/test_local_guard.py keeps them that way). A
+browser that also omits Origin on a cross-origin POST (IE11 on a form POST is
+suspected, not tested) would get past the check; a per-launch token would
+close that, at the cost of changing every client call.
 Anything already running on the VPU can reach the API regardless.
 
 Port is deliberately not compared with the server's: an SSH or Tailscale port
