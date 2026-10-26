@@ -47,6 +47,7 @@ from powershell import (
 )
 import peer
 import cloud_api
+from local_guard import LocalOnlyGuard
 
 _web_root = _os.path.dirname(_app_dir)
 SETTINGS_PATH = _os.path.join(_web_root, "pulse-settings.json")
@@ -251,6 +252,9 @@ _server_log = _logging.getLogger("pulse")
 _server_log.info(f"pulse-server.log opened — Pulse Web bootstrap")
 
 app = FastAPI(title="Pulse Web | VPU Diagnostics")
+# Refuse any request a web page on this VPU made on its own behalf (foreign
+# Host, Origin or Sec-Fetch-Site): see local_guard.py.
+app.add_middleware(LocalOnlyGuard)
 app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 PIXELLOT_OUIS = ["00:0E:53", "00:30:53", "70:B3:D5", "00:D0:89"]
@@ -4568,7 +4572,7 @@ async def api_network():
     return _build_network(config, domains, ports, ntp, local, ntp_peers, dns_resolution, wifi, tls, lmi_log)
 
 
-@app.get("/api/network/local-ping")
+@app.post("/api/network/local-ping")
 async def api_local_ping(count: int = 4):
     count = max(1, min(count, 100))  # clamp 1-100
     timeout = max(20, count * 3)  # ~3s per ping round
@@ -4582,7 +4586,7 @@ async def api_network_health():
     return await run_ps("Get-NetworkHealth.ps1", timeout=10)
 
 
-@app.get("/api/network/capture")
+@app.post("/api/network/capture")
 async def api_network_capture(duration: int = 30):
     duration = max(10, min(duration, 60))
     timeout = duration + 30  # extra headroom for pktmon stop + analysis
@@ -4591,7 +4595,7 @@ async def api_network_capture(duration: int = 30):
     return result
 
 
-@app.get("/api/network/traceroute")
+@app.post("/api/network/traceroute")
 async def api_traceroute(target: str = "pixellot.tv", max_hops: int = 20):
     max_hops = max(5, min(max_hops, 30))
     timeout = max(30, max_hops * 3)  # generous — most finish well under this
