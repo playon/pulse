@@ -1,5 +1,5 @@
-"""The fleet agent's check-in: the on-disk queue, the beacon, the fallback
-sheet and the entry itself. Moved out of main.py (PV-49) so it versions with
+"""The fleet agent's check-in: the on-disk queue, the beacon and the entry
+itself. Moved out of main.py (PV-49) so it versions with
 the agent (pulse_agent/VERSION), not with Pulse Diagnostics. Diagnostics still
 sends its launch check-in through it.
 
@@ -32,15 +32,9 @@ from pulse_agent.engine import engine
 # lives in the web root beside pulse-settings.json, which the launcher's xcopy
 # update never removes.
 #
-# If the Worker can't be reached (a school filter that blocks workers.dev, a
-# Cloudflare outage), the new launch check-in also goes to the old Apps Script
-# sheet, which school filters are less likely to block. It stays queued for the
-# Worker either way, so D1 still ends up complete; the sheet is only a safety
-# net for seeing the unit at all. Only that one check-in goes, never the
-# backlog, so an outage can't flood the sheet. The sheet keys a unit on serial,
-# then venue id; check-ins no longer carry the serial, so a unit gets a new
-# sheet row keyed on its venue id at the switch. PULSE_CHECKIN_FALLBACK_URL /
-# PULSE_CHECKIN_FALLBACK_SECRET override; an empty URL turns the fallback off.
+# The queue is the only safety net: if the Worker can't be reached (a school
+# filter that blocks workers.dev, a Cloudflare outage), the check-in stays
+# queued and replays on a later launch. There is no second sink.
 #
 # Check-ins carry no hostname or BIOS serial (Ian, 2026-10-13): a unit is its
 # Pixellot venue id and VPU name.
@@ -52,8 +46,6 @@ from pulse_agent.engine import engine
 # The address lives in checkin_lite.py, the one place to change it (the
 # monitor's event-time sender can't import this file: it needs main.py).
 from pulse_agent.checkin_lite import CHECKIN_URL as _CHECKIN_URL
-_CHECKIN_FALLBACK_URL    = "https://script.google.com/macros/s/AKfycbworYEcINtNfd1R6sTvHFDFqOHzYVA1XxHZRStB54T2GcTgQ8JvE0lxnboJ9q_jEFS4/exec"
-_CHECKIN_FALLBACK_SECRET = "7a161bad7765fc5078b8375007999160c5687bf5da52ae1ca717ebbad628e648"
 _CHECKIN_STATE_PATH = _os.path.join(WEB_ROOT, "pulse-checkin-queue.json")
 _CHECKIN_BATCH = 50
 # The Worker refuses a body over 64 KB with a 413 for the whole batch, so a
@@ -320,50 +312,6 @@ def _checkin_delta(delta: dict) -> dict:
 
 
 
-
-def _post_fallback_sync(url: str, body: dict) -> None:
-    """POST one check-in to the Apps Script sheet; raise unless it says ok.
-
-    Apps Script answers a POST with a 302 to a result URL; urllib follows it as
-    a GET and reads the JSON ack. The reply is checked because the script
-    returns 200 with {"ok": false} on failure (the sheet's old trap: Pulse
-    logged "sent" without reading it)."""
-    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers={
-        "Content-Type": "application/json",
-        "User-Agent": f"Pulse/{engine.APP_VERSION}",
-    })
-    # 15s: the script serializes writes behind a lock and the round trip is
-    # POST -> 302 -> GET.
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        raw = resp.read(64 * 1024)
-    try:
-        reply = json.loads(raw)
-    except ValueError:
-        raise RuntimeError("fallback reply was not JSON")
-    if not isinstance(reply, dict) or reply.get("ok") is not True:
-        raise RuntimeError("fallback did not acknowledge"
-                           + (f": {reply.get('error')}" if isinstance(reply, dict) and reply.get("error") else ""))
-
-
-async def _send_fallback(entry: dict, state: dict) -> None:
-    """The new check-in to the sheet, after the Worker failed. Records the
-    outcome in `state` (shown on the About page); never raises."""
-    url = (_os.environ.get("PULSE_CHECKIN_FALLBACK_URL", _CHECKIN_FALLBACK_URL) or "").strip()
-    secret = (_os.environ.get("PULSE_CHECKIN_FALLBACK_SECRET") or _CHECKIN_FALLBACK_SECRET).strip()
-    if not url.startswith("https://") or not secret:
-        return
-    # The sheet takes one flat check-in with the secret inside it.
-    body = dict(entry, secret=secret)
-    try:
-        await asyncio.to_thread(_post_fallback_sync, url, body)
-        state["lastFallbackAt"] = _checkin_now()
-        state.pop("lastFallbackError", None)
-        engine._server_log.info("Check-in sent to the fallback sheet (the Worker failed: %s)", state.get("lastError"))
-    except Exception as e:
-        state["lastFallbackError"] = str(e) or e.__class__.__name__
-        engine._server_log.info("Fallback check-in failed too (%s)", state["lastFallbackError"])
-
-
 def _checkin_configured(url: str) -> bool:
     return bool(url and url.startswith("https://") and "PASTE_" not in url)
 
@@ -388,12 +336,6 @@ async def _send_checkin(dashboard: Optional[dict] = None, delta: Optional[dict] 
             if not _checkin_configured(url):
                 return
             await _flush_checkin_queue(state, url)
-            # Launches only: the monitor posts every few minutes, and the sheet
-            # keeps one row per unit with a run count, so monitor posts there
-            # would flood it and inflate the count.
-            if state.get("lastError") and entry and entry.get("reason") == "startup" and any(
-                    e.get("checkinId") == entry["checkinId"] for e in state["queue"]):
-                await _send_fallback(entry, state)
             _save_checkin_state(state)
         if state.get("lastError"):
             engine._server_log.info("Check-in queued (%d waiting): %s", len(state["queue"]), state["lastError"])
