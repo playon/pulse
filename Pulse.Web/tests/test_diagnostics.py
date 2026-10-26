@@ -563,6 +563,32 @@ class TestStorageFinding(unittest.TestCase):
 
 
 # ── run_ps stdout JSON recovery (the resilience fix) ─────────
+class TestSmartErrorTiers(TestStorageFinding):
+    """A few uncorrected errors on a Healthy drive is "Fix soon", not critical."""
+
+    def _smart(self, errors, health="Healthy", predict=False):
+        dh = {"logicalDisks": [], "predictFailure": predict, "physicalDisks": [
+            {"friendlyName": "TOSHIBA DT01ACA100", "healthStatus": health,
+             "smart": {"readErrorsUncorrected": errors, "writeErrorsUncorrected": 0}}]}
+        return {f["code"]: f for f in self._storage(dh) if f.get("code", "").startswith("disk-smart")}
+
+    def test_few_errors_is_fix_soon(self):
+        got = self._smart(8)
+        self.assertEqual(set(got), {"disk-smart-errors"})
+        self.assertEqual(got["disk-smart-errors"]["severity"], "warning")
+        self.assertEqual(main._readiness_class("disk-smart-errors"), "info")
+
+    def test_no_errors_is_quiet(self):
+        self.assertEqual(self._smart(0), {})
+
+    def test_many_errors_is_critical(self):
+        self.assertEqual(set(self._smart(main.SMART_ERRORS_CRITICAL)), {"disk-smart-prefail"})
+
+    def test_unhealthy_or_prefail_flag_is_critical(self):
+        self.assertEqual(set(self._smart(0, health="Unhealthy")), {"disk-smart-prefail"})
+        self.assertEqual(set(self._smart(8, predict=True)), {"disk-smart-prefail"})
+
+
 class TestExtractJson(unittest.TestCase):
     def test_clean_json(self):
         self.assertEqual(powershell._extract_json('{"a": 1}'), {"a": 1})

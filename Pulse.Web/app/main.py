@@ -2350,6 +2350,11 @@ def _graphics_findings(gd) -> list:
     return out
 
 
+# Lifetime uncorrected read+write errors at which a still-Healthy drive stops
+# being "Fix soon" and becomes critical. app.js (diskHealth) mirrors it.
+SMART_ERRORS_CRITICAL = 100
+
+
 def _compute_findings(identity, performance, services, nics, hardware=None, installed_sw=None, network_config=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None, binaries=None) -> list:
     findings = []
 
@@ -2764,12 +2769,19 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
         # noise a tech could do nothing about; Storage Cleanup only offers
         # itself at 90%, so the alert and the remedy now arrive together.
 
-    # Drive SMART / reliability — the coarse Healthy/Unhealthy rollup plus the
+    # Drive SMART / reliability: the coarse Healthy/Unhealthy rollup plus the
     # SSD-fleet early-warning signals (wear %, uncorrectable errors, OS pre-fail
-    # flag) from Get-DiskHealth. Pre-fail takes precedence over high wear, and we
-    # emit at most one of each so a multi-disk box doesn't spam the findings list.
+    # flag) from Get-DiskHealth. The OS pre-fail flag or an Unhealthy drive is
+    # critical. A handful of lifetime uncorrected errors on a drive that still
+    # reads Healthy is "Fix soon" (a warning, not an outage): old spinning
+    # disks collect a few and run for years. A count of SMART_ERRORS_CRITICAL
+    # or more escalates. Pulse keeps no history, so it can't tell a static 8
+    # from a climbing one; the recommendation tells the tech to re-check.
+    # (app.js diskHealth renders the same tiers; keep the constant in step.)
+    # At most one finding of each kind, so a multi-disk box doesn't spam.
     if disk_health and not disk_health.get("error"):
         prefail_drive = "A drive" if disk_health.get("predictFailure") else None
+        errors_drive = None  # (name, uncorrected)
         wear_drive = None  # (name, wearPercent)
         for d in (disk_health.get("physicalDisks") or []):
             name = d.get("friendlyName") or "A drive"
@@ -2777,8 +2789,10 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
             uncorrected = (smart.get("readErrorsUncorrected") or 0) + (smart.get("writeErrorsUncorrected") or 0)
             health = (d.get("healthStatus") or "").strip().lower()
             wear = smart.get("wearPercent")
-            if prefail_drive is None and (uncorrected > 0 or (health and health != "healthy")):
+            if prefail_drive is None and (uncorrected >= SMART_ERRORS_CRITICAL or (health and health != "healthy")):
                 prefail_drive = name
+            elif 0 < uncorrected < SMART_ERRORS_CRITICAL and (errors_drive is None or uncorrected > errors_drive[1]):
+                errors_drive = (name, uncorrected)
             if wear is not None and wear >= 80 and (wear_drive is None or wear > wear_drive[1]):
                 wear_drive = (name, wear)
         if prefail_drive:
@@ -2790,11 +2804,26 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                     "title": f"{prefail_drive} is predicting failure (SMART)",
                     "recommendation": (
                         "Back up recordings and plan to replace this drive. Its built-in "
-                        "self-check (SMART) is reporting uncorrectable errors or a pre-failure status."
+                        "self-check (SMART) is reporting a failing status or many uncorrectable errors."
                     ),
                 }
             )
-        elif wear_drive:
+        elif errors_drive:
+            n = errors_drive[1]
+            findings.append(
+                {
+                    "code": "disk-smart-errors",
+                    "severity": "warning",
+                    "category": "Storage",
+                    "title": f"{errors_drive[0]} has {n} uncorrected read/write error{'' if n == 1 else 's'}",
+                    "recommendation": (
+                        "The drive still reports Healthy, so this is not an outage. Back up "
+                        "recordings and plan a replacement. Check this page again on the next "
+                        "visit: if the count has gone up, replace the drive soon."
+                    ),
+                }
+            )
+        if not prefail_drive and wear_drive:
             findings.append(
                 {
                     "code": "disk-smart-wear",
@@ -3150,6 +3179,7 @@ _READINESS_POLICY = {
     # F15a/F15b report those drives at their own class. This entry is the
     # fallback for any OTHER volume >90%.
     "disk-critical":         "info",
+    "disk-smart-errors":     "info",     # few uncorrected errors, drive still Healthy: "Fix soon"
     "disk-smart-wear":       "info",     # SSD ≥80% rated life — heads-up, won't stop tonight's game
     "temp-critical":         "info",     # 85°C snapshot — readiness gate is 90°C (F14)
     "os-eos-reached":        "info",     # F26
