@@ -3856,30 +3856,32 @@ function renderApplications() {
         <input type="text" id="sw-filter" placeholder="Filter software..." class="sw-filter-input"/>
         <div class="sw-table-wrap">
           ${(() => {
-            const hasConcerns = swList.some(s => s.concern);
-            // Drop the Concern column entirely when nothing is flagged —
-            // saves a wasted column of dashes on a healthy box.
+            // Review class comes from the backend (software_review.py), by
+            // application name only: risk > informational > approved.
+            const cls = s => s.review || (s.concern ? "risk" : "informational");
+            const rank = { risk: 0, informational: 1, approved: 2 };
             const sevRank = { critical: 0, warning: 1 };
             const sorted = [...swList].sort((a, b) => {
-              const ra = a.concern ? sevRank[a.concern.severity] ?? 9 : 99;
-              const rb = b.concern ? sevRank[b.concern.severity] ?? 9 : 99;
-              return ra - rb;
+              const d = rank[cls(a)] - rank[cls(b)];
+              if (d) return d;
+              return (sevRank[a.concern?.severity] ?? 9) - (sevRank[b.concern?.severity] ?? 9);
             });
             const rows = sorted.map(s => {
               const c = s.concern;
+              const k = cls(s);
               const rowCls = c ? ` class="sw-row-${esc(c.severity)}"` : "";
-              const concernCell = hasConcerns ? `<td>${c
+              const reviewCell = `<td>${k === "risk" && c
                 ? `<span class="sw-concern-badge sw-concern-${esc(c.severity)}">${esc(c.shortLabel || c.label)}</span><div class="sw-concern-reason">${esc(c.reason)}</div>`
-                : `<span class="text-pulse-muted text-xs">—</span>`}</td>` : "";
+                : k === "approved" ? badge("Approved", "muted") : badge("Informational", "info")}</td>`;
               return `<tr${rowCls}>
                 <td>${esc(s.displayName)}</td>
                 <td class="font-mono text-xs">${esc(s.displayVersion)}</td>
                 <td class="text-pulse-muted">${esc(s.publisher)}</td>
-                ${concernCell}
+                ${reviewCell}
               </tr>`;
             }).join("");
             return `<table class="data-table" id="sw-table"><thead><tr>
-              <th>Name</th><th>Version</th><th>Publisher</th>${hasConcerns ? "<th>Concern</th>" : ""}
+              <th>Name</th><th>Version</th><th>Publisher</th><th>Review</th>
             </tr></thead><tbody>${rows}</tbody></table>`;
           })()}
         </div>
