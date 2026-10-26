@@ -47,6 +47,7 @@ from powershell import (
 )
 import peer
 import cloud_api
+from local_guard import LocalOnlyGuard
 
 _web_root = _os.path.dirname(_app_dir)
 SETTINGS_PATH = _os.path.join(_web_root, "pulse-settings.json")
@@ -251,6 +252,9 @@ _server_log = _logging.getLogger("pulse")
 _server_log.info(f"pulse-server.log opened — Pulse Web bootstrap")
 
 app = FastAPI(title="Pulse Web | VPU Diagnostics")
+# Refuse any request a web page on this VPU made on its own behalf (foreign
+# Host, Origin or Sec-Fetch-Site): see local_guard.py.
+app.add_middleware(LocalOnlyGuard)
 app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 PIXELLOT_OUIS = ["00:0E:53", "00:30:53", "70:B3:D5", "00:D0:89"]
