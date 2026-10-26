@@ -17,10 +17,60 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-21
+
+The first published agent: the zip fleet control can pin, with its SHA-256.
+It holds everything under 0.2.1 below and everything since. 0.2.1 itself was
+never published, and some dev-channel units report `agentVersion` 0.2.1 from
+earlier builds, so this one is 0.2.2: a unit that reports 0.2.2 is running
+this build.
+
+### Fixed
+- Runner (PV-85): a download cut off part way is now retried instead of
+  refused for good. A cut-off download used to look complete, so it failed the
+  hash check and was blocked as a bad zip. A zip whose contents are damaged is
+  now refused and reported, not left half-unpacked with nothing reported. Both
+  fixes take effect on the next enroll, because an update never replaces the
+  runner.
+- Runner: a failed update leaves nothing behind. A killed download, a
+  half-unpacked slot and a slot moved aside are cleared on the next tick. A
+  tick that runs over is killed together with the PowerShell processes it
+  started. HTTP errors close their connection. The other slot is swapped in
+  one rename, so a failure leaves the old build in place, never half of one.
+
 ### Changed
+- Runner: `agentUpdate.error` is one short line with no file paths and no
+  computer name.
+- Runner: a target that was refused or rolled back is tried again only after
+  fleet control names a different target, or clears it. Before, it was never
+  tried again. A network failure is retried after 1 h, 2 h, 4 h and 8 h. The
+  fifth failed try gives the target up the same way, and
+  `agentUpdate.error` says so with the last cause ("gave up after 5 failed
+  tries; the last: ..."). It used to retry every hour, forever. The count
+  is kept for the current target only, and starts again when the target
+  changes or an update succeeds.
+- Runner (PV-85 review): each try is counted before the download starts, so a
+  try the task's 5-minute limit kills still counts toward the five; if the
+  fifth never finishes, the next tick gives up ("the last never finished").
+  The download's deadline comes from the time the task has left, so a
+  download and unpack fit inside the limit. A retry for any cause (a full
+  disk, a slot in use) no longer says "network".
+- Runner (PV-85 review): a new target is fetched after a random wait of up to
+  an hour, and each retry waits up to half its gap more, so pinning the fleet
+  doesn't have every unit download in the same five minutes.
+- Runner (PV-85 review): if an event starts while a build downloads, the new
+  build waits in the other slot and is switched to after the event.
+- Enrolling records the SHA-256 that the installed build's release zip would
+  have, so a unit enrolled from exactly a released build doesn't download it
+  again when fleet control pins it.
+- Runner: `agent-slots.json` only keeps refusals and retry times for the
+  current target, so it no longer grows with every target ever pinned.
 - A unit missing one of its main cameras (1 of 2 on an S2) now reports readiness FAIL, with the `cam-partial` finding critical. It was WARN. A multi-camera head can't stream with a camera missing. Verdict change only; no new fields.
 
 ### Added
+- `telemetry.runnerVersion` (PV-85): the agent runner's own version, starting
+  at `2`. An update never replaces the runner, so Vitals can list the units
+  that still run an older runner (null) and need enrolling again.
 - The check-in carries what Vitals' unit tabs show (PV-65 to PV-76, except
   PV-66). Each part is null when its read failed, never a healthy-looking
   default.

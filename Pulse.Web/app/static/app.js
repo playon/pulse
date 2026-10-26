@@ -4146,7 +4146,7 @@ async function runLocalPing(count) {
 
   try {
     while (_localPingState.running) {
-      var resp = await fetch("/api/network/local-ping?count=" + batchSize, { signal: _localPingState.abortCtrl.signal });
+      var resp = await fetch("/api/network/local-ping?count=" + batchSize, { method: "POST", signal: _localPingState.abortCtrl.signal });
       var data = await resp.json();
       if (!_localPingState.running) break;
 
@@ -4264,7 +4264,7 @@ async function _runTraceroute(target) {
   if (out) out.innerHTML = '<p class="text-pulse-muted text-sm loading-pulse">Running traceroute to ' + esc(target) + '…</p>';
 
   try {
-    var resp = await fetch("/api/network/traceroute?target=" + encodeURIComponent(target));
+    var resp = await fetch("/api/network/traceroute?target=" + encodeURIComponent(target), { method: "POST" });
     var data = await resp.json();
     if (data.error) {
       if (out) out.innerHTML = '<p class="text-sm status-fail">' + esc(data.message) + '</p>';
@@ -4523,7 +4523,7 @@ async function _runCapture(duration) {
   if (out) out.innerHTML = '<p class="text-pulse-muted text-sm loading-pulse">Running ' + duration + 's packet capture, reading TCP headers on ports 443, 1935, 80, UDP 2088…</p>';
 
   try {
-    var resp = await fetch("/api/network/capture?duration=" + duration);
+    var resp = await fetch("/api/network/capture?duration=" + duration, { method: "POST" });
     var data = await resp.json();
     if (data.error) {
       if (out) out.innerHTML = '<p class="text-sm status-fail">' + esc(data.message) + '</p>';

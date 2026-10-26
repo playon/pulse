@@ -760,40 +760,119 @@ test("no agent target unless one is set", async () => {
   assert.equal(body.control.agent, undefined);
 });
 
-test("agent target: the fleet's pin, a unit's own pin wins, a unit row without one gets the fleet's", async () => {
-  env.DB.raw.exec(`UPDATE monitor_control SET agent_version = '0.2.0', agent_sha256 = '${SHA_A}' WHERE scope = 'fleet'`);
-  env.DB.raw.exec(`INSERT INTO monitor_control (scope, agent_version, agent_sha256) VALUES ('V42', '0.3.0', '${SHA_B}')`);
+function pinAt(scope, version, sha256) {
+  env.DB.raw.prepare("INSERT INTO agent_target (scope, version, sha256, set_at) VALUES (?, ?, ?, datetime('now'))")
+    .run(scope, version, sha256);
+}
+
+test("agent target: the fleet's pin, a unit's own pin wins, a unit with a mode row but no pin gets the fleet's", async () => {
+  pinAt("fleet", "0.2.0", SHA_A);
+  pinAt("V42", "0.3.0", SHA_B);
   env.DB.raw.exec(`INSERT INTO monitor_control (scope, mode) VALUES ('V7', 'off')`);
   const reply = async (venueId, n) => (await (await post({ checkins: [checkin({
     checkinId: `aaaaaaaa-0000-0000-0000-00000000030${n}`, venueId })] })).json()).control;
   assert.deepEqual((await reply("V42", 1)).agent, { version: "0.3.0", sha256: SHA_B });   // canary
-  assert.deepEqual((await reply("V99", 2)).agent, { version: "0.2.0", sha256: SHA_A });   // no row of its own
+  assert.deepEqual((await reply("V99", 2)).agent, { version: "0.2.0", sha256: SHA_A });   // no pin of its own
   const v7 = await reply("V7", 3);
   assert.equal(v7.mode, "off");
-  assert.deepEqual(v7.agent, { version: "0.2.0", sha256: SHA_A });                         // its row sets no version
+  assert.deepEqual(v7.agent, { version: "0.2.0", sha256: SHA_A });
 });
 
-test("a unit pin without its hash means no target, never the fleet's", async () => {
+test("a pin never changes a unit's mode: fleet off, unit pinned, the unit stays off", async () => {
+  env.DB.raw.exec(`UPDATE monitor_control SET mode = 'off' WHERE scope = 'fleet'`);
+  pinAt("V42", "0.3.0", SHA_B);
+  const body = await (await post({ checkins: [checkin()] })).json();
+  assert.equal(body.control.mode, "off");
+  assert.deepEqual(body.control.agent, { version: "0.3.0", sha256: SHA_B });
+});
+
+test("the retired monitor_control pin columns are not read", async () => {
   env.DB.raw.exec(`UPDATE monitor_control SET agent_version = '0.2.0', agent_sha256 = '${SHA_A}' WHERE scope = 'fleet'`);
-  env.DB.raw.exec(`INSERT INTO monitor_control (scope, agent_version) VALUES ('V42', '0.1.0')`);
   const body = await (await post({ checkins: [checkin()] })).json();
   assert.equal(body.control.agent, undefined);
-  assert.equal(body.control.mode, "on");
 });
 
-test("monitor_control refuses a malformed pin", () => {
-  const bad = [`agent_version = 'v0.2.0'`, `agent_version = '0.2'`, `agent_sha256 = '${SHA_A.toUpperCase()}'`,
-               `agent_sha256 = 'abc'`];
-  for (const set of bad) {
-    assert.throws(() => env.DB.raw.exec(`UPDATE monitor_control SET ${set} WHERE scope = 'fleet'`), /CHECK constraint/, set);
+test("agent_target refuses a malformed pin", () => {
+  const bad = [["v0.2.0", SHA_A], ["0.2", SHA_A], ["0.2.0", SHA_A.toUpperCase()], ["0.2.0", "abc"], ["0.2.0", null]];
+  for (const [v, h] of bad) {
+    assert.throws(() => pinAt("fleet", v, h), /constraint/, `${v} ${h}`);
   }
 });
 
+test("a broken pin lookup leaves agent out but keeps mode and skip", async () => {
+  env.DB.raw.exec(`UPDATE monitor_control SET mode = 'off' WHERE scope = 'fleet'`);
+  env.DB.raw.exec("DROP TABLE agent_target");
+  const body = await (await post({ checkins: [checkin()] })).json();
+  assert.deepEqual(body.control, { mode: "off", skip: [] });
+});
+
 test("switching a unit off the way the README says keeps its agent pin", async () => {
-  env.DB.raw.exec(`INSERT INTO monitor_control (scope, agent_version, agent_sha256) VALUES ('V42', '0.1.0', '${SHA_B}')`);
-  env.DB.raw.exec(`INSERT INTO monitor_control (scope, mode, note, updated_at) VALUES ('V42', 'off', 'why', datetime('now'))
-                   ON CONFLICT (scope) DO UPDATE SET mode=excluded.mode, note=excluded.note, updated_at=excluded.updated_at`);
+  pinAt("V42", "0.1.0", SHA_B);
+  env.DB.raw.exec(`INSERT OR REPLACE INTO monitor_control (scope, mode, note, updated_at) VALUES ('V42', 'off', 'why', datetime('now'))`);
   const body = await (await post({ checkins: [checkin()] })).json();
   assert.equal(body.control.mode, "off");
   assert.deepEqual(body.control.agent, { version: "0.1.0", sha256: SHA_B });
+});
+
+// PV-19: the five never-filled telemetry columns stay out of every view.
+const UNFILLED = ["tel_risk_count", "tel_reboot_pending", "tel_poe_draw_w", "tel_clock_offset_s", "tel_camera_macs"];
+
+test("no view exposes the never-filled telemetry columns", () => {
+  const db = env.DB.raw;
+  const views = db.prepare("SELECT name FROM sqlite_master WHERE type = 'view'").all();
+  assert.ok(views.length >= 4);
+  const gone = new Set([...UNFILLED, "risk_count", "reboot_pending", "poe_draw_w", "clock_offset_s", "camera_macs"]);
+  for (const { name } of views) {
+    const cols = db.prepare(`SELECT name FROM pragma_table_info('${name}')`).all().map((c) => c.name);
+    for (const c of cols) assert.ok(!gone.has(c), `${name}.${c}`);
+  }
+});
+
+test("checkins_et lists every checkins column except the unfilled five", () => {
+  const db = env.DB.raw;
+  const names = (t) => db.prepare(`SELECT name FROM pragma_table_info('${t}')`).all().map((c) => c.name);
+  const et = new Set(names("checkins_et"));
+  for (const c of names("checkins")) {
+    assert.equal(et.has(c), !UNFILLED.includes(c), `checkins_et vs checkins.${c} (add new columns to the view)`);
+  }
+  assert.ok(et.has("received_at_et") && et.has("sent_at_et"));
+});
+
+// PV-20
+test("readiness.status outside PASS/WARN/FAIL is stored as null", async () => {
+  const items = [
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000301", readiness: { status: "FIAL" } }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000302", readiness: { status: "WARN" } }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000303", reason: "heartbeat", readiness: undefined, status: "pass" }),
+  ];
+  await post({ secret: SECRET, checkins: items });
+  const get = (id) => env.DB.raw.prepare("SELECT readiness_status s FROM checkins WHERE checkin_id = ?").get(id).s;
+  assert.equal(get(items[0].checkinId), null);
+  assert.equal(get(items[1].checkinId), "WARN");
+  assert.equal(get(items[2].checkinId), null);
+});
+
+test("alert counts distinct units by venue, not by the retired serial and hostname", async () => {
+  await post({ secret: SECRET, checkins: [
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000311", venueId: "V1", vpuName: "A", hostname: undefined, serialNumber: undefined }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000312", venueId: "V1", vpuName: "A", hostname: undefined, serialNumber: undefined }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000313", venueId: "V2", vpuName: "B", hostname: undefined, serialNumber: undefined }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000314", venueId: undefined, vpuName: "C", hostname: undefined, serialNumber: undefined }),
+  ] });
+  const res = await runAlertCheck(env, new Date());
+  assert.equal(res.count, 4);
+  assert.equal(res.units, 3);
+});
+
+// PV-28: venue-keyed units read through checkins_unit, retention through
+// idx_checkins_received, and the serial/hostname index is gone.
+test("check-in indexes match how venue-keyed units are read", () => {
+  const db = env.DB.raw;
+  const plan = (sql) => db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all().map((r) => r.detail).join(" | ");
+  const idx = db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'checkins'").all().map((r) => r.name);
+  assert.ok(!idx.includes("idx_checkins_unit"));
+  const unit = "COALESCE(venue_id, vpu_name, hostname, serial_number) = ?";
+  assert.match(plan(`SELECT received_at FROM checkins WHERE ${unit} ORDER BY received_at DESC LIMIT 50`), /checkins_unit/);
+  assert.match(plan(`SELECT sent_at FROM checkins WHERE ${unit} AND received_at >= ?`), /checkins_unit/);
+  assert.match(plan("DELETE FROM checkins WHERE received_at < ?"), /idx_checkins_received/);
 });

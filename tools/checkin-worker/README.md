@@ -9,7 +9,7 @@ on the ian.moore@playonsports.com Cloudflare account:
 | Worker | Who calls it | What it does |
 |---|---|---|
 | `pulse-checkin` — https://pulse-checkin.pulse-checkin-worker.workers.dev | VPUs (public) | `POST /checkin` stores check-ins; `GET /health`; daily cron posts to Slack when too few arrived |
-| `pulse-checkin-admin` — https://pulse-checkin-admin.pulse-checkin-worker.workers.dev | People, behind Cloudflare Access | `/` unit table, `/units.csv`, `/checkins.csv?days=30` |
+| `pulse-checkin-admin` — https://pulse-checkin-admin.pulse-checkin-worker.workers.dev | People, behind Cloudflare Access | `/` unit table, `/units.csv`, `/checkins.csv?days=30`, and the one write, `POST /agent-target` (Pulse Vitals sets the agent build, below) |
 
 They are separate Workers because Cloudflare Access on a `workers.dev`
 hostname covers the whole hostname, and VPUs have to POST without logging in.
@@ -92,8 +92,7 @@ last instruction they had. Interactive Pulse launches ignore it.
 npx wrangler d1 execute pulse-checkins --remote --command "UPDATE monitor_control SET mode='off', note='why', updated_at=datetime('now') WHERE scope='fleet'"
 # stop one collector everywhere
 npx wrangler d1 execute pulse-checkins --remote --command "UPDATE monitor_control SET skip='[\"Get-S1Cameras.ps1\"]', updated_at=datetime('now') WHERE scope='fleet'"
-# stop the monitor on one unit (an upsert, not INSERT OR REPLACE: REPLACE
-# rewrites the whole row and would wipe the unit's agent pin, below)
+# stop the monitor on one unit (an upsert, so its skip list is kept)
 npx wrangler d1 execute pulse-checkins --remote --command "INSERT INTO monitor_control (scope, mode, note, updated_at) VALUES ('<venue id>', 'off', 'why', datetime('now')) ON CONFLICT (scope) DO UPDATE SET mode=excluded.mode, note=excluded.note, updated_at=excluded.updated_at"
 # back on
 npx wrangler d1 execute pulse-checkins --remote --command "UPDATE monitor_control SET mode='on', skip='[]', updated_at=datetime('now') WHERE scope='fleet'"
@@ -102,31 +101,135 @@ npx wrangler d1 execute pulse-checkins --remote --command "UPDATE monitor_contro
 ## Fleet control: which agent build a unit runs
 
 The reply's `control` also names the fleet agent build a unit should run
-(migration 0017, PV-49), as `agent: { version, sha256 }`. It comes from the
-`agent_version` and `agent_sha256` columns: a unit's own row wins when it sets a
-version (a canary, or a unit held back), otherwise the `fleet` row's applies.
-With no version set, `agent` is left out and units stay on what they run. A
-unit row with a version but no valid hash gets no target, never the fleet's,
-so a held-back unit isn't moved by a typo.
+(PV-49), as `agent: { version, sha256 }`. It comes from the `agent_target`
+table (migration 0020): a unit's own row wins (a canary, or a unit held back),
+otherwise the `fleet` row's applies. With no row, `agent` is left out and units
+stay on what they run. A unit row that is malformed gives no target, never the
+fleet's, so a held-back unit isn't moved by a typo.
+
+Pins are kept apart from `monitor_control` on purpose: a unit's row there
+decides its mode, so a pin stored there turned a unit's monitor back on while
+the fleet was off. A pin never creates, changes or removes a `monitor_control`
+row. (`monitor_control.agent_version` / `agent_sha256` from migration 0017 are
+retired: 0020 moves any pin found there into `agent_target` and empties them,
+and nothing reads them.)
 
 The agent builds the download URL itself (`playon/pulse` release
 `agent-v<version>`) and refuses a zip whose SHA-256 differs, so this table can
 only choose among published releases. The columns refuse anything but
 `N.N.N` and 64 lowercase hex characters.
 
+### Setting it: `POST /agent-target` (PV-85)
+
+Pulse Vitals sets and clears the target through the **admin** Worker, never by
+writing the database (Vitals is read-only against `pulse-checkins`). It calls
+over a service binding to `pulse-checkin-admin` and forwards its viewer's
+`Cf-Access-Jwt-Assertion`, so the change is made, and recorded, as that person.
+
+```http
+POST /agent-target
+Content-Type: application/json
+Cf-Access-Jwt-Assertion: <the viewer's Access token>
+
+{ "scope": "fleet", "target": { "version": "0.2.0", "sha256": "<64 hex>" }, "note": "why" }
+{ "scope": "<venue id, else VPU name>", "target": null, "note": "back with the fleet" }
+```
+
+`200` returns `{ ok: true, scope, target, previous, setBy, setAt, note }`.
+Every failure is `{ ok: false, error, message }` and writes nothing:
+
+| Status | `error` | When |
+|---|---|---|
+| 400 | `bad-request` | not exactly `{scope, target, note?}`: unknown fields (a `url` included), a malformed version or hash, a scope with spaces at the ends or control characters |
+| 403 | `forbidden` | no valid Access token for this team, wrong audience, Access not configured |
+| 403 | `not-an-editor` | the token's email isn't in `FLEET_CONTROL_EDITORS` (unset: nobody) |
+| 404 | `unknown-scope` | no unit has checked in with that venue id (or VPU name, for a unit with no venue id) |
+| 405 / 413 / 415 | `method-not-allowed` / `too-large` / `unsupported-media-type` | not POST, a body over 4 KB, not `application/json` |
+| 422 | `release-not-found` | no published (non-draft) `agent-v<version>` with an uploaded `pulse-agent-<version>.zip` |
+| 422 | `hash-mismatch` | the release's SHA-256 isn't the one sent |
+| 422 | `release-has-no-hash` | the release publishes no SHA-256 to check against |
+| 502 | `release-check-failed` | GitHub couldn't be asked (down, rate limited): try again |
+| 500 | `not-configured` | setting a target, and the Worker has no `GITHUB_TOKEN` secret (clearing still works) |
+| 500 | `storage` | the D1 write failed |
+
+Before saving a target the Worker asks GitHub for that release. It compares
+the zip asset's `digest` (GitHub's own SHA-256) and the release's
+`pulse-agent-<version>.zip.sha256` file. Both must match when present, and at
+least one must be. Both URLs are built from the version. Clearing needs no
+check. A good check is remembered for an hour (agent-v* releases are never
+replaced), so pinning 100 units one request at a time asks GitHub once.
+Setting writes the scope's `agent_target` row; clearing deletes it, so a unit
+follows the fleet's pin again and a cleared fleet moves nobody. Clearing a
+scope with no pin is a `200` that writes nothing (`previous: null`,
+`setAt: null`) and logs nothing. Neither touches `monitor_control`.
+
+Each pin records who set it and when (`set_by`, `set_at`, `note`), and every
+change is appended to `agent_target_log` with the target it replaced
+(migration 0020).
+
+### Choosing a build: `GET /agent-releases` (PV-85)
+
+So an editor never finds or pastes a SHA-256, Vitals' target dialog asks the
+admin Worker, over the same service binding and with the viewer's token:
+
+- `GET /agent-releases` returns `{ ok: true, releases: [{ version, publishedAt }] }`:
+  the 10 newest published (non-draft) `agent-v<version>` releases that have an
+  uploaded `pulse-agent-<version>.zip`, as GitHub lists them. Releases for
+  anything else (`web-v*`) are left out.
+- `GET /agent-releases/<version>` returns `{ ok: true, version, sha256 }`, read
+  the same way the check above reads it: GitHub's digest of the zip and the
+  `.sha256` file, which must agree when both exist, and at least one must. No
+  hash, a digest and a file that disagree, or a release GitHub can't be asked
+  about is an error (`release-has-no-hash`, `hash-mismatch`,
+  `release-not-found`, `release-check-failed`), never a guess or an empty list.
+
+Both are read-only and need what `POST /agent-target` needs: a valid Access
+token from the admin or Vitals app, an email in `FLEET_CONTROL_EDITORS`, and
+the `GITHUB_TOKEN` secret. `POST /agent-target` still receives and re-checks
+`{ version, sha256 }`, so what the editor was shown is what gets saved, and a
+release that changed in between is refused with `hash-mismatch`.
+
+**A unit that refused a target** (bad hash, damaged zip, rolled back after
+its new build failed, or five failed downloads) doesn't try it again until its
+target changes. To make it retry, clear the target or set another one, let the
+unit check in, then set the target again. A download that fails for another
+reason (the network, a full disk, a slot in use) is retried on its own after
+about 1 h, 2 h, 4 h and 8 h (each up to half again, at random). The fifth
+failed try gives up, with `agent_update_error` starting "gave up after 5
+failed tries". A unit fetches a new target after a random wait of up to an
+hour, so a fleet pin reaches every unit within about an hour, not at once.
+
+Setup for the endpoint, all on `pulse-checkin-admin`:
+
+- `ACCESS_AUD`: the admin app's AUD tag **and** Pulse Vitals' Access app AUD tag,
+  comma separated. Tokens of any other audience are refused.
+- Secret `FLEET_CONTROL_EDITORS` (`npx wrangler secret put FLEET_CONTROL_EDITORS --env admin`):
+  comma-separated emails that may change the target. A secret, not a variable in
+  `wrangler.toml`, because this repo is public and a deploy overwrites a plain
+  variable of the same name.
+- Secret `GITHUB_TOKEN` (`npx wrangler secret put GITHUB_TOKEN --env admin`;
+  a fine-grained token with read-only access to public repositories is
+  enough). Required to set a target: without it the endpoint answers
+  `500 not-configured`, because Workers share egress IPs and GitHub allows 60
+  anonymous calls an hour per IP.
+- In Vitals' `wrangler.toml`: `[[services]] binding = "CHECKIN_ADMIN"`,
+  `service = "pulse-checkin-admin"`.
+
+Break-glass, by hand (no release check, no log row; prefer the endpoint):
+
 ```bash
-# move the fleet to 0.2.0 (sha256 of that release's zip)
-npx wrangler d1 execute pulse-checkins --remote --command "UPDATE monitor_control SET agent_version='0.2.0', agent_sha256='<64 hex>', note='why', updated_at=datetime('now') WHERE scope='fleet'"
-# one unit first, or one unit held back
-npx wrangler d1 execute pulse-checkins --remote --command "INSERT INTO monitor_control (scope, agent_version, agent_sha256, note, updated_at) VALUES ('<venue id>', '0.2.0', '<64 hex>', 'why', datetime('now')) ON CONFLICT (scope) DO UPDATE SET agent_version=excluded.agent_version, agent_sha256=excluded.agent_sha256, note=excluded.note, updated_at=excluded.updated_at"
+# move the fleet to 0.2.0 (sha256 of that release's zip); for one unit first,
+# or one unit held back, use its venue id (else VPU name) as the scope
+npx wrangler d1 execute pulse-checkins --remote --command "INSERT INTO agent_target (scope, version, sha256, note, set_at) VALUES ('fleet', '0.2.0', '<64 hex>', 'why', datetime('now')) ON CONFLICT (scope) DO UPDATE SET version=excluded.version, sha256=excluded.sha256, note=excluded.note, set_by=NULL, set_at=excluded.set_at"
 # stop moving anyone (a rollback is setting the old version back)
-npx wrangler d1 execute pulse-checkins --remote --command "UPDATE monitor_control SET agent_version=NULL, agent_sha256=NULL, updated_at=datetime('now') WHERE scope='fleet'"
+npx wrangler d1 execute pulse-checkins --remote --command "DELETE FROM agent_target WHERE scope='fleet'"
 ```
 
 What each unit runs and how its last update went are in `unit_latest`
 (`agent_version`, `agent_update_status`, `agent_update_version`,
 `agent_update_error`). Apply migration 0017 before deploying this Worker: it
-writes those columns.
+writes those columns. Apply 0020 before deploying either Worker from PV-85
+on: the ingest reads pins from `agent_target` and the admin Worker writes it.
 
 This is the lesson from Canopy Leaf's rollout: its memory leak took four months
 of hand-edited cron jobs to find (#leaf-deploy-coordination). Each monitor
