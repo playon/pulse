@@ -33,6 +33,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - The readiness line no longer says "No risks tonight" right after "1 thing is stopping tonight's game". When something is stopping the game it leaves out the risk count unless there are risks.
 - Pulse now refuses requests that another web page open in the browser on the VPU makes to it. Before, a page could have triggered a reboot, a service restart or an update just by being open. Pulse's own page works as before, at `localhost` or `127.0.0.1`, on any port. A request that arrives under any other hostname, or from any other origin, is refused with "only answers requests from its own page".
 
+### Fixed
+- Camera Connectivity: an Intel I210 camera card is now labelled "ADLINK GIE74-series" instead of always "GIE74P". Pulse can't tell a GIE74 from a GIE74P, and it had been calling GIE74 cards GIE74P.
+- Camera Connectivity: when the PoE card won't report its power budget, the message no longer blames only the driver. It now says the card's PoE controller may not be responding, and tells you to check the card's Molex power lead first. If cameras still get no power after that, treat it as a card fault.
+
 ## [1.4.1] - 2026-10-13
 
 ### Changed

@@ -12,7 +12,7 @@
 
     Three gates, cheapest first, so an unsupported box never loads the driver:
 
-      1. NIC model. Only the Intel I210 / I211 (ADLINK GIE74P) expose PoE
+      1. NIC model. Only the Intel I210 / I211 (ADLINK GIE74 / GIE74P) expose PoE
          telemetry. The 82574L (GIE64) and I350 / I354 (GIE74P-AN) do not --
          Register_Card either fails or hangs on those, so we never call it.
       2. SmartPoE.dll presence. It ships with the ADLINK driver bundle, NOT
@@ -43,7 +43,7 @@
 
 $ErrorActionPreference = "Stop"
 
-# Port count on the GIE74P PSE controller. Card index is always 0 -- the VPU
+# Port count on the GIE74-series PSE controller. Card index is always 0 -- the VPU
 # chassis has one PoE NIC.
 $PortCount = 4
 $CardNum   = 0
@@ -128,12 +128,29 @@ function Get-AdlinkCardInfo {
     $desc  = if ($nics.Count -gt 0) { [string]$nics[0].InterfaceDescription } else { "" }
     $count = $nics.Count
 
+    # I210 / I211 cards are labelled "GIE74-series", never "GIE74P". The fleet
+    # carries three I210 x4 variants that the NIC model cannot tell apart
+    # (from POEControler -diagnostic on Linux units, 2026-09-30):
+    #   PCIe-GIE74,  PCB rev 1, MCU 1.14, CPLD 20160718_1110
+    #   PCIe-GIE74P, PCB rev 4, MCU 1.14
+    #   PCIe-GIE74P, PCB rev 4, MCU 2.0
+    # Calling them all GIE74P mislabelled a GIE74 on vpu-home. Windows cannot
+    # reliably name the variant either (checked 2026-10-14):
+    #   - SmartPoE_Get_ProductName / Get_DeviceInfo exist only in library
+    #     1.3.5. System32 holds 1.1.2 on VPU2 and lab-z2 (no such exports) but
+    #     1.3.5 on vpu-home, so availability varies per unit. ProductName also
+    #     returns a bare int whose mapping is only in ADLINK's manual, which is
+    #     not on the box. Unmapped and untested on an I210 card, so not called.
+    #   - Get_MCUVersion exists in both, but MCU 1.14 is shared by a GIE74 and
+    #     a GIE74P, so it cannot separate them.
+    #   - The ADLINK bundle writes nothing under HKLM\SOFTWARE\ADLINK.
+    # So name the family, not the variant.
     if ($desc -like "*82574L*") {
         [pscustomobject]@{ Model = "82574L"; Label = "ADLINK GIE64 (Intel 82574L x$count)";    Supported = $false }
     } elseif ($desc -like "*I210*") {
-        [pscustomobject]@{ Model = "I210";   Label = "ADLINK GIE74P (Intel I210 x$count)";     Supported = $true  }
+        [pscustomobject]@{ Model = "I210";   Label = "ADLINK GIE74-series (Intel I210 x$count)"; Supported = $true  }
     } elseif ($desc -like "*I211*") {
-        [pscustomobject]@{ Model = "I211";   Label = "ADLINK GIE74P (Intel I211 x$count)";     Supported = $true  }
+        [pscustomobject]@{ Model = "I211";   Label = "ADLINK GIE74-series (Intel I211 x$count)"; Supported = $true  }
     } elseif ($desc -like "*I350*") {
         [pscustomobject]@{ Model = "I350";   Label = "ADLINK GIE74P-AN (Intel I350 x$count)";  Supported = $false }
     } elseif ($desc -like "*I354*") {
@@ -153,7 +170,7 @@ if (-not $card.Supported) {
         "I350"   { "Power draw can't be measured on this camera card (ADLINK GIE74P-AN, Intel I350). The ports still deliver power." }
         "I354"   { "Power draw can't be measured on this camera card (ADLINK GIE74P-AN, Intel I354). The ports still deliver power." }
         "None"   { "No camera card was detected (Intel I210 / I211 / I350 / 82574L), so there is no power draw to measure." }
-        default  { "PoE power telemetry requires an ADLINK GIE74P card (Intel I210 or I211). This system reports: $($card.Label)" }
+        default  { "PoE power telemetry requires an ADLINK GIE74-series card (Intel I210 or I211). This system reports: $($card.Label)" }
     }
     Write-PoeJson (New-PoeResult -Supported $false -Available $false `
         -NicModel $card.Model -CardLabel $card.Label -Reason $reason)
@@ -337,11 +354,21 @@ try {
     $rcLeft = [Pulse.AdlinkPoE]::SmartPoE_Get_POELeftPowbudget([uint16]$CardNum, [ref]$remaining)
     $rcTemp = [Pulse.AdlinkPoE]::SmartPoE_Get_Temperature([uint16]$CardNum, [ref]$tempC)
 
+    # Error codes come from ADLINK's SmartPoE.h / SmartPoE.cs (GIE Series
+    # Include folder). -50 is PoE_ErrorOverTemperature. -51 is NOT in either
+    # header, so its meaning is unknown. It was seen on a GIE74 whose PSE was
+    # confirmed dead (vpu-home, 2026-09-30: no PoE on any port for S3, S2 or
+    # OCR devices, Molex connected), so the copy must not send a tech chasing
+    # drivers alone -- it names both causes and the physical check first.
     if ($rcCons -ne 0 -or $rcLeft -ne 0) {
         try { Remove-Item -LiteralPath $SentinelPath -Force -ErrorAction SilentlyContinue } catch { }
+        $budgetReason = "The PoE card was found but would not report its power budget (consumed rc=$rcCons, remaining rc=$rcLeft). Either the card's PoE controller is not responding, or the ADLINK driver does not match this card. Check that the card's Molex power lead is plugged in. If cameras on every port still get no power, treat it as a card fault."
+        if ($rcCons -eq -50 -or $rcLeft -eq -50) {
+            $budgetReason = "The PoE card reports it is over temperature and stopped reporting power (consumed rc=$rcCons, remaining rc=$rcLeft). Check that the VPU's fans are running and its vents are clear."
+        }
         Write-PoeJson (New-PoeResult -Supported $true -Available $false `
             -NicModel $card.Model -CardLabel $card.Label -DllPath $dllPath `
-            -Reason "The PoE card is present but rejected the power-budget read (consumed rc=$rcCons, remaining rc=$rcLeft). The ADLINK driver may not match this card revision.")
+            -Reason $budgetReason)
         exit 0
     }
     # Temperature is non-essential -- a bad rc there drops the reading without
