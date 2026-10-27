@@ -30,6 +30,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - Settings (dev channel only): a **Fleet Monitoring** card. **Opt in this unit** installs the fleet monitor, which checks every 5 minutes whether the VPU is ready to stream and reports to Pulse Vitals. The card shows when it last checked and reported, and **Opt out** removes it. A production launch on the same VPU doesn't affect it.
 
 ### Fixed
+- Pixellot Software tab: a T1000 graphics card is now read as a Turing card with no Pixellot version limit, instead of "unknown architecture", on VPUs where Pulse can't run `nvidia-smi`. The version check passed before; only the wording and the architecture shown change.
 - A VPU missing one of its main cameras (for example 1 of 2 on an S2) now reads FAIL and says it won't stream. Before, it read only as a warning.
 - The readiness line no longer says "No risks tonight" right after "1 thing is stopping tonight's game". When something is stopping the game it leaves out the risk count unless there are risks.
 - Pulse now refuses requests that another web page open in the browser on the VPU makes to it. Before, a page could have triggered a reboot, a service restart or an update just by being open. Pulse's own page works as before, at `localhost` or `127.0.0.1`, on any port. A request that arrives under any other hostname, or from any other origin, is refused with "only answers requests from its own page".
