@@ -3783,6 +3783,7 @@ function renderHardware() {
     <div class="dash-2col">
       <div class="card">
         ${sectionTitle("monitor", "Graphics")}
+        <div id="gpu-driver-panel"></div>
         ${gpus.length ? gpus.map(g => {
           // Dedicated GPU (NVIDIA/AMD with VRAM) gets a green chip; Intel iGPU
           // and others get a muted chip. Pixellot VPUs need at least one dedicated.
@@ -3815,6 +3816,115 @@ function renderHardware() {
     </div>
 
   `;
+  _loadGpuDriverPanel();
+}
+
+// ── Graphics driver check + repair ───────────────────────────
+// Fed by Get-GpuDriverState.ps1 (read-only). When the NVIDIA card has no
+// driver or shows an error, offers Repair-GpuDriver.ps1: Pixellot's approved
+// driver, installed clean. A card Windows cannot see at all gets a rescan and
+// a plain statement that a driver cannot fix it -- never a download.
+var _gpuDriverBusy = false;
+var _gpuDriverResult = null;   // last repair result, kept across re-renders
+
+async function _loadGpuDriverPanel() {
+  var el = document.getElementById("gpu-driver-panel");
+  if (!el) return;
+  if (!_gpuDriverBusy) {
+    el.innerHTML = `<div class="text-xs text-pulse-muted mb-2">Checking the graphics driver…</div>`;
+  }
+  var s = await api("/api/gpu-driver");
+  if (currentPage !== "hardware") return;
+  _renderGpuDriverPanel(s);
+}
+
+function _gpuDriverResultHtml(r) {
+  if (!r) return "";
+  if (r.error) {
+    return `<div class="dh-repair-result-err mt-2">
+      ${svgIcon("alert", 14)} <span><span class="font-semibold">Driver install failed to run.</span>
+      ${esc(r.message || "(no message)")}</span></div>`;
+  }
+  var good = ["installed", "installed-reboot", "rescan-fixed", "not-needed"].indexOf(r.status) !== -1;
+  var steps = (r.steps || []).map(function(st) {
+    return (st.ok ? "OK    " : "FAIL  ") + st.step + ": " + (st.detail || "");
+  }).join("\n");
+  return `<div class="${good ? "dh-repair-result-ok" : "dh-repair-result-err"} mt-2">
+      ${svgIcon(good ? "check" : "alert", 14)} <span>${esc(r.message || r.status)}</span>
+    </div>
+    ${steps ? `<details class="dh-repair-details">
+      <summary class="text-xs text-pulse-muted">What Pulse did${r.durationSec != null ? " · " + esc(String(r.durationSec)) + "s" : ""}</summary>
+      <pre class="dh-repair-output">${esc(steps)}</pre>
+    </details>` : ""}`;
+}
+
+function _renderGpuDriverPanel(s) {
+  var el = document.getElementById("gpu-driver-panel");
+  if (!el) return;
+  var result = _gpuDriverResultHtml(_gpuDriverResult);
+
+  if (!s || s.error) {
+    el.innerHTML = `<div class="dh-repair-result-err mb-2">
+        ${svgIcon("alert", 14)} <span>Could not check the graphics driver: ${esc(s?.message || "no answer")}</span>
+        <button class="btn-outline btn-ol-blue" onclick="_loadGpuDriverPanel()">Retry</button>
+      </div>${result}`;
+    return;
+  }
+
+  if (s.state === "ok") {
+    var d = (s.devices || [])[0] || {};
+    el.innerHTML = `<div class="text-xs text-pulse-muted mb-2">NVIDIA driver installed${d.driverVersion ? " (" + esc(d.driverVersion) + ")" : ""}; Windows reports no error.</div>${result}`;
+    return;
+  }
+  if (s.state === "reboot-needed") {
+    el.innerHTML = `<div class="dh-repair-card mb-2">
+        <div class="dh-repair-title">Restart needed</div>
+        <div class="dh-repair-body">${esc(s.reason)} Restart the VPU; no driver install is needed.</div>
+      </div>${result}`;
+    return;
+  }
+
+  var notDetected = s.state === "not-detected";
+  var title = notDetected ? "Graphics card not detected"
+            : s.state === "no-driver" ? "Graphics card has no driver"
+            : "Graphics card shows an error";
+  var body = notDetected
+    ? s.reason + " Pulse can rescan for it. If it is still missing, a driver cannot fix it: check that the card is seated and powered, and that the BIOS shows it."
+    : s.reason + " Pulse can install Pixellot's approved driver (536.67, about 1 GB). It takes around 10 minutes, the screen may go blank briefly, and a remote session may drop. Don't run it during a live event.";
+  var cmd = notDetected
+    ? "Windows hardware rescan (same as Device Manager: Scan for hardware changes)"
+    : "Invoke-WebRequest …/536.67-desktop-win10-win11-64bit-international-nsd-dch-whql.exe; run it with: -s -clean -noreboot";
+  el.innerHTML = `<div class="dh-repair-card mb-2">
+      <div class="dh-repair-title">${esc(title)}</div>
+      <div class="dh-repair-body">${esc(body)}</div>
+      <div class="dh-repair-cmd font-mono">${esc(cmd)}</div>
+      <button class="btn-outline btn-ol-amber" id="gpu-driver-btn" ${_gpuDriverBusy ? "disabled" : ""}>
+        ${svgIcon(_gpuDriverBusy ? "refresh" : "play", 12)} ${_gpuDriverBusy ? "Working…" : (notDetected ? "Rescan for the card" : "Install the driver")}
+      </button>
+      ${_gpuDriverBusy ? `<div class="text-xs text-pulse-muted mt-2">Working. This can take 10 to 20 minutes. Keep this page open.</div>` : ""}
+    </div>${result}`;
+  var btn = document.getElementById("gpu-driver-btn");
+  if (btn) btn.addEventListener("click", function() { _runGpuDriverRepair(notDetected); });
+}
+
+async function _runGpuDriverRepair(notDetected) {
+  if (_gpuDriverBusy) return;
+  var ok = await confirmAction({
+    title: notDetected ? "Rescan for the graphics card?" : "Install the NVIDIA driver?",
+    body: notDetected
+      ? "Pulse asks Windows to rescan its hardware. Nothing is downloaded unless the card turns up."
+      : "This downloads and installs Pixellot's approved NVIDIA driver. The screen may go blank for a few seconds and a remote session may drop. Do not run it during a live event. Restart the VPU afterward.",
+    confirmLabel: notDetected ? "Rescan" : "Install driver",
+  });
+  if (!ok) return;
+  _gpuDriverBusy = true;
+  _gpuDriverResult = null;
+  var s0 = await api("/api/gpu-driver");
+  _renderGpuDriverPanel(s0);
+  var r = await apiPost("/api/gpu-driver/repair", {});
+  _gpuDriverBusy = false;
+  _gpuDriverResult = r;
+  if (currentPage === "hardware") _loadGpuDriverPanel();
 }
 
 // ── Applications ─────────────────────────────────────────────

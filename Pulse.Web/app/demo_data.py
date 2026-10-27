@@ -399,6 +399,71 @@ def _demo_scoreconnect():
 # through _CAMERA_MODELS, so role / expected-speed resolution — and the
 # Port 2 "degraded" finding (gigabit main camera negotiated to 100 Mbps) —
 # stay intact.
+# Graphics driver state. Healthy by default. PULSE_DEMO_GPU = no-driver |
+# driver-error | not-detected plays a card that needs the driver install; a
+# demo "repair" of the first two flips the state to ok (module state, like
+# the SC III install demo), so the card can be clicked through end to end.
+_gpu_demo_fixed = {"done": False}
+
+
+def _demo_gpu_driver_state():
+    import os
+    want = os.environ.get("PULSE_DEMO_GPU", "").strip().lower()
+    state = want if want in ("no-driver", "driver-error", "not-detected") else "ok"
+    if _gpu_demo_fixed["done"] and state in ("no-driver", "driver-error"):
+        state = "ok"
+    name = "NVIDIA GeForce RTX 3060"
+    row = {"name": name, "deviceId": "PCI\\VEN_10DE&DEV_2503&SUBSYS_00000000&REV_A1\\4&1234&0&0008",
+           "state": state, "errorCode": 0, "problem": None,
+           "driverProvider": "NVIDIA", "driverVersion": "31.0.15.5212"}
+    reasons = {
+        "ok": "The NVIDIA graphics card has its NVIDIA driver and Windows reports no error.",
+        "no-driver": f"Windows sees the NVIDIA card ({name}) but it has no NVIDIA graphics driver.",
+        "driver-error": f"The NVIDIA card ({name}) shows an error in Device Manager: "
+                        "Windows stopped the device because it reported problems. (code 43).",
+        "not-detected": "Windows does not list any NVIDIA graphics card on the PCI bus.",
+    }
+    if state == "no-driver":
+        row.update(errorCode=28, problem="No driver is installed for the device.",
+                   driverProvider=None, driverVersion=None)
+    elif state == "driver-error":
+        row.update(errorCode=43, problem="Windows stopped the device because it reported problems.")
+    devices = [] if state == "not-detected" else [row]
+    return {"state": state, "reason": reasons[state], "devices": devices, "isAdmin": True,
+            "osBuild": 17763, "checkedAt": datetime.now().isoformat()}
+
+
+def _demo_gpu_driver_repair():
+    before = _demo_gpu_driver_state()
+    steps = [{"step": "check card", "ok": True, "detail": before["reason"]}]
+    if before["state"] == "ok":
+        return {"status": "not-needed", "stateBefore": "ok", "stateAfter": "ok", "exitCode": None,
+                "message": "The graphics card already has its driver and shows no error, so nothing was changed.",
+                "installer": "536.67-desktop-win10-win11-64bit-international-nsd-dch-whql.exe",
+                "steps": steps, "durationSec": 0}
+    if before["state"] == "not-detected":
+        steps += [{"step": "rescan for hardware", "ok": True, "detail": "Windows hardware rescan returned code 0 (0 = success)"},
+                  {"step": "check card again", "ok": True, "detail": before["reason"]}]
+        return {"status": "not-detected", "stateBefore": "not-detected", "stateAfter": "not-detected",
+                "exitCode": None,
+                "message": "Windows still does not see an NVIDIA graphics card, so a driver cannot fix this. "
+                           "Nothing was downloaded. Check that the card is seated and its power cable is "
+                           "connected, then check the BIOS shows it. If it is, the card or its slot may be faulty.",
+                "installer": "536.67-desktop-win10-win11-64bit-international-nsd-dch-whql.exe",
+                "steps": steps, "durationSec": 9}
+    _gpu_demo_fixed["done"] = True
+    steps += [{"step": "check disk space", "ok": True, "detail": "212.4 GB free on C:\\"},
+              {"step": "download driver", "ok": True, "detail": "841 MB"},
+              {"step": "verify signature", "ok": True, "detail": "CN=NVIDIA Corporation, O=NVIDIA Corporation"},
+              {"step": "run installer", "ok": True, "detail": "exit code 0"},
+              {"step": "check card after install", "ok": True, "detail": _demo_gpu_driver_state()["reason"]}]
+    return {"status": "installed", "stateBefore": before["state"], "stateAfter": "ok", "exitCode": 0,
+            "message": "The NVIDIA driver is installed and the card shows no error. Restart the VPU "
+                       "before the next event so Pixellot starts cleanly with it.",
+            "installer": "536.67-desktop-win10-win11-64bit-international-nsd-dch-whql.exe",
+            "steps": steps, "durationSec": 412}
+
+
 def _demo_binaries():
     import os
 
@@ -1531,6 +1596,8 @@ DEMO = {
         "findings": [],
         "notes": "Port 9001 is always owned by PID 4 (HTTP.SYS); listener ownership is not a health signal.",
     },
+    "Get-GpuDriverState.ps1": lambda **kw: _demo_gpu_driver_state(),
+    "Repair-GpuDriver.ps1": lambda **kw: _demo_gpu_driver_repair(),
     # Healthy by default (vpu-home's real shape). PULSE_DEMO_BINARIES=libcef
     # plays Bear Grass NC, 2026-10-15: libcef.dll gone from Bin and VPU.exe
     # stuck on the loader dialog.
