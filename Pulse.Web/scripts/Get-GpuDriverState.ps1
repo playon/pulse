@@ -12,11 +12,14 @@
       no-driver      card present, no NVIDIA driver (Device Manager code 28,
                      or only Windows' Basic Display driver)
       driver-error   card present, Device Manager shows another error code
+      disabled       card present but turned off (code 22)
       reboot-needed  card present, code 14 (restart pending)
       not-detected   no NVIDIA display device on the PCI bus at all; a driver
                      cannot fix this (seating, power, BIOS)
 
-    Outputs one JSON object on stdout.
+    approvedDriver is the version Pulse would install for the first card that
+    needs it (null = a card Pixellot has not approved a driver for, so Pulse
+    offers no install). Outputs one JSON object on stdout.
 #>
 [CmdletBinding()]
 param()
@@ -26,13 +29,25 @@ $ErrorActionPreference = 'Stop'
 
 try {
     $s = Get-GpuDriverState
+    $target = @($s.devices | Where-Object { $_.state -ne 'ok' })[0]
+    if (-not $target) { $target = @($s.devices)[0] }
+    $ad = $null
+    if ($target) { $ad = Get-ApprovedDriver $target.deviceId }
+    $approvedVersion = $null
+    $approvedCard    = $null
+    $pciId           = $null
+    if ($ad) { $pciId = $ad.pciId; $approvedVersion = $ad.version; $approvedCard = $ad.card }
+
     [pscustomobject]@{
-        state     = $s.state
-        reason    = $s.reason
-        devices   = $s.devices
-        isAdmin   = (Test-IsAdmin)
-        osBuild   = [Environment]::OSVersion.Version.Build
-        checkedAt = (Get-Date).ToString('o')
+        state          = $s.state
+        reason         = $s.reason
+        devices        = $s.devices
+        pciId          = $pciId
+        approvedDriver = $approvedVersion
+        approvedCard   = $approvedCard
+        isAdmin        = (Test-IsAdmin)
+        osBuild        = [Environment]::OSVersion.Version.Build
+        checkedAt      = (Get-Date).ToString('o')
     } | ConvertTo-Json -Depth 5 -Compress
 }
 catch {

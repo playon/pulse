@@ -3910,12 +3910,22 @@ function _renderGpuDriverPanel(s) {
     return;
   }
   if (k.kind === "install") {
+    // Pulse only installs a driver Pixellot approved for this card model. A
+    // card with no approved driver (approvedDriver null) gets no button.
+    if (!s.approvedDriver) {
+      el.innerHTML = `<div class="dh-repair-card mb-2">
+          <div class="dh-repair-title">${esc(k.title)}</div>
+          <div class="dh-repair-body">${esc(s.reason)} Pulse has no approved driver for this card${s.pciId ? " (PCI ID 10DE:" + esc(s.pciId) + ")" : ""}, so it won't install one. Install the driver Pixellot support approves for this card by hand.</div>
+        </div>${result}`;
+      return;
+    }
+    var ver = s.approvedDriver;
     k.button = "Install the driver";
-    k.confirmTitle = "Install the NVIDIA driver?";
+    k.confirmTitle = "Install NVIDIA driver " + ver + "?";
     k.confirmLabel = "Install driver";
-    k.confirmBody = "This downloads and installs Pixellot's approved NVIDIA driver. The screen may go blank for a few seconds and a remote session may drop. Do not run it during a live event. Restart the VPU afterward.";
-    k.cmd = "Invoke-WebRequest …/536.67-desktop-win10-win11-64bit-international-nsd-dch-whql.exe; run it with: -s -clean -noreboot";
-    k.extra = " Pulse can install Pixellot's approved driver (536.67, about 1 GB). It takes around 10 minutes, the screen may go blank briefly, and a remote session may drop. Don't run it during a live event.";
+    k.confirmBody = "This downloads and installs Pixellot's approved NVIDIA driver (" + ver + ") for this card. The screen may go blank for a few seconds and a remote session may drop. Do not run it during a live event. Restart the VPU afterward.";
+    k.cmd = "Download the " + ver + " installer from software.pixellot.tv; run it with: -s -clean -noreboot";
+    k.extra = " Pulse can install Pixellot's approved driver for this card (" + ver + ", about 1 GB). It takes around 10 minutes, the screen may go blank briefly, and a remote session may drop. Don't run it during a live event.";
   }
   el.innerHTML = `<div class="dh-repair-card mb-2">
       <div class="dh-repair-title">${esc(k.title)}</div>

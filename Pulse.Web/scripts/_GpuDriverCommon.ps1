@@ -147,3 +147,34 @@ namespace Pulse {
     $cr = [Pulse.PnpRescan]::Run()
     return [pscustomobject]@{ ok = ($cr -eq 0); code = $cr }
 }
+
+# Pixellot's approved driver per card, keyed by NVIDIA PCI device ID (the
+# DEV_xxxx in the PnP ID, which is readable even with no driver installed).
+# Only cards in this table get an install: an unknown card FAILS CLOSED
+# (Repair-GpuDriver.ps1 refuses) rather than guessing a driver for it. Add a
+# row when Pixellot approves another card.
+#   GTX 1650 -> 536.67   T1000 -> 576.28   (the versions the fleet is seen running)
+# Device IDs are from the public PCI ID database: 1F82/1F0A/2188 are desktop
+# GTX 1650 variants; 1FB0 (seen on a real T1000 VPU, HP subsystem 12DB) and
+# 1FF0 (T1000 8GB) are T1000. 1650 SUPER (2187) and mobile parts are not listed.
+$script:DriverBaseUrl = 'https://software.pixellot.tv/apps/Drivers/'
+$script:ApprovedDrivers = @(
+    [pscustomobject]@{ pciIds = @('1F82', '1F0A', '2188'); card = 'GeForce GTX 1650'; version = '536.67'
+                       file = '536.67-desktop-win10-win11-64bit-international-nsd-dch-whql.exe' },
+    [pscustomobject]@{ pciIds = @('1FB0', '1FF0'); card = 'T1000'; version = '576.28'
+                       file = '576.28-desktop-win10-win11-64bit-international-dch-whql.exe' }
+)
+
+# Returns $null if the ID has no NVIDIA DEV_xxxx; otherwise an object with
+# known = $false when the card is not in the table.
+function Get-ApprovedDriver([string]$deviceId) {
+    if ($deviceId -notmatch 'VEN_10DE&DEV_([0-9A-Fa-f]{4})') { return $null }
+    $dev = $Matches[1].ToUpper()
+    foreach ($e in $script:ApprovedDrivers) {
+        if ($e.pciIds -contains $dev) {
+            return [pscustomobject]@{ known = $true; pciId = $dev; card = $e.card; version = $e.version
+                                      file = $e.file; url = ($script:DriverBaseUrl + $e.file) }
+        }
+    }
+    return [pscustomobject]@{ known = $false; pciId = $dev; card = $null; version = $null; file = $null; url = $null }
+}

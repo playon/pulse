@@ -1,12 +1,15 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Installs Pixellot's approved NVIDIA graphics driver when the card has no
-    driver or shows an error. Action script: changes system state.
+    Installs Pixellot's approved NVIDIA graphics driver for this card model
+    when the card has no driver or shows an error. Action script: changes system state.
 .DESCRIPTION
     Pulse form of the field one-liner:
-        Invoke-WebRequest <536.67 installer> -OutFile C:\pixellot\downloadedversion\...
+        Invoke-WebRequest <approved installer> -OutFile C:\pixellot\downloadedversion\...
         Start-Process <installer> -ArgumentList "-s -clean -noreboot"
+    The installer is chosen per card by PCI ID (_GpuDriverCommon.ps1:
+    GTX 1650 -> 536.67, T1000 -> 576.28). A card not in that table is refused
+    ('unknown-card') before anything is downloaded.
 
     Differences from the one-liner, each deliberate:
       - Does nothing unless Get-GpuDriverState says the card needs it, so a
@@ -27,14 +30,11 @@
     swaps. -noreboot is kept: the tech chooses when to restart.
 
     Emits one JSON object on stdout. Nothing else may print to stdout.
-.PARAMETER DriverUrl
-    Installer URL. Default is Pixellot's approved 536.67 build.
 .PARAMETER DownloadDir
     Where the installer is saved. Default matches the field procedure.
 #>
 [CmdletBinding()]
 param(
-    [string]$DriverUrl    = 'https://software.pixellot.tv/apps/Drivers/536.67-desktop-win10-win11-64bit-international-nsd-dch-whql.exe',
     [string]$DownloadDir  = 'C:\pixellot\downloadedversion'
 )
 
@@ -43,9 +43,10 @@ $ProgressPreference    = 'SilentlyContinue'
 . (Join-Path $PSScriptRoot '_GpuDriverCommon.ps1')
 
 $t0            = Get-Date
-$installerName = [System.IO.Path]::GetFileName(([Uri]$DriverUrl).AbsolutePath)
-$installerPath = Join-Path $DownloadDir $installerName
-$partialPath   = "$installerPath.download"
+$installerName = $null
+$installerPath = $null
+$partialPath   = $null
+$DriverUrl     = $null
 $minFreeBytes  = 4GB
 $installWaitMs = 20 * 60 * 1000
 $steps         = New-Object System.Collections.ArrayList
@@ -88,7 +89,7 @@ try {
     # One run at a time: the page can be reloaded mid-install, and a second
     # installer on top of the first would corrupt both.
     $installerProc = @(Get-Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.ProcessName -eq [System.IO.Path]::GetFileNameWithoutExtension($installerName) })
+        Where-Object { $_.ProcessName -match '^\d+\.\d+-desktop-win10-win11' })
     $otherRuns = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -match 'Repair-GpuDriver\.ps1' -and $_.ProcessId -ne $PID })
     if ($installerProc.Count -gt 0 -or $otherRuns.Count -gt 0) {
@@ -153,6 +154,23 @@ try {
             return
         }
     }
+
+    # -- Choose the approved driver for THIS card; unknown cards fail closed
+    $target = @($state.devices | Where-Object { $_.state -in @('no-driver', 'driver-error') })[0]
+    $approved = $null
+    if ($target) { $approved = Get-ApprovedDriver $target.deviceId }
+    if (-not $approved -or -not $approved.known) {
+        $idText = 'unknown PCI ID'
+        if ($approved) { $idText = "PCI ID 10DE:$($approved.pciId)" }
+        Add-Step 'choose driver' $false "no approved driver for this card ($idText)"
+        Emit 'unknown-card' "Pulse has no approved driver for this graphics card ($idText), so it installed nothing. Install the driver Pixellot support approves for this card by hand, and ask Pixellot to add this card to Pulse." $before.state $state.state $null
+        return
+    }
+    $DriverUrl     = $approved.url
+    $installerName = $approved.file
+    $installerPath = Join-Path $DownloadDir $installerName
+    $partialPath   = "$installerPath.download"
+    Add-Step 'choose driver' $true "$($approved.card): driver $($approved.version) (PCI ID 10DE:$($approved.pciId))"
 
     # -- Disk space: the download plus what the installer unpacks ----------
     if (-not (Test-Path -LiteralPath $DownloadDir)) {

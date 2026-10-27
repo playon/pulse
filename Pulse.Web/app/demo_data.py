@@ -433,6 +433,9 @@ def _demo_gpu_driver_state():
         row.update(errorCode=22, problem="The device is disabled in Device Manager.")
     devices = [] if state == "not-detected" else [row]
     return {"state": state, "reason": reasons[state], "devices": devices, "isAdmin": True,
+            "pciId": None if state == "not-detected" else "2503",
+            "approvedDriver": None if state == "not-detected" else "536.67",
+            "approvedCard": None if state == "not-detected" else "demo card",
             "osBuild": 17763, "checkedAt": datetime.now().isoformat()}
 
 
