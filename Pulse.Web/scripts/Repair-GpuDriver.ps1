@@ -112,6 +112,29 @@ try {
         Add-Step 'check card again' $true $state.reason
     }
 
+    # A card that is merely turned off needs turning on, not a reinstall.
+    if ($state.state -eq 'disabled') {
+        foreach ($dev in @($state.devices | Where-Object { $_.state -eq 'disabled' })) {
+            try {
+                Enable-PnpDevice -InstanceId $dev.deviceId -Confirm:$false -ErrorAction Stop
+                Add-Step 'turn the card on' $true $dev.name
+            } catch {
+                Add-Step 'turn the card on' $false "$($dev.name): $($_.Exception.Message)"
+            }
+        }
+        Start-Sleep -Seconds 5
+        $state = Get-GpuDriverState
+        Add-Step 'check card again' $true $state.reason
+        if ($state.state -eq 'ok') {
+            Emit 'enabled' 'The graphics card was turned off and is now on, with its driver. Nothing was downloaded. Restart the VPU before the next event.' $before.state $state.state $null
+            return
+        }
+        if ($state.state -eq 'disabled') {
+            Emit 'enable-failed' 'The graphics card is turned off and Pulse could not turn it on. A driver reinstall will not fix that, so nothing was installed. In Device Manager right-click the card and choose Enable device. If that fails, check the BIOS.' $before.state $state.state $null
+            return
+        }
+    }
+
     switch ($state.state) {
         'not-detected' {
             Emit 'not-detected' 'Windows still does not see an NVIDIA graphics card, so a driver cannot fix this. Nothing was downloaded. Check that the card is seated and its power cable is connected, then check the BIOS shows it. If it is, the card or its slot may be faulty.' $before.state $state.state $null

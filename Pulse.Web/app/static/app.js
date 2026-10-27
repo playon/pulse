@@ -3845,7 +3845,7 @@ function _gpuDriverResultHtml(r) {
       ${svgIcon("alert", 14)} <span><span class="font-semibold">Driver install failed to run.</span>
       ${esc(r.message || "(no message)")}</span></div>`;
   }
-  var good = ["installed", "installed-reboot", "rescan-fixed", "not-needed"].indexOf(r.status) !== -1;
+  var good = ["installed", "installed-reboot", "rescan-fixed", "enabled", "not-needed"].indexOf(r.status) !== -1;
   var steps = (r.steps || []).map(function(st) {
     return (st.ok ? "OK    " : "FAIL  ") + st.step + ": " + (st.detail || "");
   }).join("\n");
@@ -3884,38 +3884,55 @@ function _renderGpuDriverPanel(s) {
     return;
   }
 
-  var notDetected = s.state === "not-detected";
-  var title = notDetected ? "Graphics card not detected"
-            : s.state === "no-driver" ? "Graphics card has no driver"
-            : "Graphics card shows an error";
-  var body = notDetected
-    ? s.reason + " Pulse can rescan for it. If it is still missing, a driver cannot fix it: check that the card is seated and powered, and that the BIOS shows it."
-    : s.reason + " Pulse can install Pixellot's approved driver (536.67, about 1 GB). It takes around 10 minutes, the screen may go blank briefly, and a remote session may drop. Don't run it during a live event.";
-  var cmd = notDetected
-    ? "Windows hardware rescan (same as Device Manager: Scan for hardware changes)"
-    : "Invoke-WebRequest …/536.67-desktop-win10-win11-64bit-international-nsd-dch-whql.exe; run it with: -s -clean -noreboot";
+  // Three different fixes, so three different buttons. A state word this code
+  // does not know gets a neutral line and NO button: never default to a
+  // reinstall for something we cannot name.
+  var kinds = {
+    "not-detected": { kind: "rescan", title: "Graphics card not detected", button: "Rescan for the card",
+      confirmTitle: "Rescan for the graphics card?", confirmLabel: "Rescan",
+      confirmBody: "Pulse asks Windows to rescan its hardware. Nothing is downloaded unless the card turns up.",
+      cmd: "Windows hardware rescan (same as Device Manager: Scan for hardware changes)",
+      extra: " Pulse can rescan for it. If it is still missing, a driver cannot fix it: check that the card is seated and powered, and that the BIOS shows it." },
+    "disabled": { kind: "enable", title: "Graphics card is turned off", button: "Turn the card on",
+      confirmTitle: "Turn the graphics card on?", confirmLabel: "Turn on",
+      confirmBody: "Pulse enables the card in Device Manager. No driver is downloaded or installed.",
+      cmd: "Enable-PnpDevice (same as Device Manager: Enable device)",
+      extra: " A driver reinstall will not fix a card that is turned off, so Pulse turns it on instead." },
+    "no-driver": { kind: "install", title: "Graphics card has no driver" },
+    "driver-error": { kind: "install", title: "Graphics card shows an error" },
+  };
+  var k = kinds[s.state];
+  if (!k) {
+    el.innerHTML = `<div class="dh-repair-result-err mb-2">
+        ${svgIcon("alert", 14)} <span>Could not read the graphics driver state (got "${esc(String(s.state))}"). Pulse can't say whether the card is working.</span>
+        <button class="btn-outline btn-ol-blue" onclick="_loadGpuDriverPanel()">Retry</button>
+      </div>${result}`;
+    return;
+  }
+  if (k.kind === "install") {
+    k.button = "Install the driver";
+    k.confirmTitle = "Install the NVIDIA driver?";
+    k.confirmLabel = "Install driver";
+    k.confirmBody = "This downloads and installs Pixellot's approved NVIDIA driver. The screen may go blank for a few seconds and a remote session may drop. Do not run it during a live event. Restart the VPU afterward.";
+    k.cmd = "Invoke-WebRequest …/536.67-desktop-win10-win11-64bit-international-nsd-dch-whql.exe; run it with: -s -clean -noreboot";
+    k.extra = " Pulse can install Pixellot's approved driver (536.67, about 1 GB). It takes around 10 minutes, the screen may go blank briefly, and a remote session may drop. Don't run it during a live event.";
+  }
   el.innerHTML = `<div class="dh-repair-card mb-2">
-      <div class="dh-repair-title">${esc(title)}</div>
-      <div class="dh-repair-body">${esc(body)}</div>
-      <div class="dh-repair-cmd font-mono">${esc(cmd)}</div>
+      <div class="dh-repair-title">${esc(k.title)}</div>
+      <div class="dh-repair-body">${esc(s.reason + k.extra)}</div>
+      <div class="dh-repair-cmd font-mono">${esc(k.cmd)}</div>
       <button class="btn-outline btn-ol-amber" id="gpu-driver-btn" ${_gpuDriverBusy ? "disabled" : ""}>
-        ${svgIcon(_gpuDriverBusy ? "refresh" : "play", 12)} ${_gpuDriverBusy ? "Working…" : (notDetected ? "Rescan for the card" : "Install the driver")}
+        ${svgIcon(_gpuDriverBusy ? "refresh" : "play", 12)} ${_gpuDriverBusy ? "Working…" : esc(k.button)}
       </button>
       ${_gpuDriverBusy ? `<div class="text-xs text-pulse-muted mt-2">Working. This can take 10 to 20 minutes. Keep this page open.</div>` : ""}
     </div>${result}`;
   var btn = document.getElementById("gpu-driver-btn");
-  if (btn) btn.addEventListener("click", function() { _runGpuDriverRepair(notDetected); });
+  if (btn) btn.addEventListener("click", function() { _runGpuDriverRepair(k); });
 }
 
-async function _runGpuDriverRepair(notDetected) {
+async function _runGpuDriverRepair(k) {
   if (_gpuDriverBusy) return;
-  var ok = await confirmAction({
-    title: notDetected ? "Rescan for the graphics card?" : "Install the NVIDIA driver?",
-    body: notDetected
-      ? "Pulse asks Windows to rescan its hardware. Nothing is downloaded unless the card turns up."
-      : "This downloads and installs Pixellot's approved NVIDIA driver. The screen may go blank for a few seconds and a remote session may drop. Do not run it during a live event. Restart the VPU afterward.",
-    confirmLabel: notDetected ? "Rescan" : "Install driver",
-  });
+  var ok = await confirmAction({ title: k.confirmTitle, body: k.confirmBody, confirmLabel: k.confirmLabel });
   if (!ok) return;
   _gpuDriverBusy = true;
   _gpuDriverResult = null;

@@ -409,8 +409,8 @@ _gpu_demo_fixed = {"done": False}
 def _demo_gpu_driver_state():
     import os
     want = os.environ.get("PULSE_DEMO_GPU", "").strip().lower()
-    state = want if want in ("no-driver", "driver-error", "not-detected") else "ok"
-    if _gpu_demo_fixed["done"] and state in ("no-driver", "driver-error"):
+    state = want if want in ("no-driver", "driver-error", "disabled", "not-detected") else "ok"
+    if _gpu_demo_fixed["done"] and state in ("no-driver", "driver-error", "disabled"):
         state = "ok"
     name = "NVIDIA GeForce RTX 3060"
     row = {"name": name, "deviceId": "PCI\\VEN_10DE&DEV_2503&SUBSYS_00000000&REV_A1\\4&1234&0&0008",
@@ -421,6 +421,7 @@ def _demo_gpu_driver_state():
         "no-driver": f"Windows sees the NVIDIA card ({name}) but it has no NVIDIA graphics driver.",
         "driver-error": f"The NVIDIA card ({name}) shows an error in Device Manager: "
                         "Windows stopped the device because it reported problems. (code 43).",
+        "disabled": f"The NVIDIA card ({name}) is turned off in Device Manager.",
         "not-detected": "Windows does not list any NVIDIA graphics card on the PCI bus.",
     }
     if state == "no-driver":
@@ -428,6 +429,8 @@ def _demo_gpu_driver_state():
                    driverProvider=None, driverVersion=None)
     elif state == "driver-error":
         row.update(errorCode=43, problem="Windows stopped the device because it reported problems.")
+    elif state == "disabled":
+        row.update(errorCode=22, problem="The device is disabled in Device Manager.")
     devices = [] if state == "not-detected" else [row]
     return {"state": state, "reason": reasons[state], "devices": devices, "isAdmin": True,
             "osBuild": 17763, "checkedAt": datetime.now().isoformat()}
@@ -436,6 +439,15 @@ def _demo_gpu_driver_state():
 def _demo_gpu_driver_repair():
     before = _demo_gpu_driver_state()
     steps = [{"step": "check card", "ok": True, "detail": before["reason"]}]
+    if before["state"] == "disabled":
+        _gpu_demo_fixed["done"] = True
+        steps += [{"step": "turn the card on", "ok": True, "detail": "NVIDIA GeForce RTX 3060"},
+                  {"step": "check card again", "ok": True, "detail": _demo_gpu_driver_state()["reason"]}]
+        return {"status": "enabled", "stateBefore": "disabled", "stateAfter": "ok", "exitCode": None,
+                "message": "The graphics card was turned off and is now on, with its driver. Nothing was "
+                           "downloaded. Restart the VPU before the next event.",
+                "installer": "536.67-desktop-win10-win11-64bit-international-nsd-dch-whql.exe",
+                "steps": steps, "durationSec": 6}
     if before["state"] == "ok":
         return {"status": "not-needed", "stateBefore": "ok", "stateAfter": "ok", "exitCode": None,
                 "message": "The graphics card already has its driver and shows no error, so nothing was changed.",

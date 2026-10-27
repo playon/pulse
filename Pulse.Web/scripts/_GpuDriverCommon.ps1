@@ -36,14 +36,16 @@ function Get-ProblemText([int]$code) {
 }
 
 # Returns a [pscustomobject]:
-#   state   ok | no-driver | driver-error | reboot-needed | not-detected
+#   state   ok | no-driver | driver-error | disabled | reboot-needed | not-detected
 #   reason  one plain sentence for the state
 #   devices one row per NVIDIA display device the PnP tree lists
-# Throws if the PnP query itself fails: the caller reports that as "could not
-# check", never as "no card".
+# Throws if the PnP query or the driver lookup fails, or if the PnP tree comes
+# back with no devices at all: the caller reports that as "could not check",
+# never as "no card" or "healthy".
 function Get-GpuDriverState {
-    $pnp = @(Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop |
-        Where-Object { $_.PNPDeviceID -like 'PCI\VEN_10DE&*' })
+    $all = @(Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop)
+    if ($all.Count -eq 0) { throw 'Windows returned an empty device list, so the graphics card could not be checked.' }
+    $pnp = @($all | Where-Object { $_.PNPDeviceID -like 'PCI\VEN_10DE&*' })
 
     $rows = New-Object System.Collections.ArrayList
     foreach ($d in $pnp) {
@@ -58,15 +60,13 @@ function Get-GpuDriverState {
 
         $provider = $null
         $version  = $null
-        try {
-            $escaped = $d.PNPDeviceID.Replace('\', '\\')
-            $drv = Get-CimInstance -ClassName Win32_PnPSignedDriver -Filter "DeviceID='$escaped'" -ErrorAction Stop |
-                Select-Object -First 1
-            if ($drv) {
-                $provider = $drv.DriverProviderName
-                $version  = $drv.DriverVersion
-            }
-        } catch { }
+        $escaped = $d.PNPDeviceID.Replace('\', '\\')
+        $drv = Get-CimInstance -ClassName Win32_PnPSignedDriver -Filter "DeviceID='$escaped'" -ErrorAction Stop |
+            Select-Object -First 1
+        if ($drv) {
+            $provider = $drv.DriverProviderName
+            $version  = $drv.DriverVersion
+        }
 
         # Healthy only if no Device Manager error AND NVIDIA's own driver is
         # bound. Windows quietly binds its Basic Display driver to a card with
@@ -74,6 +74,7 @@ function Get-GpuDriverState {
         $nvidiaDriver = ($provider -match 'NVIDIA') -or ((-not $provider) -and ($d.Name -match 'NVIDIA'))
         $state = 'ok'
         if     ($code -eq 14) { $state = 'reboot-needed' }
+        elseif ($code -eq 22) { $state = 'disabled' }
         elseif ($code -eq 28) { $state = 'no-driver' }
         elseif ($code -ne 0)  { $state = 'driver-error' }
         elseif (-not $nvidiaDriver) { $state = 'no-driver' }
@@ -98,10 +99,9 @@ function Get-GpuDriverState {
         }
     }
 
-    # Worst device wins: an installer fixes both no-driver and driver-error, so
-    # the order only decides which sentence the tech reads.
+    # Worst device wins; the order only decides which sentence the tech reads.
     $state = 'ok'
-    foreach ($candidate in @('driver-error', 'no-driver', 'reboot-needed')) {
+    foreach ($candidate in @('driver-error', 'no-driver', 'disabled', 'reboot-needed')) {
         if (@($devices | Where-Object { $_.state -eq $candidate }).Count -gt 0) { $state = $candidate; break }
     }
     $worst = @($devices | Where-Object { $_.state -eq $state })[0]
@@ -109,6 +109,7 @@ function Get-GpuDriverState {
         'ok'            { 'The NVIDIA graphics card has its NVIDIA driver and Windows reports no error.' }
         'no-driver'     { "Windows sees the NVIDIA card ($($worst.name)) but it has no NVIDIA graphics driver." }
         'driver-error'  { "The NVIDIA card ($($worst.name)) shows an error in Device Manager: $($worst.problem) (code $($worst.errorCode))." }
+        'disabled'      { "The NVIDIA card ($($worst.name)) is turned off in Device Manager." }
         'reboot-needed' { "The NVIDIA card ($($worst.name)) is waiting for a restart before it will work." }
     }
     return [pscustomobject]@{ state = $state; reason = $reason; devices = $devices }
