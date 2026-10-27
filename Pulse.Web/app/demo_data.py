@@ -399,23 +399,31 @@ def _demo_scoreconnect():
 # through _CAMERA_MODELS, so role / expected-speed resolution — and the
 # Port 2 "degraded" finding (gigabit main camera negotiated to 100 Mbps) —
 # stay intact.
-# Graphics driver state. Healthy by default. PULSE_DEMO_GPU = no-driver |
-# driver-error | not-detected plays a card that needs the driver install; a
-# demo "repair" of the first two flips the state to ok (module state, like
-# the SC III install demo), so the card can be clicked through end to end.
+# Graphics driver state. Healthy by default. PULSE_DEMO_GPU plays a card that
+# needs a fix: no-driver | driver-error | disabled | not-detected, all on a
+# GTX 1650 (a card Pulse has an approved driver for), or unknown-card, a
+# no-driver T1000 that the allowlist refuses. A demo "repair" of the first
+# three flips the state to ok (module state, like the SC III install demo),
+# so the card can be clicked through end to end.
 _gpu_demo_fixed = {"done": False}
+_GPU_DEMO_INSTALLER = "536.67-desktop-win10-win11-64bit-international-nsd-dch-whql.exe"
 
 
 def _demo_gpu_driver_state():
     import os
     want = os.environ.get("PULSE_DEMO_GPU", "").strip().lower()
-    state = want if want in ("no-driver", "driver-error", "disabled", "not-detected") else "ok"
-    if _gpu_demo_fixed["done"] and state in ("no-driver", "driver-error", "disabled"):
+    scenario = want if want in ("no-driver", "driver-error", "disabled", "not-detected", "unknown-card") else "ok"
+    state = "no-driver" if scenario == "unknown-card" else scenario
+    if _gpu_demo_fixed["done"] and state in ("no-driver", "driver-error", "disabled") and scenario != "unknown-card":
         state = "ok"
-    name = "NVIDIA GeForce RTX 3060"
-    row = {"name": name, "deviceId": "PCI\\VEN_10DE&DEV_2503&SUBSYS_00000000&REV_A1\\4&1234&0&0008",
-           "state": state, "errorCode": 0, "problem": None,
-           "driverProvider": "NVIDIA", "driverVersion": "31.0.15.5212"}
+    if scenario == "unknown-card":
+        name, dev_id, pci_id = "Microsoft Basic Display Adapter", "PCI\\VEN_10DE&DEV_1FB0&SUBSYS_12DB103C&REV_A1\\4&E951959&0&0008", "1FB0/12DB103C"
+        approved, approved_card = None, None
+    else:
+        name, dev_id, pci_id = "NVIDIA GeForce GTX 1650", "PCI\\VEN_10DE&DEV_1F82&SUBSYS_A548174B&REV_A1\\4&1234&0&0008", "1F82/A548174B"
+        approved, approved_card = "536.67", "GeForce GTX 1650"
+    row = {"name": name, "deviceId": dev_id, "state": state, "errorCode": 0, "problem": None,
+           "driverProvider": "NVIDIA", "driverVersion": "31.0.15.3667"}
     reasons = {
         "ok": "The NVIDIA graphics card has its NVIDIA driver and Windows reports no error.",
         "no-driver": f"Windows sees the NVIDIA card ({name}) but it has no NVIDIA graphics driver.",
@@ -432,10 +440,11 @@ def _demo_gpu_driver_state():
     elif state == "disabled":
         row.update(errorCode=22, problem="The device is disabled in Device Manager.")
     devices = [] if state == "not-detected" else [row]
+    gone = state == "not-detected"
     return {"state": state, "reason": reasons[state], "devices": devices, "isAdmin": True,
-            "pciId": None if state == "not-detected" else "2503",
-            "approvedDriver": None if state == "not-detected" else "536.67",
-            "approvedCard": None if state == "not-detected" else "demo card",
+            "pciId": None if gone else pci_id,
+            "approvedDriver": None if gone else approved,
+            "approvedCard": None if gone else approved_card,
             "osBuild": 17763, "checkedAt": datetime.now().isoformat()}
 
 
@@ -444,18 +453,16 @@ def _demo_gpu_driver_repair():
     steps = [{"step": "check card", "ok": True, "detail": before["reason"]}]
     if before["state"] == "disabled":
         _gpu_demo_fixed["done"] = True
-        steps += [{"step": "turn the card on", "ok": True, "detail": "NVIDIA GeForce RTX 3060"},
+        steps += [{"step": "turn the card on", "ok": True, "detail": "NVIDIA GeForce GTX 1650"},
                   {"step": "check card again", "ok": True, "detail": _demo_gpu_driver_state()["reason"]}]
         return {"status": "enabled", "stateBefore": "disabled", "stateAfter": "ok", "exitCode": None,
                 "message": "The graphics card was turned off and is now on, with its driver. Nothing was "
                            "downloaded. Restart the VPU before the next event.",
-                "installer": "536.67-desktop-win10-win11-64bit-international-nsd-dch-whql.exe",
-                "steps": steps, "durationSec": 6}
+                "installer": None, "steps": steps, "durationSec": 6}
     if before["state"] == "ok":
         return {"status": "not-needed", "stateBefore": "ok", "stateAfter": "ok", "exitCode": None,
                 "message": "The graphics card already has its driver and shows no error, so nothing was changed.",
-                "installer": "536.67-desktop-win10-win11-64bit-international-nsd-dch-whql.exe",
-                "steps": steps, "durationSec": 0}
+                "installer": None, "steps": steps, "durationSec": 0}
     if before["state"] == "not-detected":
         steps += [{"step": "rescan for hardware", "ok": True, "detail": "Windows hardware rescan returned code 0 (0 = success)"},
                   {"step": "check card again", "ok": True, "detail": before["reason"]}]
@@ -464,19 +471,27 @@ def _demo_gpu_driver_repair():
                 "message": "Windows still does not see an NVIDIA graphics card, so a driver cannot fix this. "
                            "Nothing was downloaded. Check that the card is seated and its power cable is "
                            "connected, then check the BIOS shows it. If it is, the card or its slot may be faulty.",
-                "installer": "536.67-desktop-win10-win11-64bit-international-nsd-dch-whql.exe",
-                "steps": steps, "durationSec": 9}
+                "installer": None, "steps": steps, "durationSec": 9}
+    if before["approvedDriver"] is None:
+        idText = "PCI ID 10DE:" + before["pciId"]
+        steps += [{"step": "choose driver", "ok": False, "detail": f"no approved driver for this card ({idText})"}]
+        return {"status": "unknown-card", "stateBefore": before["state"], "stateAfter": before["state"],
+                "exitCode": None,
+                "message": f"Pulse has no approved driver for this graphics card ({idText}), so it installed "
+                           "nothing. Install the driver Pixellot support approves for this card by hand, and "
+                           "ask Pixellot to add this card to Pulse.",
+                "installer": None, "steps": steps, "durationSec": 1}
     _gpu_demo_fixed["done"] = True
-    steps += [{"step": "check disk space", "ok": True, "detail": "212.4 GB free on C:\\"},
-              {"step": "download driver", "ok": True, "detail": "841 MB"},
+    steps += [{"step": "choose driver", "ok": True, "detail": "GeForce GTX 1650: driver 536.67 (PCI ID 10DE:1F82/A548174B)"},
+              {"step": "check disk space", "ok": True, "detail": "212.4 GB free on C:\\"},
+              {"step": "download driver", "ok": True, "detail": "645 MB"},
               {"step": "verify signature", "ok": True, "detail": "CN=NVIDIA Corporation, O=NVIDIA Corporation"},
               {"step": "run installer", "ok": True, "detail": "exit code 0"},
               {"step": "check card after install", "ok": True, "detail": _demo_gpu_driver_state()["reason"]}]
     return {"status": "installed", "stateBefore": before["state"], "stateAfter": "ok", "exitCode": 0,
             "message": "The NVIDIA driver is installed and the card shows no error. Restart the VPU "
                        "before the next event so Pixellot starts cleanly with it.",
-            "installer": "536.67-desktop-win10-win11-64bit-international-nsd-dch-whql.exe",
-            "steps": steps, "durationSec": 412}
+            "installer": _GPU_DEMO_INSTALLER, "steps": steps, "durationSec": 412}
 
 
 def _demo_binaries():
