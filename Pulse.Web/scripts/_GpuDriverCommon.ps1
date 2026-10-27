@@ -165,11 +165,14 @@ namespace Pulse {
 #                 (only subsystems 12DB1028, 12DB10DE, 148510DE). A real
 #                 install of it on an HP T1000 (1FB0/12DB103C) changed nothing.
 #
-# T1000 is NOT listed on purpose. The fleet owner says T1000 VPUs run 576.28,
-# but 576.28 cannot install on the HP T1000 above, and 536.67 can install on
-# it without that being Pixellot's approved version. Until a known-working
-# T1000's bound INF/version or explicit approval settles it, every T1000 is
-# refused (fail closed). Add a row then, keyed on the exact subsystem.
+# T1000: only the HP subsystem below is listed. Evidence, 2026-10-27: a VPU
+# that is working today has an "NVIDIA T1000" bound to driver 31.0.15.3667
+# (536.67), hardware ID PCI\VEN_10DE&DEV_1FB0&SUBSYS_12DB103C&REV_A1, the
+# same ID as a unit where the 576.28 installer did nothing. So that exact
+# subsystem is 536.67. The fleet owner has also seen T1000s on 576.28 and is
+# unsure which version is "right", so this row claims no more than "works on
+# that hardware": every OTHER T1000 subsystem is refused (fail closed) until a
+# working unit's bound INF/version, or an explicit approval, says otherwise.
 #
 # GTX 1650 -> 536.67 is the fleet owner's mapping. The three 1650 IDs are from
 # the public PCI ID database, not seen in the fleet. 1650 SUPER (2187), mobile
@@ -177,6 +180,8 @@ namespace Pulse {
 $script:DriverBaseUrl = 'https://software.pixellot.tv/apps/Drivers/'
 $script:ApprovedDrivers = @(
     [pscustomobject]@{ ids = @('DEV_1F82', 'DEV_1F0A', 'DEV_2188'); card = 'GeForce GTX 1650'; version = '536.67'
+                       file = '536.67-desktop-win10-win11-64bit-international-nsd-dch-whql.exe' },
+    [pscustomobject]@{ ids = @('DEV_1FB0&SUBSYS_12DB103C'); card = 'T1000 (HP, subsystem 12DB103C)'; version = '536.67'
                        file = '536.67-desktop-win10-win11-64bit-international-nsd-dch-whql.exe' }
 )
 
