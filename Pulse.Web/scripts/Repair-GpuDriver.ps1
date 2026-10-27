@@ -7,9 +7,9 @@
     Pulse form of the field one-liner:
         Invoke-WebRequest <approved installer> -OutFile C:\pixellot\downloadedversion\...
         Start-Process <installer> -ArgumentList "-s -clean -noreboot"
-    The installer is chosen per card by PCI ID (_GpuDriverCommon.ps1:
-    GTX 1650 -> 536.67, T1000 -> 576.28). A card not in that table is refused
-    ('unknown-card') before anything is downloaded.
+    The installer is chosen per card by PCI ID and subsystem (see the table in
+    _GpuDriverCommon.ps1, each row checked against the package's INF). A card
+    not in that table is refused ('unknown-card') before anything is downloaded.
 
     Differences from the one-liner, each deliberate:
       - Does nothing unless Get-GpuDriverState says the card needs it, so a
