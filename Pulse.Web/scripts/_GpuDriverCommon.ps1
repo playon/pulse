@@ -154,9 +154,12 @@ namespace Pulse {
 # (Repair-GpuDriver.ps1 refuses) rather than guessing a driver for it. Add a
 # row when Pixellot approves another card.
 #   GTX 1650 -> 536.67   T1000 -> 576.28   (the versions the fleet is seen running)
-# Device IDs are from the public PCI ID database: 1F82/1F0A/2188 are desktop
-# GTX 1650 variants; 1FB0 (seen on a real T1000 VPU, HP subsystem 12DB) and
-# 1FF0 (T1000 8GB) are T1000. 1650 SUPER (2187) and mobile parts are not listed.
+# PCI IDs, by source -- keep these separate so the list is not read as more
+# than it is:
+#   observed on a real fleet VPU : 1FB0 (a T1000, HP subsystem 12DB)
+#   from the public PCI ID database only, NOT seen in the fleet:
+#     1F82, 1F0A, 2188 (desktop GTX 1650 variants) and 1FF0 (T1000 8GB)
+# 1650 SUPER (2187) and mobile parts are deliberately not listed.
 $script:DriverBaseUrl = 'https://software.pixellot.tv/apps/Drivers/'
 $script:ApprovedDrivers = @(
     [pscustomobject]@{ pciIds = @('1F82', '1F0A', '2188'); card = 'GeForce GTX 1650'; version = '536.67'
