@@ -402,7 +402,8 @@ def _demo_scoreconnect():
 # Graphics driver state. Healthy by default. PULSE_DEMO_GPU plays a card that
 # needs a fix: no-driver | driver-error | disabled | not-detected, all on a
 # GTX 1650 (a card Pulse has an approved driver for), or unknown-card, a
-# no-driver T1000 that the allowlist refuses. A demo "repair" of the first
+# no-driver T1000 with the Dell subsystem 12DB1028, which is NOT on the list.
+# (The HP T1000, 12DB103C, is approved, so it must not be used here.) A demo "repair" of the first
 # three flips the state to ok (module state, like the SC III install demo),
 # so the card can be clicked through end to end.
 _gpu_demo_fixed = {"done": False}
@@ -417,7 +418,7 @@ def _demo_gpu_driver_state():
     if _gpu_demo_fixed["done"] and state in ("no-driver", "driver-error", "disabled") and scenario != "unknown-card":
         state = "ok"
     if scenario == "unknown-card":
-        name, dev_id, pci_id = "Microsoft Basic Display Adapter", "PCI\\VEN_10DE&DEV_1FB0&SUBSYS_12DB103C&REV_A1\\4&E951959&0&0008", "1FB0/12DB103C"
+        name, dev_id, pci_id = "Microsoft Basic Display Adapter", "PCI\\VEN_10DE&DEV_1FB0&SUBSYS_12DB1028&REV_A1\\4&E951959&0&0008", "1FB0/12DB1028"
         approved, approved_card = None, None
     else:
         name, dev_id, pci_id = "NVIDIA GeForce GTX 1650", "PCI\\VEN_10DE&DEV_1F82&SUBSYS_A548174B&REV_A1\\4&1234&0&0008", "1F82/A548174B"
