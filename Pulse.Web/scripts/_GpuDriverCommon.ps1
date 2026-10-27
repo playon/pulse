@@ -148,36 +148,57 @@ namespace Pulse {
     return [pscustomobject]@{ ok = ($cr -eq 0); code = $cr }
 }
 
-# Pixellot's approved driver per card, keyed by NVIDIA PCI device ID (the
-# DEV_xxxx in the PnP ID, which is readable even with no driver installed).
-# Only cards in this table get an install: an unknown card FAILS CLOSED
-# (Repair-GpuDriver.ps1 refuses) rather than guessing a driver for it. Add a
-# row when Pixellot approves another card.
-#   GTX 1650 -> 536.67   T1000 -> 576.28   (the versions the fleet is seen running)
-# PCI IDs, by source -- keep these separate so the list is not read as more
-# than it is:
-#   observed on a real fleet VPU : 1FB0 (a T1000, HP subsystem 12DB)
-#   from the public PCI ID database only, NOT seen in the fleet:
-#     1F82, 1F0A, 2188 (desktop GTX 1650 variants) and 1FF0 (T1000 8GB)
-# 1650 SUPER (2187) and mobile parts are deliberately not listed.
+# Pixellot's approved driver per card, keyed by NVIDIA PCI ID as Windows reports
+# it with no driver installed. Only cards in this table get an install: any
+# other card FAILS CLOSED (Repair-GpuDriver.ps1 refuses) rather than guessing.
+#
+# An entry matches 'DEV_xxxx' (any subsystem) or 'DEV_xxxx&SUBSYS_yyyyyyyy'.
+# A row needs TWO things: Pixellot's approval of that driver for that card
+# (from the fleet owner), and the package's own INF listing the card. An INF
+# match alone proves the driver CAN install, not that Pixellot wants it there;
+# and an installer run with -s does nothing, silently, if the package has no
+# section for the card. Checked against the INF files on 2026-10-27:
+#   536.67 (nsd): DEV_1F82, DEV_1F0A, DEV_2188 with no subsystem, so any
+#                 GTX 1650 of those IDs matches. It also lists
+#                 DEV_1FB0&SUBSYS_12DB103C (nvwusig.inf).
+#   576.28:       has NO DEV_1FB0&SUBSYS_12DB103C and no generic DEV_1FB0
+#                 (only subsystems 12DB1028, 12DB10DE, 148510DE). A real
+#                 install of it on an HP T1000 (1FB0/12DB103C) changed nothing.
+#
+# T1000 is NOT listed on purpose. The fleet owner says T1000 VPUs run 576.28,
+# but 576.28 cannot install on the HP T1000 above, and 536.67 can install on
+# it without that being Pixellot's approved version. Until a known-working
+# T1000's bound INF/version or explicit approval settles it, every T1000 is
+# refused (fail closed). Add a row then, keyed on the exact subsystem.
+#
+# GTX 1650 -> 536.67 is the fleet owner's mapping. The three 1650 IDs are from
+# the public PCI ID database, not seen in the fleet. 1650 SUPER (2187), mobile
+# parts and the T1000 8GB (1FF0) are deliberately not listed.
 $script:DriverBaseUrl = 'https://software.pixellot.tv/apps/Drivers/'
 $script:ApprovedDrivers = @(
-    [pscustomobject]@{ pciIds = @('1F82', '1F0A', '2188'); card = 'GeForce GTX 1650'; version = '536.67'
-                       file = '536.67-desktop-win10-win11-64bit-international-nsd-dch-whql.exe' },
-    [pscustomobject]@{ pciIds = @('1FB0', '1FF0'); card = 'T1000'; version = '576.28'
-                       file = '576.28-desktop-win10-win11-64bit-international-dch-whql.exe' }
+    [pscustomobject]@{ ids = @('DEV_1F82', 'DEV_1F0A', 'DEV_2188'); card = 'GeForce GTX 1650'; version = '536.67'
+                       file = '536.67-desktop-win10-win11-64bit-international-nsd-dch-whql.exe' }
 )
 
 # Returns $null if the ID has no NVIDIA DEV_xxxx; otherwise an object with
-# known = $false when the card is not in the table.
+# known = $false when the card is not in the table. pciId is 'xxxx' or
+# 'xxxx/yyyyyyyy' (device/subsystem) for messages.
 function Get-ApprovedDriver([string]$deviceId) {
-    if ($deviceId -notmatch 'VEN_10DE&DEV_([0-9A-Fa-f]{4})') { return $null }
+    if ($deviceId -notmatch 'VEN_10DE&DEV_([0-9A-Fa-f]{4})(?:&SUBSYS_([0-9A-Fa-f]{8}))?') { return $null }
     $dev = $Matches[1].ToUpper()
+    $sub = $null
+    if ($Matches[2]) { $sub = $Matches[2].ToUpper() }
+    $keys = @("DEV_$dev")
+    if ($sub) { $keys += "DEV_$dev&SUBSYS_$sub" }
+    $label = $dev
+    if ($sub) { $label = "$dev/$sub" }
     foreach ($e in $script:ApprovedDrivers) {
-        if ($e.pciIds -contains $dev) {
-            return [pscustomobject]@{ known = $true; pciId = $dev; card = $e.card; version = $e.version
-                                      file = $e.file; url = ($script:DriverBaseUrl + $e.file) }
+        foreach ($k in $keys) {
+            if ($e.ids -contains $k) {
+                return [pscustomobject]@{ known = $true; pciId = $label; card = $e.card; version = $e.version
+                                          file = $e.file; url = ($script:DriverBaseUrl + $e.file) }
+            }
         }
     }
-    return [pscustomobject]@{ known = $false; pciId = $dev; card = $null; version = $null; file = $null; url = $null }
+    return [pscustomobject]@{ known = $false; pciId = $label; card = $null; version = $null; file = $null; url = $null }
 }
