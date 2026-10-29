@@ -5134,6 +5134,32 @@ async def api_windows_ubr():
     return await run_ps("Get-WindowsUbr.ps1", timeout=10)
 
 
+@app.get("/api/gpu-driver")
+async def api_gpu_driver():
+    """Whether the NVIDIA card is present, has its driver, and shows no Device
+    Manager error. Never cached: after a repair the page re-reads it, and a
+    25 s-old 'no-driver' would say the repair did nothing."""
+    return await run_ps("Get-GpuDriverState.ps1", timeout=30, use_cache=False)
+
+
+@app.post("/api/gpu-driver/repair")
+async def api_gpu_driver_repair(request: Request):
+    """Installs Pixellot's approved NVIDIA driver when the card has no driver
+    or shows an error (see Repair-GpuDriver.ps1). A healthy card is refused
+    unless the body is {"reinstall": true}, which the Hardware tab sends only
+    after the technician confirms a warning. The ~1 GB download plus a clean
+    install can run past 20 minutes, so the timeout is generous and the call
+    blocks, like the disk repair tools. Never cached: a second click must
+    start a real run."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    reinstall = isinstance(body, dict) and body.get("reinstall") is True
+    args = {"Reinstall": 1} if reinstall else None
+    return await run_ps("Repair-GpuDriver.ps1", args=args, timeout=2700, use_cache=False)
+
+
 @app.get("/api/disk-health")
 async def api_disk_health():
     return await run_ps("Get-DiskHealth.ps1")

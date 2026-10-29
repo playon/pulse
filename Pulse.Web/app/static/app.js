@@ -3783,6 +3783,7 @@ function renderHardware() {
     <div class="dash-2col">
       <div class="card">
         ${sectionTitle("monitor", "Graphics")}
+        <div id="gpu-driver-panel"></div>
         ${gpus.length ? gpus.map(g => {
           // Dedicated GPU (NVIDIA/AMD with VRAM) gets a green chip; Intel iGPU
           // and others get a muted chip. Pixellot VPUs need at least one dedicated.
@@ -3815,6 +3816,186 @@ function renderHardware() {
     </div>
 
   `;
+  _loadGpuDriverPanel();
+}
+
+// ── Graphics driver check + repair ───────────────────────────
+// Fed by Get-GpuDriverState.ps1 (read-only). When the NVIDIA card has no
+// driver or shows an error, offers Repair-GpuDriver.ps1: Pixellot's approved
+// driver, installed clean. A card Windows cannot see at all gets a rescan and
+// a plain statement that a driver cannot fix it -- never a download.
+var _gpuDriverBusy = false;
+var _gpuDriverResult = null;   // last repair result, kept across re-renders
+
+async function _loadGpuDriverPanel() {
+  var el = document.getElementById("gpu-driver-panel");
+  if (!el) return;
+  if (!_gpuDriverBusy) {
+    el.innerHTML = `<div class="text-xs text-pulse-muted mb-2">Checking the graphics driver…</div>`;
+  }
+  var s = await api("/api/gpu-driver");
+  if (currentPage !== "hardware") return;
+  _renderGpuDriverPanel(s);
+}
+
+function _gpuDriverResultHtml(r) {
+  if (!r) return "";
+  if (r.error) {
+    return `<div class="dh-repair-result-err mt-2">
+      ${svgIcon("alert", 14)} <span><span class="font-semibold">Driver install failed to run.</span>
+      ${esc(r.message || "(no message)")}</span></div>`;
+  }
+  var good = ["installed", "installed-reboot", "rescan-fixed", "enabled", "not-needed"].indexOf(r.status) !== -1;
+  var steps = (r.steps || []).map(function(st) {
+    return (st.ok ? "OK    " : "FAIL  ") + st.step + ": " + (st.detail || "");
+  }).join("\n");
+  return `<div class="${good ? "dh-repair-result-ok" : "dh-repair-result-err"} mt-2">
+      ${svgIcon(good ? "check" : "alert", 14)} <span>${esc(r.message || r.status)}</span>
+    </div>
+    ${steps ? `<details class="dh-repair-details">
+      <summary class="text-xs text-pulse-muted">What Pulse did${r.durationSec != null ? " · " + esc(String(r.durationSec)) + "s" : ""}</summary>
+      <pre class="dh-repair-output">${esc(steps)}</pre>
+    </details>` : ""}`;
+}
+
+// The "replace the driver anyway" option: null when Pixellot has approved no
+// driver for this card (Pulse installs nothing else). `working` is true when the
+// card has no fault, false for a turned-off card, which Pulse turns on first.
+function _gpuReinstallKind(s, d, working) {
+  if (!s.approvedDriver) return null;
+  var ver = d.driverVersion ? " (" + d.driverVersion + ")" : "";
+  return {
+    kind: "reinstall", reinstall: true, tone: "danger",
+    confirmTitle: working ? "Replace the working graphics driver?" : "Reinstall the graphics driver?",
+    confirmLabel: "Reinstall anyway",
+    confirmBody: (working
+        ? "The graphics driver on this VPU is working and shows no error" + ver + ". Reinstalling replaces it"
+        : "The graphics card is turned off. Pulse turns it on first, then reinstalls the driver" + ver + ", replacing it")
+      + " with Pixellot's approved driver (" + s.approvedDriver + "), installed clean.\n\n"
+      + "\u2022 It downloads about 1 GB and takes around 10 minutes.\n"
+      + "\u2022 The screen may go blank and a remote session may drop.\n"
+      + "\u2022 The VPU software can't process video while the driver is swapped.\n"
+      + "\u2022 Restart the VPU afterward.\n\n"
+      + "Do not run this during a live event or shortly before one."
+      + (working ? " If the card is working and you aren't fixing a known graphics problem, cancel." : ""),
+  };
+}
+
+function _renderGpuDriverPanel(s) {
+  var el = document.getElementById("gpu-driver-panel");
+  if (!el) return;
+  var result = _gpuDriverResultHtml(_gpuDriverResult);
+
+  if (!s || s.error) {
+    el.innerHTML = `<div class="dh-repair-result-err mb-2">
+        ${svgIcon("alert", 14)} <span>Could not check the graphics driver: ${esc(s?.message || "no answer")}</span>
+        <button class="btn-outline btn-ol-blue" onclick="_loadGpuDriverPanel()">Retry</button>
+      </div>${result}`;
+    return;
+  }
+
+  if (s.state === "ok") {
+    var d = (s.devices || [])[0] || {};
+    var note = `NVIDIA driver installed${d.driverVersion ? " (" + esc(d.driverVersion) + ")" : ""}; Windows reports no error.`;
+    // Reinstall is offered on a working card too, behind a warning: a driver can
+    // be installed and error-free yet still wrong for the VPU software. Only for
+    // a card Pixellot has approved a driver for; Pulse installs nothing else.
+    var rk = _gpuReinstallKind(s, d, true);
+    if (!rk) {
+      el.innerHTML = `<div class="text-xs text-pulse-muted mb-2">${note} Pulse has no approved driver for this card${s.pciId ? " (PCI ID 10DE:" + esc(s.pciId) + ")" : ""}, so it can't reinstall one.</div>${result}`;
+      return;
+    }
+    el.innerHTML = `<div class="text-xs text-pulse-muted mb-2">${note}</div>
+      <button class="btn-outline btn-ol-amber" id="gpu-driver-btn" ${_gpuDriverBusy ? "disabled" : ""}>
+        ${svgIcon(_gpuDriverBusy ? "refresh" : "play", 12)} ${_gpuDriverBusy ? "Working…" : "Reinstall the driver…"}
+      </button>
+      ${_gpuDriverBusy ? `<div class="text-xs text-pulse-muted mt-2">Working. This can take 10 to 20 minutes. Keep this page open.</div>` : ""}
+      ${result}`;
+    var rbtn = document.getElementById("gpu-driver-btn");
+    if (rbtn) rbtn.addEventListener("click", function() { _runGpuDriverRepair(rk); });
+    return;
+  }
+  if (s.state === "reboot-needed") {
+    el.innerHTML = `<div class="dh-repair-card mb-2">
+        <div class="dh-repair-title">Restart needed</div>
+        <div class="dh-repair-body">${esc(s.reason)} Restart the VPU; no driver install is needed.</div>
+      </div>${result}`;
+    return;
+  }
+
+  // Three different fixes, so three different buttons. A state word this code
+  // does not know gets a neutral line and NO button: never default to a
+  // reinstall for something we cannot name.
+  var kinds = {
+    "not-detected": { kind: "rescan", title: "Graphics card not detected", button: "Rescan for the card",
+      confirmTitle: "Rescan for the graphics card?", confirmLabel: "Rescan",
+      confirmBody: "Pulse asks Windows to rescan its hardware. Nothing is downloaded unless the card turns up.",
+      cmd: "Windows hardware rescan (same as Device Manager: Scan for hardware changes)",
+      extra: " Pulse can rescan for it. If it is still missing, a driver cannot fix it: check that the card is seated and powered, and that the BIOS shows it." },
+    "disabled": { kind: "enable", title: "Graphics card is turned off", button: "Turn the card on",
+      confirmTitle: "Turn the graphics card on?", confirmLabel: "Turn on",
+      confirmBody: "Pulse enables the card in Device Manager. No driver is downloaded or installed.",
+      cmd: "Enable-PnpDevice (same as Device Manager: Enable device)",
+      extra: " A driver reinstall will not fix a card that is turned off, so Pulse turns it on instead." },
+    "no-driver": { kind: "install", title: "Graphics card has no driver" },
+    "driver-error": { kind: "install", title: "Graphics card shows an error" },
+  };
+  var k = kinds[s.state];
+  if (!k) {
+    el.innerHTML = `<div class="dh-repair-result-err mb-2">
+        ${svgIcon("alert", 14)} <span>Could not read the graphics driver state (got "${esc(String(s.state))}"). Pulse can't say whether the card is working.</span>
+        <button class="btn-outline btn-ol-blue" onclick="_loadGpuDriverPanel()">Retry</button>
+      </div>${result}`;
+    return;
+  }
+  if (k.kind === "install") {
+    // Pulse only installs a driver Pixellot approved for this card model. A
+    // card with no approved driver (approvedDriver null) gets no button.
+    if (!s.approvedDriver) {
+      el.innerHTML = `<div class="dh-repair-card mb-2">
+          <div class="dh-repair-title">${esc(k.title)}</div>
+          <div class="dh-repair-body">${esc(s.reason)} Pulse has no approved driver for this card${s.pciId ? " (PCI ID 10DE:" + esc(s.pciId) + ")" : ""}, so it won't install one. Install the driver Pixellot support approves for this card by hand.</div>
+        </div>${result}`;
+      return;
+    }
+    var ver = s.approvedDriver;
+    k.button = "Install the driver";
+    k.confirmTitle = "Install NVIDIA driver " + ver + "?";
+    k.confirmLabel = "Install driver";
+    k.confirmBody = "This downloads and installs Pixellot's approved NVIDIA driver (" + ver + ") for this card. The screen may go blank for a few seconds and a remote session may drop. Do not run it during a live event. Restart the VPU afterward.";
+    k.cmd = "Download the " + ver + " installer from software.pixellot.tv; run it with: -s -clean -noreboot";
+    k.extra = " Pulse can install Pixellot's approved driver for this card (" + ver + ", about 1 GB). It takes around 10 minutes, the screen may go blank briefly, and a remote session may drop. Don't run it during a live event.";
+  }
+  // A turned-off card can also be reinstalled: Pulse turns it on first, then installs.
+  var rk2 = k.kind === "enable" ? _gpuReinstallKind(s, (s.devices || [])[0] || {}, false) : null;
+  el.innerHTML = `<div class="dh-repair-card mb-2">
+      <div class="dh-repair-title">${esc(k.title)}</div>
+      <div class="dh-repair-body">${esc(s.reason + k.extra)}</div>
+      <div class="dh-repair-cmd font-mono">${esc(k.cmd)}</div>
+      <button class="btn-outline btn-ol-amber" id="gpu-driver-btn" ${_gpuDriverBusy ? "disabled" : ""}>
+        ${svgIcon(_gpuDriverBusy ? "refresh" : "play", 12)} ${_gpuDriverBusy ? "Working…" : esc(k.button)}
+      </button>
+      ${rk2 && !_gpuDriverBusy ? `<button class="btn-outline btn-ol-muted" id="gpu-driver-reinstall-btn">Reinstall the driver…</button>` : ""}
+      ${_gpuDriverBusy ? `<div class="text-xs text-pulse-muted mt-2">Working. This can take 10 to 20 minutes. Keep this page open.</div>` : ""}
+    </div>${result}`;
+  var btn = document.getElementById("gpu-driver-btn");
+  if (btn) btn.addEventListener("click", function() { _runGpuDriverRepair(k); });
+  var btn2 = document.getElementById("gpu-driver-reinstall-btn");
+  if (btn2 && rk2) btn2.addEventListener("click", function() { _runGpuDriverRepair(rk2); });
+}
+
+async function _runGpuDriverRepair(k) {
+  if (_gpuDriverBusy) return;
+  var ok = await confirmAction({ title: k.confirmTitle, body: k.confirmBody, confirmLabel: k.confirmLabel, tone: k.tone });
+  if (!ok) return;
+  _gpuDriverBusy = true;
+  _gpuDriverResult = null;
+  var s0 = await api("/api/gpu-driver");
+  _renderGpuDriverPanel(s0);
+  var r = await apiPost("/api/gpu-driver/repair", k.reinstall ? { reinstall: true } : {});
+  _gpuDriverBusy = false;
+  _gpuDriverResult = r;
+  if (currentPage === "hardware") _loadGpuDriverPanel();
 }
 
 // ── Applications ─────────────────────────────────────────────

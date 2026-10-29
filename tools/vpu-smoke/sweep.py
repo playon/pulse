@@ -79,6 +79,7 @@ MANIFEST: list[tuple[str, dict, int]] = [
     ("Get-NetworkHealth.ps1", {}, 10),
     ("Test-Traceroute.ps1", {"Target": "pixellot.tv", "MaxHops": 20}, 60),
     ("Get-GpuInfo.ps1", {}, 15),
+    ("Get-GpuDriverState.ps1", {}, 30),
     ("Get-WifiAdapters.ps1", {}, 10),
     ("Test-TlsInspection.ps1", {}, 60),
     ("Get-CameraExpectations.ps1", {}, 10),
