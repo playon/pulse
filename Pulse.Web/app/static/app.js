@@ -628,11 +628,9 @@ function badge(text, type) {
 // nested inside another function, so it was not reachable from here.
 // "OCR" -> the words a tech uses, at the DISPLAY layer only.
 //
-// The data value must not change. `role` comes from Pixellot's cameras.cfg on
-// a real unit and the backend pattern-matches the substring to identify the
-// scoreboard camera at all (main.py:1991, 2390, 2406, and the model table at
-// 445 maps R2SD-G/S5SD-G/E8NC-G to "OCR / Scoreboard"). Renaming it would
-// break camera identification app-wide. So translate on the way out.
+// The data value must not change. `role` comes from the camera model table
+// or the default-IP convention in main.py. The backend pattern-matches "OCR"
+// to identify scoreboard cameras, so translate only on the way out.
 //
 // The variants carry real meaning and are preserved:
 //   OCR        the 100 Mbps scoreboard camera
@@ -938,7 +936,7 @@ const SPLASH_SCRIPT_LABELS = {
   "Get-InstalledSoftware.ps1": "Listing installed software",
   "Get-Services.ps1": "Checking Pixellot services",
   "Test-PixellotInstallState.ps1": "Checking the Pixellot install",
-  "Get-PixellotConfig.ps1": "Reading Pixellot camera configuration",
+  "Get-PixellotConfig.ps1": "Reading Pixellot settings and calibration",
   "Get-PixellotDependencies.ps1": "Checking Pixellot dependencies",
   "Get-NicAdapters.ps1": "Reading camera ports and adapters",
   "Get-NetworkConfig.ps1": "Reading IP, gateway and DNS settings",
@@ -1087,9 +1085,7 @@ function _splashRowState(key) {
   if (key === "scoreconnect") {
     const src = d.scoreboardSource;
     if (src && src.source === "ocr") {
-      return src.ok
-        ? { state: "pass", word: "Pass", detail: "The OCR camera reads the score" + (src.ocrPort ? " (" + src.ocrPort + ")" : "") + ", so ScoreConnect isn't needed", ms }
-        : { state: "warn", word: "Warning", detail: "The OCR camera that reads the score isn't connected", ms };
+      return { state: "pass", word: "Pass", detail: "The OCR camera reads the score" + (src.ocrPort ? " (" + src.ocrPort + ")" : "") + ", so ScoreConnect isn't needed", ms };
     }
     const running = src ? src.scoreConnectRunning : d.reachable !== false;
     if (!running) {
@@ -2263,8 +2259,7 @@ function _ceLocalOnlyTable(localEv) {
 // ── Pixellot Configuration ───────────────────────────────────
 // Local, on-host view of how the Pixellot software has this VPU + cameras
 // configured (NOT the Pixellot Cloud lane). Data: /api/pixellot-config —
-// registry + cameras.cfg + filesystem calibration, with live per-camera
-// firmware/tvMode from the shared CGI probe.
+// registry + filesystem calibration.
 
 const _PC_STALE_DAYS = 180; // calibration older than this is flagged stale
 
@@ -2330,7 +2325,6 @@ function renderPixellotSoftware() {
         <div class="kv-grid">
           ${kvRow("Install Path", installPath)}
           ${kvRow("Dependencies", reg.dependencies || reg.Dependencies)}
-          ${kvRowHtml("cameras.cfg", pc.cameraCfgExists ? badge("Present", "pass") : badge("Missing", "fail"))}
         </div>
       `}
     </div>
@@ -6155,17 +6149,14 @@ function _camHeadPanelHtml(sysInfo) {
       facts + '</div>';
   }
   if (sb) {
-    // Only shown when a scoreboard camera is configured or present: many
-    // venues have none, and the panel must not imply one is missing.
-    var sbConn = sb.connected
-      ? (sb.port || "Connected") + (sb.speedMbps ? " at " + fmtSpeed(sb.speedMbps) : "")
-      : "Not connected";
+    // Only shown when a scoreboard camera is connected: many venues have
+    // none, and detection alone cannot say one is missing.
+    var sbConn = (sb.port || "Connected") + (sb.speedMbps ? " at " + fmtSpeed(sb.speedMbps) : "");
     items += '<div class="cam-head-item">' +
       _camFigHtml(SCOREBOARD_CAMERA.img, SCOREBOARD_CAMERA.w, SCOREBOARD_CAMERA.h, SCOREBOARD_CAMERA.alt) +
       '<div class="cam-head-name">Scoreboard camera</div>' +
       '<div class="orient-caption">Reads the scoreboard for the on-screen score</div>' +
-      _camFactsHtml(sb.configured ? "1 scoreboard camera" : "Not set up",
-                    sbConn, sb.connected ? "status-pass" : "status-warn") +
+      _camFactsHtml("1 scoreboard camera", sbConn, "status-pass") +
       '</div>';
   }
   return '<div class="nic-orient-panel cam-head-panel">' +
@@ -9065,9 +9056,6 @@ function _scNoServiceText(data) {
   if (src.source === "ocr" && src.ok) {
     return "No ScoreConnect service on this VPU. That's expected: the OCR camera"
       + (src.ocrPort ? " on " + src.ocrPort : "") + " reads the score.";
-  }
-  if (src.source === "ocr") {
-    return "No ScoreConnect service on this VPU, and the OCR camera that reads the score isn't connected. Check Camera Connectivity.";
   }
   if (data.error) return typeof data.error === "string" ? data.error : "No ScoreConnect service detected";
   return "No ScoreConnect service detected";
