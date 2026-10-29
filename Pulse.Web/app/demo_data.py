@@ -494,6 +494,10 @@ def _demo_gpu_driver_repair(reinstall=False):
                            "nothing. Install the driver Pixellot support approves for this card by hand, and "
                            "ask Pixellot to add this card to Pulse.",
                 "installer": None, "steps": steps, "durationSec": 1}
+    if before["state"] == "disabled":
+        # Reinstall requested on a turned-off card: the script turns it on first.
+        steps += [{"step": "turn the card on", "ok": True, "detail": "NVIDIA GeForce GTX 1650"},
+                  {"step": "check card again", "ok": True, "detail": "NVIDIA driver installed; Windows reports no error."}]
     _gpu_demo_fixed["done"] = True
     steps += [{"step": "choose driver", "ok": True, "detail": "GeForce GTX 1650: driver 536.67 (PCI ID 10DE:1F82/A548174B)"},
               {"step": "check disk space", "ok": True, "detail": "212.4 GB free on C:\\"},
