@@ -1080,6 +1080,239 @@ class TestReadinessPolicy(unittest.TestCase):
 
 
 
+# ── NVIDIA driver too old ─────────────────────────────────────────────
+class TestNvidiaDriverFloor(unittest.TestCase):
+    """Tecumseh (MI), 2026-09-28, Pixellot 5.37.2: driver 446.14 made VPU.exe
+    die on its first frame (cudaErrorInvalidPtx) every minute. Cameras,
+    processes and GPU all looked fine and Pulse read Game-ready."""
+
+    def _findings(self, driver, vendor="NVIDIA"):
+        return main._compute_findings(
+            identity=_identity("5.37.2"), performance={}, services={}, nics={},
+            hardware={"memory": [{"capacityGB": 16}, {"capacityGB": 16}],
+                      "gpus": [{"name": "Intel(R) UHD Graphics 630", "vendor": "Intel",
+                                "isDedicated": False, "driverVersion": "27.20.100.8190"},
+                               {"name": "NVIDIA GeForce GTX 1650", "vendor": vendor,
+                                "isDedicated": True, "driverVersion": driver}]},
+            gpu_info=_gpu("Turing"),
+        )
+
+    def _old(self, driver, vendor="NVIDIA"):
+        return [f for f in self._findings(driver, vendor) if f["code"] == "gpu-driver-old"]
+
+    def test_release_decoded_from_windows_version(self):
+        self.assertEqual(main._nvidia_driver_release("26.21.14.4614"), (446, 14))
+        self.assertEqual(main._nvidia_driver_release("31.0.15.1694"), (516, 94))
+        self.assertEqual(main._nvidia_driver_release("31.0.15.3667"), (536, 67))
+        self.assertEqual(main._nvidia_driver_release("32.0.15.6094"), (560, 94))
+        self.assertIsNone(main._nvidia_driver_release(None))
+        self.assertIsNone(main._nvidia_driver_release("536.67"))
+
+    def test_tecumseh_driver_flagged(self):
+        found = self._old("26.21.14.4614")
+        self.assertEqual(len(found), 1)
+        self.assertIn("446.14", found[0]["recommendation"])
+        self.assertIn("536.67", found[0]["recommendation"])
+
+    def test_madison_driver_flagged(self):
+        self.assertEqual(len(self._old("31.0.15.1694")), 1)
+
+    def test_repair_bundle_driver_and_newer_pass(self):
+        self.assertEqual(self._old("31.0.15.3667"), [])
+        self.assertEqual(self._old("32.0.15.6094"), [])
+
+    def test_unreadable_version_is_not_flagged(self):
+        self.assertEqual(self._old(None), [])
+        self.assertEqual(self._old(""), [])
+
+    def test_amd_card_not_checked(self):
+        self.assertEqual(self._old("26.21.14.4614", vendor="AMD"), [])
+
+    def test_old_driver_fails_readiness(self):
+        verdict = main._compute_readiness(self._old("26.21.14.4614"))
+        self.assertEqual(verdict["status"], "FAIL")
+
+    def test_missing_gpu_uses_code_not_display_title(self):
+        found = main._compute_findings(
+            _identity("5.37.2"), {}, {}, {}, gpu_info=_gpu("None"),
+            hardware={"gpus": [{"vendor": "Intel", "isDedicated": False}]})
+        codes = [f["code"] for f in found]
+        self.assertIn("gpu-none", codes)
+        self.assertNotIn("gpu-igpu-only", codes)
+
+
+# ── VPU.exe restart loop ──────────────────────────────────────────────
+def _sess(ago, fatal=None, goodbye=False, ended=True, first_frame=True,
+          reason=None, tags=(), driver="446.14", version="5.37.2"):
+    return {"start": "", "startedMinutesAgo": ago, "version": version, "driver": driver,
+            "firstFrame": first_frame, "goodbye": goodbye, "ended": ended,
+            "fatal": fatal, "fatalCount": 1 if fatal else 0,
+            "closeReason": reason, "tags": list(tags)}
+
+
+_PTX = ("Fatal\t| 2026-09-28 08:18:15.065 |CUDA\t|ColorConversions.cu(474)\t|yuvNV12ToBGR\t|"
+        "CUDA function call failed for 'cudaGetLastError()', Error details: {code: 218, "
+        "name: 'cudaErrorInvalidPtx', desc: 'a PTX JIT compilation failed'}")
+_NVML = ("Fatal\t| 2026-09-25 16:12:20.100 |Main\t|main.cpp(123)\t|main\t|Exception while "
+         "querying installed NVIDIA driver: Unable to initialize NVML: error code 6")
+_FAILED_INIT = "Attempt to initialize vpu has failed valid health not present, closing the application to try again"
+
+
+class TestVpuRestartLoop(unittest.TestCase):
+    """Patterns from the field log bundles (Aug-Sep 2026). Tecumseh (MI),
+    2026-09-28: VPU.exe died on every start and Pulse read Game-ready,
+    because a process snapshot always caught a fresh copy running."""
+
+    def _find(self, sessions, running=False, age=None):
+        return main._vpu_restart_findings(
+            {"sessions": sessions, "vpuRunning": running, "vpuStartedMinutesAgo": age})
+
+    def _tecumseh(self):
+        # Crash on first frame, then the agent's failed restart, repeating.
+        return [_sess(12, fatal=_PTX), _sess(11, first_frame=False, reason=_FAILED_INIT),
+                _sess(10, fatal=_PTX), _sess(9, first_frame=False, reason=_FAILED_INIT)]
+
+    def test_tecumseh_loop_is_a_blocker(self):
+        found = self._find(self._tecumseh())
+        self.assertEqual([f["code"] for f in found], ["vpu-restart-loop"])
+        self.assertEqual(found[0]["cause"], "driver-too-old")
+        self.assertIn("536.67", found[0]["recommendation"])
+        self.assertIn("cudaErrorInvalidPtx", found[0]["evidence"])
+        self.assertEqual(main._compute_readiness(found)["status"], "FAIL")
+
+    def test_fresh_driver_running_with_frames_is_recent_not_loop(self):
+        # 10:56, a minute after installing 536.67: running, frames, new driver.
+        sessions = self._tecumseh() + [_sess(1, ended=False, driver="536.67")]
+        found = self._find(sessions, running=True, age=1)
+        self.assertEqual([f["code"] for f in found], ["vpu-restarts-recent"])
+        self.assertEqual(main._compute_readiness(found)["status"], "WARN")
+
+    def test_same_driver_young_run_is_still_a_loop(self):
+        # Nothing changed and the new copy is 1 minute old: not proven.
+        sessions = self._tecumseh() + [_sess(1, ended=False)]
+        found = self._find(sessions, running=True, age=1)
+        self.assertEqual([f["code"] for f in found], ["vpu-restart-loop"])
+
+    def test_clean_run_after_crashes_is_recent(self):
+        sessions = self._tecumseh() + [_sess(5, goodbye=True, driver="536.67",
+                                             reason="AgentGui: stop recorder in manual mode was pressed")]
+        self.assertEqual([f["code"] for f in self._find(sessions)], ["vpu-restarts-recent"])
+
+    def test_manual_stop_without_frames_does_not_count_as_recovery(self):
+        # Tecumseh 10:50: a tech stopped it before the driver was fixed.
+        sessions = self._tecumseh() + [_sess(5, goodbye=True, first_frame=False,
+                                             reason="AgentGui: stop recorder in manual mode was pressed")]
+        self.assertEqual([f["code"] for f in self._find(sessions)], ["vpu-restart-loop"])
+
+    def test_gpu_not_found(self):
+        found = self._find([_sess(a, fatal=_NVML, first_frame=False, driver=None) for a in (5, 4, 3, 2)])
+        self.assertEqual(found[0]["cause"], "gpu-not-found")
+
+    def test_operator_restarts_are_not_crashes(self):
+        # 6385db60 08-21: restart-button clicks while troubleshooting.
+        sessions = [_sess(a, goodbye=True, reason="AgnetGui: restart VPU button was clicked")
+                    for a in (20, 15, 10, 5)]
+        sessions[1].update(goodbye=False)
+        self.assertEqual(self._find(sessions), [])
+
+    def test_idle_close_is_not_a_crash(self):
+        sessions = [_sess(a, reason="Watchdog - As not in event, close App") for a in (50, 30, 10)]
+        self.assertEqual(self._find(sessions), [])
+
+    def test_two_crashes_is_not_a_loop(self):
+        self.assertEqual(self._find(self._tecumseh()[:2]), [])
+
+    def test_old_crashes_age_out(self):
+        sessions = [_sess(a, fatal=_PTX) for a in (90, 80, 70)]
+        self.assertEqual(self._find(sessions), [])
+
+    def test_silent_kills_are_unknown(self):
+        found = self._find([_sess(a) for a in (20, 15, 10)])
+        self.assertEqual(found[0]["cause"], "unknown")
+
+    def test_camera_data_path_beats_pipeline_stall(self):
+        found = self._find([_sess(a, tags=("debayer-stall", "camera-datapath")) for a in (20, 15, 10)])
+        self.assertEqual(found[0]["cause"], "camera-stream")
+        found = self._find([_sess(a, tags=("debayer-stall",)) for a in (20, 15, 10)])
+        self.assertEqual(found[0]["cause"], "pipeline-stall")
+
+    def test_collector_error_is_silent(self):
+        self.assertEqual(main._vpu_restart_findings({"error": True, "message": "x"}), [])
+        self.assertEqual(main._vpu_restart_findings(None), [])
+
+    def test_demo_payload_is_healthy(self):
+        import demo_data
+        self.assertEqual(main._vpu_restart_findings(demo_data.DEMO["Get-VpuRestarts.ps1"]()), [])
+
+
+    def test_same_driver_stable_run_is_recent(self):
+        sessions = [_sess(a, fatal=_PTX) for a in (30, 25, 20)] + [_sess(10, ended=False)]
+        self.assertEqual(self._find(sessions, running=True, age=10)[0]["code"], "vpu-restarts-recent")
+
+    def test_running_session_with_fatal_is_not_recovered(self):
+        sessions = self._tecumseh() + [_sess(1, fatal=_PTX, ended=False, driver="536.67")]
+        self.assertEqual(self._find(sessions, running=True, age=1)[0]["code"], "vpu-restart-loop")
+
+    def test_missing_driver_metadata_is_not_proof_of_fix(self):
+        sessions = self._tecumseh() + [_sess(1, ended=False, driver=None)]
+        self.assertEqual(self._find(sessions, running=True, age=1)[0]["code"], "vpu-restart-loop")
+
+    def test_each_remaining_field_cause(self):
+        for fatal, cause in (("cudaErrorLaunchFailure", "gpu-crashed"),
+                             ("Insufficient memory", "out-of-memory"),
+                             ("Unable to allocate", "out-of-memory"),
+                             ("Can't connect to camera", "camera-connect")):
+            with self.subTest(cause=cause, fatal=fatal):
+                self.assertEqual(self._find([_sess(a, fatal=fatal) for a in (5, 4, 3)])[0]["cause"], cause)
+
+    def test_cause_counts_sessions_and_breaks_ties_in_table_order(self):
+        sessions = [_sess(5, fatal=_PTX), _sess(4, fatal=_NVML), _sess(3, fatal=_NVML)]
+        self.assertEqual(self._find(sessions)[0]["cause"], "gpu-not-found")
+        self.assertEqual(self._find(sessions + [_sess(2, fatal=_PTX)])[0]["cause"], "driver-too-old")
+
+    def test_dashboard_exposes_failed_history_collector(self):
+        dash = main._build_dashboard({}, {}, {}, {}, vpu_restarts={"error": True, "message": "timeout"})
+        self.assertIn("VPU software crash history", dash["sourceErrors"])
+        self.assertFalse([f for f in dash["findings"] if f["code"].startswith("vpu-restart")])
+
+
+class TestVpuRestartIntegration(unittest.IsolatedAsyncioTestCase):
+    async def test_dashboard_monitor_and_telemetry_share_the_finding(self):
+        from unittest.mock import AsyncMock, patch
+        from pulse_agent.engine import engine
+        from pulse_agent import monitor, telemetry
+
+        restarts = {"sessions": [_sess(a, fatal=_PTX) for a in (5, 4, 3)]}
+
+        async def collect(name, *args, **kwargs):
+            return restarts if name == "Get-VpuRestarts.ps1" else {}
+
+        with patch.object(main, "run_ps", side_effect=collect) as run, \
+                patch.object(main, "_probe_all_cameras", AsyncMock(return_value={})):
+            # The scheduled monitor calls this same engine entry point, even
+            # when intrusive port probes are skipped during a live game.
+            for skip in (False, True):
+                dash = await engine._collect_dashboard(skip_intrusive=skip, raw_out={})
+                self.assertIn("vpu-restart-loop", monitor.codes_from_verdict(dash["readiness"]))
+                details = telemetry._build_telemetry(dash, {})
+                self.assertIn("The VPU software keeps crashing", " ".join(details["blockers"]))
+            self.assertEqual(sum(c.args[0] == "Get-VpuRestarts.ps1" for c in run.call_args_list), 2)
+
+    async def test_report_contains_history_and_same_findings(self):
+        from unittest.mock import AsyncMock, patch
+        restarts = {"sessions": [_sess(a, fatal=_PTX) for a in (5, 4, 3)]}
+
+        async def collect(name, *args, **kwargs):
+            return restarts if name == "Get-VpuRestarts.ps1" else {}
+
+        with patch.object(main, "run_ps", side_effect=collect), \
+                patch.object(main, "_run_sc_status", AsyncMock(return_value={})), \
+                patch.object(main, "_probe_all_cameras", AsyncMock(return_value={})):
+            report = await main.build_report()
+        self.assertEqual(report["vpuRestarts"], restarts)
+        self.assertIn("vpu-restart-loop", [f["code"] for f in report["findings"]])
+
+
 # ── Zero cameras must never read PASS ─────────────────────────────────
 class TestNoCamerasNeverPasses(unittest.TestCase):
     """North East (MD) Gym, 2026-09-22, web-v1.3.0: 2 main cameras expected,
@@ -1582,6 +1815,7 @@ _CRITICAL_FINDING_CODES = {
     "disk-critical",
     "disk-smart-prefail",
     "gpu-anomaly",
+    "gpu-driver-old",
     "gpu-none",
     "mem-critical",
     "os-eos-imminent",
@@ -1598,6 +1832,7 @@ _CRITICAL_FINDING_CODES = {
     "graphics-handoff-failed",
     "pixellot-dll-missing",
     "pixellot-start-error",
+    "vpu-restart-loop",
     # port-dns-blocked / port-required-blocked share one emit site.
     "port-dns-blocked",
     "port-required-blocked",

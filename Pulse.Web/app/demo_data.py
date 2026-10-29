@@ -876,6 +876,32 @@ DEMO = {
             # default demo so the dashboard stays narrative-clean.
         ],
     },
+    # Healthy: today's daily test ran and closed cleanly, and VPU.exe has been
+    # up since. To DEMO the crash loop (Tecumseh MI, 2026-09-28, driver
+    # 446.14), add 4+ sessions a minute or two apart, each with firstFrame
+    # True, goodbye False, ended True and fatal set to a line containing
+    # "cudaErrorInvalidPtx".
+    "Get-VpuRestarts.ps1": lambda **kw: {
+        "logsFound": True,
+        "logDir": "C:\\Pixellot\\Data\\Log",
+        "filesScanned": 1,
+        "windowMinutes": 120,
+        "vpuRunning": True,
+        "vpuStartedMinutesAgo": 47.2,
+        "sessionsInWindow": 2,
+        "sessions": [
+            {"start": (datetime.now() - timedelta(minutes=95)).strftime("%Y-%m-%dT%H:%M:%S"),
+             "startedMinutesAgo": 95.0, "version": "5.37.2", "driver": "552.12",
+             "firstFrame": True, "goodbye": True, "ended": True, "fatal": None,
+             "fatalCount": 0, "closeReason": "Watchdog - As not in event, close App", "tags": []},
+            {"start": (datetime.now() - timedelta(minutes=47)).strftime("%Y-%m-%dT%H:%M:%S"),
+             "startedMinutesAgo": 47.2, "version": "5.37.2", "driver": "552.12",
+             "firstFrame": True, "goodbye": False, "ended": False, "fatal": None,
+             "fatalCount": 0, "closeReason": None, "tags": []},
+        ],
+    },
+
+
     "Get-NetworkConfig.ps1": lambda **kw: {
         # Healthy wiring: internet on the motherboard port (onboard I219-LM on
         # PCI bus 0), cameras on the dedicated 4-port NIC card (I210 on PCI buses
