@@ -13,7 +13,9 @@
 
     Differences from the one-liner, each deliberate:
       - Does nothing unless Get-GpuDriverState says the card needs it, so a
-        click on a healthy live VPU cannot reinstall its working driver.
+        click on a healthy live VPU cannot reinstall its working driver. The one
+        exception is -Reinstall 1, which Pulse sends only after the technician
+        confirms a warning that a working driver will be replaced.
       - not-detected: runs a PnP rescan (Device Manager's "Scan for hardware changes") first. If
         Windows still lists no NVIDIA card, stops BEFORE downloading ~1 GB:
         a driver cannot fix a card Windows cannot see.
@@ -32,10 +34,14 @@
     Emits one JSON object on stdout. Nothing else may print to stdout.
 .PARAMETER DownloadDir
     Where the installer is saved. Default matches the field procedure.
+.PARAMETER Reinstall
+    1 = install the approved driver even though the card works (a technician
+    asked for it and confirmed in Pulse). Default 0: a working card is left alone.
 #>
 [CmdletBinding()]
 param(
-    [string]$DownloadDir  = 'C:\pixellot\downloadedversion'
+    [string]$DownloadDir  = 'C:\pixellot\downloadedversion',
+    [int]$Reinstall = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -126,7 +132,7 @@ try {
         Start-Sleep -Seconds 5
         $state = Get-GpuDriverState
         Add-Step 'check card again' $true $state.reason
-        if ($state.state -eq 'ok') {
+        if ($state.state -eq 'ok' -and $Reinstall -eq 0) {
             Emit 'enabled' 'The graphics card was turned off and is now on, with its driver. Nothing was downloaded. Restart the VPU before the next event.' $before.state $state.state $null
             return
         }
@@ -144,10 +150,14 @@ try {
         'ok' {
             if ($before.state -eq 'not-detected') {
                 Emit 'rescan-fixed' 'The rescan found the card and it has its driver. Restart the VPU before the next event.' $before.state $state.state $null
-            } else {
-                Emit 'not-needed' 'The graphics card already has its driver and shows no error, so nothing was changed.' $before.state $state.state $null
+                return
             }
-            return
+            if ($Reinstall -eq 0) {
+                Emit 'not-needed' 'The graphics card already has its driver and shows no error, so nothing was changed.' $before.state $state.state $null
+                return
+            }
+            # Reinstall requested on a working card: carry on to the install below.
+            Add-Step 'reinstall requested' $true 'the card works; reinstalling the approved driver because the technician asked'
         }
         'reboot-needed' {
             Emit 'reboot-needed' 'The graphics card is only waiting for a restart. Restart the VPU; no driver install is needed.' $before.state $state.state $null
@@ -157,6 +167,10 @@ try {
 
     # -- Choose the approved driver for THIS card; unknown cards fail closed
     $target = @($state.devices | Where-Object { $_.state -in @('no-driver', 'driver-error') })[0]
+    if (-not $target -and $Reinstall -ne 0) {
+        # Reinstall on request: the card works, the tech wants the approved driver anyway.
+        $target = @($state.devices | Where-Object { $_.state -eq 'ok' })[0]
+    }
     $approved = $null
     if ($target) { $approved = Get-ApprovedDriver $target.deviceId }
     if (-not $approved -or -not $approved.known) {

@@ -449,10 +449,10 @@ def _demo_gpu_driver_state():
             "osBuild": 17763, "checkedAt": datetime.now().isoformat()}
 
 
-def _demo_gpu_driver_repair():
+def _demo_gpu_driver_repair(reinstall=False):
     before = _demo_gpu_driver_state()
     steps = [{"step": "check card", "ok": True, "detail": before["reason"]}]
-    if before["state"] == "disabled":
+    if before["state"] == "disabled" and not reinstall:
         _gpu_demo_fixed["done"] = True
         steps += [{"step": "turn the card on", "ok": True, "detail": "NVIDIA GeForce GTX 1650"},
                   {"step": "check card again", "ok": True, "detail": _demo_gpu_driver_state()["reason"]}]
@@ -460,10 +460,22 @@ def _demo_gpu_driver_repair():
                 "message": "The graphics card was turned off and is now on, with its driver. Nothing was "
                            "downloaded. Restart the VPU before the next event.",
                 "installer": None, "steps": steps, "durationSec": 6}
-    if before["state"] == "ok":
+    if before["state"] == "ok" and not reinstall:
         return {"status": "not-needed", "stateBefore": "ok", "stateAfter": "ok", "exitCode": None,
                 "message": "The graphics card already has its driver and shows no error, so nothing was changed.",
                 "installer": None, "steps": steps, "durationSec": 0}
+    if before["state"] == "ok":
+        steps += [{"step": "reinstall requested", "ok": True,
+                   "detail": "the card works; reinstalling the approved driver because the technician asked"},
+                  {"step": "choose driver", "ok": True, "detail": "GeForce GTX 1650: driver 536.67 (PCI ID 10DE:1F82/A548174B)"},
+                  {"step": "download driver", "ok": True, "detail": "645 MB"},
+                  {"step": "verify signature", "ok": True, "detail": "CN=NVIDIA Corporation, O=NVIDIA Corporation"},
+                  {"step": "run installer", "ok": True, "detail": "exit code 0"},
+                  {"step": "check card after install", "ok": True, "detail": _demo_gpu_driver_state()["reason"]}]
+        return {"status": "installed", "stateBefore": "ok", "stateAfter": "ok", "exitCode": 0,
+                "message": "The NVIDIA driver is installed and the card shows no error. Restart the VPU "
+                           "before the next event so Pixellot starts cleanly with it.",
+                "installer": _GPU_DEMO_INSTALLER, "steps": steps, "durationSec": 405}
     if before["state"] == "not-detected":
         steps += [{"step": "rescan for hardware", "ok": True, "detail": "Windows hardware rescan returned code 0 (0 = success)"},
                   {"step": "check card again", "ok": True, "detail": before["reason"]}]
@@ -1628,7 +1640,7 @@ DEMO = {
         "notes": "Port 9001 is always owned by PID 4 (HTTP.SYS); listener ownership is not a health signal.",
     },
     "Get-GpuDriverState.ps1": lambda **kw: _demo_gpu_driver_state(),
-    "Repair-GpuDriver.ps1": lambda **kw: _demo_gpu_driver_repair(),
+    "Repair-GpuDriver.ps1": lambda **kw: _demo_gpu_driver_repair(reinstall=int((kw or {}).get("Reinstall", 0)) != 0),
     # Healthy by default (vpu-home's real shape). PULSE_DEMO_BINARIES=libcef
     # plays Bear Grass NC, 2026-10-15: libcef.dll gone from Bin and VPU.exe
     # stuck on the loader dialog.

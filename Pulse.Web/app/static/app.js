@@ -3858,6 +3858,29 @@ function _gpuDriverResultHtml(r) {
     </details>` : ""}`;
 }
 
+// The "replace the driver anyway" option: null when Pixellot has approved no
+// driver for this card (Pulse installs nothing else). `working` is true when the
+// card has no fault, false for a turned-off card, which Pulse turns on first.
+function _gpuReinstallKind(s, d, working) {
+  if (!s.approvedDriver) return null;
+  var ver = d.driverVersion ? " (" + d.driverVersion + ")" : "";
+  return {
+    kind: "reinstall", reinstall: true, tone: "danger",
+    confirmTitle: working ? "Replace the working graphics driver?" : "Reinstall the graphics driver?",
+    confirmLabel: "Reinstall anyway",
+    confirmBody: (working
+        ? "The graphics driver on this VPU is working and shows no error" + ver + ". Reinstalling replaces it"
+        : "The graphics card is turned off. Pulse turns it on first, then reinstalls the driver" + ver + ", replacing it")
+      + " with Pixellot's approved driver (" + s.approvedDriver + "), installed clean.\n\n"
+      + "\u2022 It downloads about 1 GB and takes around 10 minutes.\n"
+      + "\u2022 The screen may go blank and a remote session may drop.\n"
+      + "\u2022 The VPU software can't process video while the driver is swapped.\n"
+      + "\u2022 Restart the VPU afterward.\n\n"
+      + "Do not run this during a live event or shortly before one."
+      + (working ? " If the card is working and you aren't fixing a known graphics problem, cancel." : ""),
+  };
+}
+
 function _renderGpuDriverPanel(s) {
   var el = document.getElementById("gpu-driver-panel");
   if (!el) return;
@@ -3873,7 +3896,23 @@ function _renderGpuDriverPanel(s) {
 
   if (s.state === "ok") {
     var d = (s.devices || [])[0] || {};
-    el.innerHTML = `<div class="text-xs text-pulse-muted mb-2">NVIDIA driver installed${d.driverVersion ? " (" + esc(d.driverVersion) + ")" : ""}; Windows reports no error.</div>${result}`;
+    var note = `NVIDIA driver installed${d.driverVersion ? " (" + esc(d.driverVersion) + ")" : ""}; Windows reports no error.`;
+    // Reinstall is offered on a working card too, behind a warning: a driver can
+    // be installed and error-free yet still wrong for the VPU software. Only for
+    // a card Pixellot has approved a driver for; Pulse installs nothing else.
+    var rk = _gpuReinstallKind(s, d, true);
+    if (!rk) {
+      el.innerHTML = `<div class="text-xs text-pulse-muted mb-2">${note} Pulse has no approved driver for this card${s.pciId ? " (PCI ID 10DE:" + esc(s.pciId) + ")" : ""}, so it can't reinstall one.</div>${result}`;
+      return;
+    }
+    el.innerHTML = `<div class="text-xs text-pulse-muted mb-2">${note}</div>
+      <button class="btn-outline btn-ol-amber" id="gpu-driver-btn" ${_gpuDriverBusy ? "disabled" : ""}>
+        ${svgIcon(_gpuDriverBusy ? "refresh" : "play", 12)} ${_gpuDriverBusy ? "Working…" : "Reinstall the driver…"}
+      </button>
+      ${_gpuDriverBusy ? `<div class="text-xs text-pulse-muted mt-2">Working. This can take 10 to 20 minutes. Keep this page open.</div>` : ""}
+      ${result}`;
+    var rbtn = document.getElementById("gpu-driver-btn");
+    if (rbtn) rbtn.addEventListener("click", function() { _runGpuDriverRepair(rk); });
     return;
   }
   if (s.state === "reboot-needed") {
@@ -3927,6 +3966,8 @@ function _renderGpuDriverPanel(s) {
     k.cmd = "Download the " + ver + " installer from software.pixellot.tv; run it with: -s -clean -noreboot";
     k.extra = " Pulse can install Pixellot's approved driver for this card (" + ver + ", about 1 GB). It takes around 10 minutes, the screen may go blank briefly, and a remote session may drop. Don't run it during a live event.";
   }
+  // A turned-off card can also be reinstalled: Pulse turns it on first, then installs.
+  var rk2 = k.kind === "enable" ? _gpuReinstallKind(s, (s.devices || [])[0] || {}, false) : null;
   el.innerHTML = `<div class="dh-repair-card mb-2">
       <div class="dh-repair-title">${esc(k.title)}</div>
       <div class="dh-repair-body">${esc(s.reason + k.extra)}</div>
@@ -3934,21 +3975,24 @@ function _renderGpuDriverPanel(s) {
       <button class="btn-outline btn-ol-amber" id="gpu-driver-btn" ${_gpuDriverBusy ? "disabled" : ""}>
         ${svgIcon(_gpuDriverBusy ? "refresh" : "play", 12)} ${_gpuDriverBusy ? "Working…" : esc(k.button)}
       </button>
+      ${rk2 && !_gpuDriverBusy ? `<button class="btn-outline btn-ol-muted" id="gpu-driver-reinstall-btn">Reinstall the driver…</button>` : ""}
       ${_gpuDriverBusy ? `<div class="text-xs text-pulse-muted mt-2">Working. This can take 10 to 20 minutes. Keep this page open.</div>` : ""}
     </div>${result}`;
   var btn = document.getElementById("gpu-driver-btn");
   if (btn) btn.addEventListener("click", function() { _runGpuDriverRepair(k); });
+  var btn2 = document.getElementById("gpu-driver-reinstall-btn");
+  if (btn2 && rk2) btn2.addEventListener("click", function() { _runGpuDriverRepair(rk2); });
 }
 
 async function _runGpuDriverRepair(k) {
   if (_gpuDriverBusy) return;
-  var ok = await confirmAction({ title: k.confirmTitle, body: k.confirmBody, confirmLabel: k.confirmLabel });
+  var ok = await confirmAction({ title: k.confirmTitle, body: k.confirmBody, confirmLabel: k.confirmLabel, tone: k.tone });
   if (!ok) return;
   _gpuDriverBusy = true;
   _gpuDriverResult = null;
   var s0 = await api("/api/gpu-driver");
   _renderGpuDriverPanel(s0);
-  var r = await apiPost("/api/gpu-driver/repair", {});
+  var r = await apiPost("/api/gpu-driver/repair", k.reinstall ? { reinstall: true } : {});
   _gpuDriverBusy = false;
   _gpuDriverResult = r;
   if (currentPage === "hardware") _loadGpuDriverPanel();
