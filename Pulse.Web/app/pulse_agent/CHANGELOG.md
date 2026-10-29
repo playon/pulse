@@ -18,6 +18,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Changed
+- A firewall or web filter dropping all or part of a TLS reply now raises the existing filter finding; broadcast services fail readiness, while support-only services keep their non-gating note or warning.
 - A launch check-in the Worker can't take is no longer also posted to the old Google Apps Script sheet. It stays queued on the unit and replays when the Worker is reachable (30 days, 200 entries). A unit whose network blocks `workers.dev` now shows in Vitals only once it can reach it. Nothing about the check-in's fields changed. The Worker still accepts the relay header from builds that have the sheet fallback.
 
 ## [0.2.2] - 2026-10-21

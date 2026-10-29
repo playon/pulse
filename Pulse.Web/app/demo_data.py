@@ -938,8 +938,8 @@ DEMO = {
             {"purpose": "RTMP Fallback", "host": "a.rtmp.youtube.com", "port": 1935, "protocol": "TCP", "status": "pass", "optional": False},
         ]
     },
-    # SSL-inspection detector — every service presents a public-CA cert that
-    # chains to a trusted root. To DEMO the "firewall is intercepting secure
+    # SSL-inspection detector, including the Hoover FortiGate partial-reply
+    # and silent-drop cases below. To DEMO the "firewall is intercepting secure
     # connections" critical (the Kent School District signature: video up,
     # graphics down), flip the singular.live rows: set status "intercepted",
     # trusted False, chainErrors "UntrustedRoot", and issuer/issuerCn/issuerOrg
@@ -960,9 +960,9 @@ DEMO = {
     # scored a green PASS before the tls-filtered finding existed.
     "Test-TlsInspection.ps1": lambda **kw: {
         "results": [
-            {"domain": "singular.live", "purpose": "Singular graphics (apex)", "status": "pass", "trusted": True, "issuer": "CN=WE1, O=Google Trust Services, C=US", "issuerCn": "WE1", "issuerOrg": "Google Trust Services", "subjectCn": "singular.live", "chainErrors": "", "notAfter": "2026-09-28", "latencyMs": round(random.uniform(80, 220), 1), "detail": None, "failureKind": None, "blockPageHost": None, "blockPageUrl": None, "filterVendor": None},
+            {"domain": "singular.live", "purpose": "Singular graphics (apex)", "status": "truncated", "trusted": None, "issuer": None, "issuerCn": None, "issuerOrg": None, "subjectCn": None, "chainErrors": None, "notAfter": None, "latencyMs": 6000, "detail": "Part of the server's reply arrived; the rest was dropped by a firewall or web filter.", "failureKind": "truncated", "rawBytes": 1448, "serverMessages": "ServerHello", "blockPageHost": None, "blockPageUrl": None, "filterVendor": "FortiGuard (Fortinet)"},
             {"domain": "app.singular.live", "purpose": "Singular graphics app", "status": "pass", "trusted": True, "issuer": "CN=WE1, O=Google Trust Services, C=US", "issuerCn": "WE1", "issuerOrg": "Google Trust Services", "subjectCn": "app.singular.live", "chainErrors": "", "notAfter": "2026-09-28", "latencyMs": round(random.uniform(80, 220), 1), "detail": None, "failureKind": None, "blockPageHost": None, "blockPageUrl": None, "filterVendor": None},
-            {"domain": "api.singular.live", "purpose": "Singular graphics API", "status": "pass", "trusted": True, "issuer": "CN=WE1, O=Google Trust Services, C=US", "issuerCn": "WE1", "issuerOrg": "Google Trust Services", "subjectCn": "api.singular.live", "chainErrors": "", "notAfter": "2026-09-28", "latencyMs": round(random.uniform(80, 220), 1), "detail": None, "failureKind": None, "blockPageHost": None, "blockPageUrl": None, "filterVendor": None},
+            {"domain": "api.singular.live", "purpose": "Singular graphics API", "status": "handshake-fail", "trusted": None, "issuer": None, "issuerCn": None, "issuerOrg": None, "subjectCn": None, "chainErrors": None, "notAfter": None, "latencyMs": 6000, "detail": "TCP connected, but no TLS reply arrived. A firewall or web filter may be dropping the handshake.", "failureKind": "dropped", "rawBytes": 0, "serverMessages": "", "blockPageHost": None, "blockPageUrl": None, "filterVendor": "FortiGuard (Fortinet)"},
             {"domain": "datastream.singular.live", "purpose": "Singular graphics data feed", "status": "pass", "trusted": True, "issuer": "CN=WE1, O=Google Trust Services, C=US", "issuerCn": "WE1", "issuerOrg": "Google Trust Services", "subjectCn": "datastream.singular.live", "chainErrors": "", "notAfter": "2026-09-28", "latencyMs": round(random.uniform(80, 220), 1), "detail": None, "failureKind": None, "blockPageHost": None, "blockPageUrl": None, "filterVendor": None},
             {"domain": "service.singular.live", "purpose": "Singular overlay service", "status": "pass", "trusted": True, "issuer": "CN=R11, O=Let's Encrypt, C=US", "issuerCn": "R11", "issuerOrg": "Let's Encrypt", "subjectCn": "service.singular.live", "chainErrors": "", "notAfter": "2026-08-30", "latencyMs": round(random.uniform(80, 220), 1), "detail": None, "failureKind": None, "blockPageHost": None, "blockPageUrl": None, "filterVendor": None},
             {"domain": "pixellot.tv", "purpose": "Pixellot cloud", "status": "pass", "trusted": True, "issuer": "CN=Amazon RSA 2048 M02, O=Amazon, C=US", "issuerCn": "Amazon RSA 2048 M02", "issuerOrg": "Amazon", "subjectCn": "pixellot.tv", "chainErrors": "", "notAfter": "2027-01-12", "latencyMs": round(random.uniform(60, 180), 1), "detail": None, "failureKind": None, "blockPageHost": None, "blockPageUrl": None, "filterVendor": None},
@@ -972,7 +972,7 @@ DEMO = {
             {"domain": "www.python.org", "purpose": "Pulse installer download", "status": "pass", "trusted": True, "issuer": "CN=GlobalSign Atlas R3 DV TLS CA 2025 Q2, O=GlobalSign nv-sa, C=BE", "issuerCn": "GlobalSign Atlas R3 DV TLS CA 2025 Q2", "issuerOrg": "GlobalSign nv-sa", "subjectCn": "www.python.org", "chainErrors": "", "notAfter": "2026-09-07", "latencyMs": round(random.uniform(60, 180), 1), "detail": None, "failureKind": None, "blockPageHost": None, "blockPageUrl": None, "filterVendor": None},
         ],
         "interceptorIssuers": [],
-        "filterVendors": [],
+        "filterVendors": ["FortiGuard (Fortinet)"],
     },
     # LogMeIn service-log scan — the healthy shape: a couple of routine
     # gateway reconnects over the week, zero killed handshakes (a

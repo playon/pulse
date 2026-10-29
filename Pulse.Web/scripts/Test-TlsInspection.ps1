@@ -62,9 +62,9 @@ function Get-FilterBlockSignal {
         gets back: which host serves it, the full block URL, and which vendor
         it belongs to.
     .DESCRIPTION
-        Runs only for hosts whose TLS handshake was reset. The filter that
-        killed 443 normally answers port 80 with a redirect (or a 200/403
-        body) advertising itself, which is what a tech sees when they browse
+        Runs for hosts whose TLS handshake was reset, truncated or dropped.
+        The filter that killed 443 normally answers port 80 with a redirect
+        (or a 200/403 body) advertising itself, which is what a tech sees browsing
         to the domain from the same LAN. Everything here is best-effort: a
         silent filter simply yields nulls and the caller falls back to
         "a filtering device on the venue network".
@@ -138,6 +138,143 @@ function Get-FilterBlockSignal {
     }
 
     return $signal
+}
+
+function Add-U16 {
+    # Cast before shifting: a [byte] left shift loses its high byte on PS 5.1.
+    param($List, [int]$Value)
+    $null = $List.Add([byte](($Value -shr 8) -band 0xFF))
+    $null = $List.Add([byte]($Value -band 0xFF))
+}
+
+function New-ClientHello {
+    # A TLS 1.2 hello with SNI, so the reply can be read without SslStream.
+    param([string]$Sni)
+
+    $nameBytes = [System.Text.Encoding]::ASCII.GetBytes($Sni)
+    $sniData = New-Object System.Collections.Generic.List[byte]
+    Add-U16 $sniData ($nameBytes.Length + 3)
+    $null = $sniData.Add(0)
+    Add-U16 $sniData $nameBytes.Length
+    $null = $sniData.AddRange($nameBytes)
+
+    $grpData = New-Object System.Collections.Generic.List[byte]
+    Add-U16 $grpData 6
+    Add-U16 $grpData 29; Add-U16 $grpData 23; Add-U16 $grpData 24
+    $pfData = New-Object System.Collections.Generic.List[byte]
+    $null = $pfData.Add(1); $null = $pfData.Add(0)
+    $sigData = New-Object System.Collections.Generic.List[byte]
+    $sigPairs = @(0x0403, 0x0503, 0x0401, 0x0501, 0x0804, 0x0805, 0x0201)
+    Add-U16 $sigData ($sigPairs.Count * 2)
+    foreach ($pair in $sigPairs) { Add-U16 $sigData $pair }
+
+    $ext = New-Object System.Collections.Generic.List[byte]
+    foreach ($e in @(@{ t = 0x0000; d = $sniData }, @{ t = 0x000A; d = $grpData },
+                     @{ t = 0x000B; d = $pfData }, @{ t = 0x000D; d = $sigData })) {
+        Add-U16 $ext $e.t
+        Add-U16 $ext $e.d.Count
+        $null = $ext.AddRange($e.d)
+    }
+
+    $body = New-Object System.Collections.Generic.List[byte]
+    $null = $body.Add(3); $null = $body.Add(3)
+    $rand = New-Object byte[] 32
+    (New-Object Random).NextBytes($rand)
+    $null = $body.AddRange($rand)
+    $null = $body.Add(0)
+    $suites = @(0xC02F, 0xC030, 0xC02B, 0xC02C, 0x009C, 0x009D, 0x002F, 0x0035)
+    Add-U16 $body ($suites.Count * 2)
+    foreach ($suite in $suites) { Add-U16 $body $suite }
+    $null = $body.Add(1); $null = $body.Add(0)
+    Add-U16 $body $ext.Count
+    $null = $body.AddRange($ext)
+
+    $hs = New-Object System.Collections.Generic.List[byte]
+    $null = $hs.Add(1)
+    $null = $hs.Add([byte](([int]$body.Count -shr 16) -band 0xFF))
+    $null = $hs.Add([byte](([int]$body.Count -shr 8) -band 0xFF))
+    $null = $hs.Add([byte]([int]$body.Count -band 0xFF))
+    $null = $hs.AddRange($body)
+    $rec = New-Object System.Collections.Generic.List[byte]
+    $null = $rec.Add(0x16); $null = $rec.Add(3); $null = $rec.Add(1)
+    Add-U16 $rec $hs.Count
+    $null = $rec.AddRange($hs)
+    return $rec.ToArray()
+}
+
+function Read-TlsFlight {
+    # Parse complete messages even when a TLS record or message spans TCP reads.
+    # A Certificate header alone is not a complete server flight. Field: Hoover
+    # FortiGate, 2026-09-03: 1,448 of 13,829 reply bytes reached the VPU.
+    param([byte[]]$Bytes)
+    $out = [ordered]@{ rawBytes = $Bytes.Length; messages = ''; complete = $false; handshake = $false; alert = $false }
+    $names = @{ 2 = 'ServerHello'; 11 = 'Certificate'; 12 = 'ServerKeyExchange'; 13 = 'CertificateRequest'; 14 = 'ServerHelloDone' }
+    $hs = New-Object System.Collections.Generic.List[byte]
+    $pos = 0
+    while ($pos + 5 -le $Bytes.Length) {
+        $recLen = ([int]$Bytes[$pos + 3] -shl 8) -bor [int]$Bytes[$pos + 4]
+        if ($Bytes[$pos + 1] -ne 3) { break }
+        if ($Bytes[$pos] -eq 0x15) { $out.alert = $true }
+        if ($Bytes[$pos] -eq 0x16) {
+            $out.handshake = $true
+            $available = [math]::Min($recLen, $Bytes.Length - $pos - 5)
+            for ($i = 0; $i -lt $available; $i++) { $null = $hs.Add($Bytes[$pos + 5 + $i]) }
+        }
+        $pos += 5 + $recLen
+    }
+    $hsBytes = $hs.ToArray()
+    $seen = New-Object System.Collections.Generic.List[string]
+    $pos = 0
+    while ($pos + 4 -le $hsBytes.Length) {
+        $len = ([int]$hsBytes[$pos + 1] -shl 16) -bor ([int]$hsBytes[$pos + 2] -shl 8) -bor [int]$hsBytes[$pos + 3]
+        if ($pos + 4 + $len -gt $hsBytes.Length) { break }
+        $name = $names[[int]$hsBytes[$pos]]
+        if (-not $name) { $name = "type $($hsBytes[$pos])" }
+        $null = $seen.Add($name)
+        $pos += 4 + $len
+    }
+    $out.messages = $seen -join ', '
+    $out.complete = $seen -contains 'ServerHelloDone'
+    return $out
+}
+
+function Test-RawFlight {
+    # SslStream reports the same timeout for no reply and for a partial reply.
+    # Read raw bytes to distinguish them; a failed re-connect is inconclusive.
+    param([string]$Domain, [int]$TimeoutMs = 4000)
+    $out = [ordered]@{ rawBytes = $null; messages = ''; complete = $false; handshake = $false; alert = $false }
+    $tcp = $null
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $connect = $tcp.BeginConnect($Domain, 443, $null, $null)
+        if (-not ($connect.AsyncWaitHandle.WaitOne($TimeoutMs, $false) -and $tcp.Connected)) { return $out }
+        $tcp.EndConnect($connect)
+        $hello = [byte[]](New-ClientHello -Sni $Domain)
+        $stream = $tcp.GetStream()
+        $stream.WriteTimeout = $TimeoutMs
+        $stream.Write($hello, 0, $hello.Length)
+        $stream.Flush()
+        $all = New-Object System.Collections.Generic.List[byte]
+        $buf = New-Object byte[] 8192
+        try {
+            while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+                $stream.ReadTimeout = [math]::Max(1, $TimeoutMs - [int]$sw.ElapsedMilliseconds)
+                $n = $stream.Read($buf, 0, $buf.Length)
+                if ($n -le 0) { break }
+                for ($i = 0; $i -lt $n; $i++) { $null = $all.Add($buf[$i]) }
+                if ($all.Count -gt 60000) { break }
+            }
+        }
+        catch { }
+        $out = Read-TlsFlight -Bytes $all.ToArray()
+    }
+    catch { }
+    finally {
+        $sw.Stop()
+        if ($tcp) { $tcp.Close() }
+    }
+    return $out
 }
 
 try {
@@ -331,20 +468,44 @@ try {
             notAfter    = $notAfter
             latencyMs   = [math]::Round($sw.Elapsed.TotalMilliseconds, 1)
             detail      = $detail
+            rawBytes    = $null
+            serverMessages = $null
             blockPageHost = $blockPageHost
             blockPageUrl  = $blockPageUrl
             filterVendor  = $filterVendor
         }
     }
 
-    # ---- Identify the filter that reset those handshakes ----------------
-    # Only for hosts already classified 'filtered', and only the first three:
-    # a venue runs ONE filter, so three samples name it, and the probe is
-    # capped so a slow network can't push the script past its 60s budget.
-    # Port 80 is deliberate - the same filter that resets 443 almost always
-    # answers plain HTTP with its own block page (that is how the tech's
-    # browser ends up on it), which is where the vendor name lives.
-    $filteredRows = @($results | Where-Object { $_.status -eq 'filtered' })
+    # ---- Did the server's reply get cut off mid-flight? -----------------
+    # A reset already names itself 'filtered'. Re-probe at most three silent
+    # failures, with a 4s raw-flight budget per host.
+    $silentRows = @($results | Where-Object { $_.status -eq 'handshake-fail' })
+    $rawProbed = 0
+    foreach ($row in $silentRows) {
+        if ($rawProbed -ge 3) { break }
+        $rawProbed++
+        $flight = Test-RawFlight -Domain $row.domain
+        $row.rawBytes = $flight.rawBytes
+        $row.serverMessages = $flight.messages
+        if ($flight.handshake -and -not $flight.complete -and -not $flight.alert) {
+            $row.status = 'truncated'
+            $row.failureKind = 'truncated'
+            $row.detail = "Part of the server's reply arrived ($($flight.rawBytes) bytes), then the rest was dropped. A firewall or web filter is cutting off the handshake."
+        }
+        elseif ($null -ne $flight.rawBytes -and $flight.rawBytes -eq 0) {
+            $row.failureKind = 'dropped'
+            $row.detail = 'The TCP connection opened, but no TLS reply arrived. A firewall or web filter may be dropping the handshake.'
+        }
+    }
+
+    # ---- Identify the filter behind the block --------------------------
+    # A silent drop or truncated flight can be the same filter as a reset.
+    # Port 80 is deliberate - that filter often answers plain HTTP with its
+    # own block page, which is where the vendor name lives. Sample three hosts.
+    $filteredRows = @($results | Where-Object {
+        $_.status -eq 'filtered' -or $_.status -eq 'truncated' -or
+        ($_.status -eq 'handshake-fail' -and $_.failureKind -eq 'dropped')
+    })
     $probed = 0
     foreach ($row in $filteredRows) {
         if ($probed -ge 3) { break }
