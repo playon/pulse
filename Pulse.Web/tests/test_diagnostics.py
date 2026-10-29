@@ -1450,6 +1450,76 @@ class TestSupportOnlyTlsFindings(unittest.TestCase):
         self.assertEqual(f[0]["severity"], "warning")
 
 
+class TestDroppedTlsFindings(unittest.TestCase):
+    def _tls(self, domain="singular.live", status="truncated", **kw):
+        row = {"domain": domain, "status": status, "failureKind": "truncated",
+               "rawBytes": 1448, "serverMessages": "ServerHello"}
+        row.update(kw)
+        return {"results": [row], "filterVendors": ["FortiGuard (Fortinet)"]}
+
+    def test_partial_reply_blocks_broadcast_and_names_the_evidence(self):
+        findings = main._tls_findings(self._tls())
+        self.assertEqual([f["code"] for f in findings], ["tls-filtered"])
+        f = findings[0]
+        text = _finding_text(f)
+        for phrase in ("Part of the server's TLS reply arrived", "rest was dropped",
+                       "1448 bytes", "ServerHello", "firewall", "web filter",
+                       "singular.live", "*.singular.live", "SSL-decryption"):
+            self.assertIn(phrase, text)
+        self.assertNotIn("Each connection was reset", text)
+        verdict = main._compute_readiness(findings)
+        self.assertEqual(verdict["status"], "FAIL")
+        self.assertEqual([b["code"] for b in verdict["blockers"]], ["tls-filtered"])
+        # The readiness record feeds the ticket's body and per-host details.
+        self.assertIn("rest was dropped", _finding_text(verdict["blockers"][0]))
+
+    def test_dropped_reply_is_filter_block_not_generic_protocol_failure(self):
+        tls = self._tls(status="handshake-fail", failureKind="dropped", rawBytes=0, serverMessages="")
+        findings = main._tls_findings(tls)
+        self.assertEqual([f["code"] for f in findings], ["tls-filtered"])
+        text = _finding_text(findings[0])
+        self.assertIn("no TLS reply arrived", text)
+        self.assertNotIn("Part of the server's", text)
+        self.assertEqual(main._compute_readiness(findings)["status"], "FAIL")
+
+    def test_support_only_drops_keep_the_existing_non_gating_policy(self):
+        for status, kind in (("truncated", "truncated"), ("handshake-fail", "dropped")):
+            with self.subTest(status=status):
+                findings = main._tls_findings(self._tls("www.python.org", status, failureKind=kind))
+                self.assertEqual([f["code"] for f in findings], ["tls-filtered-support"])
+                self.assertEqual(findings[0]["severity"], "warning")
+                self.assertEqual(main._compute_readiness(findings)["status"], "PASS")
+
+    def test_connected_logmein_keeps_the_support_works_note(self):
+        tls = self._tls("secure.logmein.com", "handshake-fail", failureKind="dropped", rawBytes=0)
+        f = main._tls_findings(tls, {"connectedNow": True, "logsFound": True})[0]
+        self.assertEqual(f["code"], "tls-filtered-support")
+        self.assertEqual(f["severity"], "info")
+        self.assertIn("remote support works", _finding_text(f))
+
+    def test_dropped_reply_does_not_join_a_separate_interception(self):
+        tls = self._tls("api.singular.live", "handshake-fail", failureKind="dropped", rawBytes=0)
+        tls["results"].append({"domain": "singular.live", "status": "intercepted", "issuerCn": "DPI"})
+        findings = {f["code"]: f for f in main._tls_findings(tls)}
+        self.assertEqual(set(findings), {"ssl-inspection", "tls-filtered"})
+        self.assertNotIn("api.singular.live", _finding_text(findings["ssl-inspection"]))
+        self.assertIn("api.singular.live", _finding_text(findings["tls-filtered"]))
+
+    def test_mixed_filter_evidence_does_not_call_every_row_a_reset(self):
+        tls = self._tls()
+        tls["results"].extend([
+            {"domain": "api.singular.live", "status": "filtered", "failureKind": "reset"},
+            {"domain": "app.singular.live", "status": "filtered", "failureKind": "block-page"},
+        ])
+        evidence = main._tls_findings(tls)[0]["evidence"]
+        for phrase in ("rest was dropped", "reset the connection", "block page"):
+            self.assertIn(phrase, evidence)
+
+    def test_protocol_failure_and_failed_collector_are_not_filter_blocks(self):
+        self.assertEqual(main._tls_findings(self._tls(status="handshake-fail", failureKind="protocol")), [])
+        self.assertEqual(main._tls_findings({"error": True}), [])
+
+
 # ── Score source: OCR camera or ScoreConnect (Armstrong IL, 2026-09-28) ──
 # Pulse warned "ScoreConnect not running" on a unit whose OCR camera was
 # connected and reading the board. Only the source in use matters.

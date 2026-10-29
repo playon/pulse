@@ -1828,6 +1828,8 @@ def _tls_findings(tls_inspection, lmi_log=None) -> list:
     out = []
     tls_rows = tls_inspection.get("results") or []
     lmi_connected = _lmi_connected_now(lmi_log)
+    filtered = [r for r in tls_rows if r.get("status") in ("filtered", "truncated")
+                or (r.get("status") == "handshake-fail" and r.get("failureKind") == "dropped")]
 
     # ── SSL inspection (certificate substitution) ──────────────
     # Test-TlsInspection completes a real handshake to each Pixellot-critical
@@ -1870,7 +1872,8 @@ def _tls_findings(tls_inspection, lmi_log=None) -> list:
         })
         intercepted = []
     if intercepted:
-        hs_fail = [r for r in tls_rows if r.get("status") == "handshake-fail"]
+        hs_fail = [r for r in tls_rows if r.get("status") == "handshake-fail"
+                   and r.get("failureKind") != "dropped"]
         issuers = [i for i in (tls_inspection.get("interceptorIssuers") or []) if i]
         # Issuer names carry their own brackets ("Securly Intermediate 2027
         # (Securly, Inc)"), so set the name off with commas, not more brackets.
@@ -1911,18 +1914,10 @@ def _tls_findings(tls_inspection, lmi_log=None) -> list:
             }
         )
 
-    # ── Category / SNI filtering (no certificate substitution) ──
-    # A content filter reads the hostname from the unencrypted SNI field of
-    # the ClientHello and, if the domain sits in a blocked category, resets
-    # the connection outright. Nothing is decrypted, no cert is substituted,
-    # so `intercepted` never fires — the collector marks these rows
-    # `filtered`. Field: Linewize at an Ohio venue 2026-08-19 — eight
-    # Pixellot-critical hosts reset while readiness still read PASS.
-    #
-    # The distinction matters operationally: an SSL-decryption bypass
-    # does NOT fix a category block, and vice versa. Say which one it is.
-    filtered = [r for r in tls_rows if r.get("status") == "filtered"]
-    n_filtered = len(filtered)
+    # Category/SNI filters can reset a connection or silently drop its reply.
+    # Hoover FortiGate (2026-09-03) forwarded only the first 1,448 reply bytes.
+    # Reuse the filter codes: broadcast hosts block readiness; support-only
+    # hosts retain their existing non-gating policy.
     if filtered:
         vendors = [v for v in (tls_inspection.get("filterVendors") or []) if v]
         vendor_txt = " / ".join(vendors)
@@ -1941,23 +1936,47 @@ def _tls_findings(tls_inspection, lmi_log=None) -> list:
             f"The venue's {vendor_txt} web filter" if vendor_txt
             else "A web filter on the venue network"
         )
+        silent = [r for r in filtered if r.get("status") == "truncated"
+                  or r.get("failureKind") == "dropped"]
         it = (
+            f"Check the firewall's drop and inspection rules for {_tls_exempt_list(filtered)}. "
+            f"Add a web-filter/category exception and an SSL-decryption exemption for these domains."
+            if silent else
             f"Add a category exception in the web filter (a URL entry alone won't do it) for "
             f"{_tls_exempt_list(filtered)}. Add the same domains to the SSL-decryption "
             f"exemption list, so inspection can't take the block's place."
         )
-        block_page = [r for r in filtered if r.get("failureKind") == "block-page"]
-        evidence = (
-            ("The filter answered with a certificate of its own only to show its block page, "
-             "and plain web requests to the same sites get that block page too, so this is a "
-             "category block, not SSL inspection."
-             if block_page and len(block_page) == n_filtered else
-             "Each connection was reset the moment the VPU named the site, and no certificate "
-             "was substituted, so this is a category block, not SSL inspection.")
-            + (f" The filter's block page names the rule it applied: {block_urls[0]}"
-               if block_urls else "")
-        )
-        details = [_tls_support_detail(r, lmi_connected, "Connection reset.") for r in filtered]
+        evidence_parts = []
+        if any(r.get("status") == "truncated" for r in filtered):
+            evidence_parts.append(
+                "Part of the server's TLS reply arrived, then the rest was dropped before the "
+                "handshake finished. A firewall or web filter is cutting off the connection.")
+        if any(r.get("failureKind") == "dropped" for r in filtered):
+            evidence_parts.append(
+                "The TCP connection opened, but no TLS reply arrived after Pulse sent the site "
+                "name. A firewall or web filter may be dropping the handshake.")
+        if any(r.get("failureKind") == "block-page" for r in filtered):
+            evidence_parts.append(
+                "The filter answered with a certificate of its own only to show its block page, "
+                "and plain web requests to the same sites get that block page too, so this is a "
+                "category block, not SSL inspection.")
+        if any(r.get("status") == "filtered" and r.get("failureKind") != "block-page" for r in filtered):
+            evidence_parts.append(
+                "The filter reset the connection when the VPU named the site, before a "
+                "certificate was presented.")
+        evidence = " ".join(evidence_parts) + (
+            f" The filter's block page names the rule it applied: {block_urls[0]}" if block_urls else "")
+        details = []
+        for r in filtered:
+            detail = _tls_support_detail(r, lmi_connected, "Connection blocked.")
+            if r.get("status") == "truncated":
+                count = f" ({r['rawBytes']} bytes)" if r.get("rawBytes") is not None else ""
+                detail += f" Part of the server's reply arrived{count}; the rest was dropped."
+                if r.get("serverMessages"):
+                    detail += f" Complete TLS messages received: {r['serverMessages']}."
+            elif r.get("failureKind") == "dropped":
+                detail += " TCP connected, but no TLS reply arrived."
+            details.append(detail)
         n = len(filtered)
         if broadcast_hit:
             out.append(
@@ -1967,9 +1986,9 @@ def _tls_findings(tls_inspection, lmi_log=None) -> list:
                     "category": "Network",
                     "title": f"{who} is blocking {n} Pixellot service{'s' if n != 1 else ''}",
                     "recommendation": (
-                        f"{who_lower} is blocking the services below by category, so the VPU "
-                        f"can't reach them. Ask venue IT to add a category exception for them "
-                        f"in the web filter."
+                        f"{who_lower} is cutting off the secure connections below, so the VPU "
+                        f"can't reach these services. Ask venue IT to check the firewall and "
+                        f"web-filter rules and exempt these domains."
                     ),
                     "it": it, "evidence": evidence, "details": details,
                 }

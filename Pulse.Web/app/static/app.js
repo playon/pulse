@@ -4700,12 +4700,35 @@ function _lmiLogNote(lmi) {
   return '<p class="text-pulse-muted text-xs mt-2">LogMeIn service log: no killed handshakes in the last ' + days + " days.</p>";
 }
 
-function _tlsBadge(status) {
+function _tlsIsFiltered(r) {
+  return r.status === "filtered" || r.status === "truncated"
+    || (r.status === "handshake-fail" && r.failureKind === "dropped");
+}
+
+function _tlsReplyDetail(r) {
+  var who = r.filterVendor ? " (" + r.filterVendor + ")" : "";
+  if (r.status === "truncated")
+    return "Part of the server's reply arrived" + (r.rawBytes != null ? " (" + r.rawBytes + " bytes)" : "")
+      + "; the rest was dropped. A firewall or web filter" + who + " is cutting off the handshake."
+      + (r.serverMessages ? " Complete TLS messages: " + r.serverMessages + "." : "");
+  if (r.status === "handshake-fail" && r.failureKind === "dropped")
+    return "TCP connected, but no TLS reply arrived. A firewall or web filter" + who + " may be dropping the handshake.";
+  if (r.status === "filtered")
+    return r.filterVendor
+      ? "Blocked by " + r.filterVendor + (r.blockPageHost ? " (" + r.blockPageHost + ")" : "")
+      : (r.failureKind === "block-page" ? "The filter returned its block page." : "No certificate. Connection reset before the handshake finished.");
+  return r.issuerCn
+    ? r.issuerCn + (r.issuerOrg && r.issuerOrg !== r.issuerCn ? ", " + r.issuerOrg : "")
+    : (r.status === "pass" ? "—" : (r.detail || "—"));
+}
+
+function _tlsBadge(status, failureKind) {
   switch ((status || "").toLowerCase()) {
     case "pass":           return badge("Pass", "pass");
     case "intercepted":    return badge("Intercepted", "fail");
     case "filtered":       return badge("Blocked by filter", "fail");
-    case "handshake-fail": return badge("Handshake failed", "warn");
+    case "truncated":      return badge("Blocked by filter", "fail");
+    case "handshake-fail": return failureKind === "dropped" ? badge("Blocked by filter", "fail") : badge("Handshake failed", "warn");
     case "cert-time":      return badge("Cert dates invalid", "warn");
     case "blocked":        return badge("Unreachable", "fail");
     default:               return badge(status || "Unknown", "muted");
@@ -5022,7 +5045,7 @@ function _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, l
   // the other checks can't see.
   var tlsRows = (tls && !tls.error && tls.results) || [];
   var tlsIntercepted = tlsRows.filter(function(r) { return r.status === "intercepted"; });
-  var tlsHsFail = tlsRows.filter(function(r) { return r.status === "handshake-fail"; });
+  var tlsHsFail = tlsRows.filter(function(r) { return r.status === "handshake-fail" && !_tlsIsFiltered(r); });
   var tlsCertTime = tlsRows.filter(function(r) { return r.status === "cert-time"; });
   var tlsBlocked = tlsRows.filter(function(r) { return r.status === "blocked"; });
   // SSL inspection, the web filter, LogMeIn blocked and the streaming chain
@@ -5676,16 +5699,12 @@ function renderNetwork() {
     <!-- Advanced Diagnostics (collapsed by default) -->
     <div id="net-adv-section" class="net-adv-section net-adv-collapsed">
 
-      <!-- Secure Connections — the two ways a venue middlebox kills HTTPS:
-           a cert issued by anything other than a trusted public CA means the
-           firewall is DECRYPTING the connection (Kent SD signature), while a
-           handshake reset means a content filter has the domain on a BLOCKED
-           CATEGORY list (Linewize signature). Different fixes — the card has
-           to say which one, or IT checks the wrong console. -->
+      <!-- Secure Connections: certificate substitution and web-filter blocks,
+           including resets, silent drops and a reply cut off mid-handshake. -->
       <div class="card">
         ${sectionTitle("shield", "Secure Connections (Filtering & SSL Inspection)")}
         <p class="text-pulse-muted text-xs mb-3">What happens when the VPU opens each service's secure connection. Port tests pass in both failure cases below, so they need their own check.<br>
-        <strong>Blocked by filter.</strong> A content filter cuts the connection the moment the VPU names the site. Venue IT has to add a category exception; an SSL-decryption exemption alone won't do it.<br>
+        <strong>Blocked by filter.</strong> A firewall or web filter resets the connection, drops the whole reply, or forwards part of the server's reply and drops the rest. Venue IT must check its drop/category rules and SSL-decryption exemptions.<br>
         <strong>Intercepted.</strong> The firewall is replacing the certificate and decrypting the traffic. Venue IT has to add the domain to the SSL-decryption exemption list; a URL allowlist entry alone won't do it.<br>
         Either way, send IT the exact list in the finding above: it names a wildcard and the bare domain for each affected site.</p>
         ${(tls && tls.results && tls.results.length) ? `
@@ -5693,21 +5712,12 @@ function renderNetwork() {
             <th>Service</th><th>Certificate issued by / why it failed</th><th>Status</th>
           </tr></thead><tbody>
           ${tls.results.map(function(r) {
-            var st = (r.status || "").toLowerCase();
-            var bad = st === "intercepted" || st === "blocked" || st === "filtered";
-            // A filtered host never presents a certificate, so the cert column
-            // carries the more useful fact instead: who blocked it.
-            var issuerLabel = st === "filtered"
-              ? (r.filterVendor
-                  ? "Blocked by " + r.filterVendor + (r.blockPageHost ? " (" + r.blockPageHost + ")" : "")
-                  : "No certificate. Connection reset before the handshake finished.")
-              : (r.issuerCn
-                  ? r.issuerCn + (r.issuerOrg && r.issuerOrg !== r.issuerCn ? ", " + r.issuerOrg : "")
-                  : (st === "pass" ? "—" : (r.detail || "—")));
+            var bad = _tlsIsFiltered(r) || r.status === "intercepted" || r.status === "blocked";
+            var issuerLabel = _tlsReplyDetail(r);
             return `<tr>
               <td><div class="font-semibold">${esc(r.domain)}</div><div class="text-xs text-pulse-muted">${esc(r.purpose || "")}</div></td>
               <td class="text-xs${bad ? " status-fail" : ""}" title="${esc(r.issuer || "")}">${esc(issuerLabel)}</td>
-              <td>${_tlsBadge(r.status)}</td>
+              <td>${_tlsBadge(r.status, r.failureKind)}</td>
             </tr>`;
           }).join("")}
           </tbody></table>
