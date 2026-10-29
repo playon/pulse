@@ -1161,7 +1161,7 @@ class TestNoCamerasNeverPasses(unittest.TestCase):
 
     def test_camera_tab_carries_the_same_finding(self):
         nics, cfg = self._north_east()
-        ports = main._enrich_ports(nics, None, {})
+        ports = main._enrich_ports(nics, {})
         main._flag_uplink_ports(ports, cfg)
         f = main._camera_count_findings(ports, 2, {}, True)
         self.assertEqual([x["code"] for x in f], ["cam-none"])
@@ -1204,13 +1204,14 @@ class TestMainCameraCount(unittest.TestCase):
             {"port": "Port 2", "speedMbps": 100, "cameras": 1, "slow": True},
         ])
 
-    def test_scoreboard_state_only_when_configured_or_present(self):
-        self.assertIsNone(main._scoreboard_camera_state([self._port([])], {"cameras": []}))
+    def test_scoreboard_state_only_when_detected_on_a_live_camera_port(self):
+        self.assertIsNone(main._scoreboard_camera_state([self._port([])]))
         live = {"isUp": True, "isOcr": True, "portLabel": "Port 3", "linkSpeedMbps": 100}
-        st = main._scoreboard_camera_state([live], None)
-        self.assertEqual((st["connected"], st["port"], st["speedMbps"]), (True, "Port 3", 100))
-        st = main._scoreboard_camera_state([], {"cameras": [{"role": "OCR"}]})
-        self.assertEqual((st["configured"], st["connected"]), (True, False))
+        self.assertEqual(main._scoreboard_camera_state([live]),
+                         {"connected": True, "port": "Port 3", "speedMbps": 100})
+        self.assertIsNone(main._scoreboard_camera_state([]))
+        self.assertIsNone(main._scoreboard_camera_state([dict(live, isUp=False)]))
+        self.assertIsNone(main._scoreboard_camera_state([dict(live, hasInternetUplink=True)]))
 
 # ── LogMeIn service-log evidence (Get-LmiGatewayLog) ─────────────────
 # Fixture numbers are the real field log (2026-08-28): a VPU dark in LMI all
@@ -1456,23 +1457,18 @@ class TestSupportOnlyTlsFindings(unittest.TestCase):
 class TestScoreboardSource(unittest.TestCase):
     SC_DOWN = {"reachable": False, "sc2": {"reachable": False}}
     SC_UP = {"reachable": True}
-    OCR_UP = {"configured": True, "connected": True, "port": "Port 3"}
-    OCR_DOWN = {"configured": True, "connected": False, "port": None}
+    OCR_UP = {"connected": True, "port": "Port 3"}
 
     def test_ocr_connected_makes_scoreconnect_optional(self):
         r = main._scoreboard_source(self.SC_DOWN, self.OCR_UP)
         self.assertEqual((r["source"], r["ok"], r["issue"]), ("ocr", True, None))
         self.assertEqual(r["ocrPort"], "Port 3")
 
-    def test_ocr_detected_without_config_counts(self):
-        r = main._scoreboard_source(self.SC_DOWN, {"configured": False, "connected": True, "port": "Port 2"})
-        self.assertTrue(r["ok"])
-
-    def test_ocr_configured_but_disconnected_is_an_issue(self):
-        # Even with ScoreConnect running: the unit is set up to read the
-        # score with the camera.
-        r = main._scoreboard_source(self.SC_UP, self.OCR_DOWN)
-        self.assertEqual((r["source"], r["ok"], r["issue"]), ("ocr", False, "ocr-not-connected"))
+    def test_no_detection_cannot_infer_a_disconnected_ocr_camera(self):
+        # With no reliable expectation, a missing OCR camera and a venue
+        # without one both fall back to ScoreConnect.
+        r = main._scoreboard_source(self.SC_UP, None)
+        self.assertEqual((r["source"], r["ok"], r["issue"]), ("scoreconnect", True, None))
 
     def test_no_ocr_needs_scoreconnect(self):
         r = main._scoreboard_source(self.SC_DOWN, None)

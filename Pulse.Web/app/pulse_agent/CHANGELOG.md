@@ -18,6 +18,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Changed
+- Cameras no longer depend on the retired camera-config file. Scoreboard source is detection-only: a connected OCR camera makes ScoreConnect optional; otherwise ScoreConnect is checked, with no configured-but-disconnected OCR warning (including Pulse's startup and ScoreConnect views). In `pulse.telemetry/v1`, `scoreboard.ocr` stays present as null because OCR configuration is unknown; new optional `scoreboard.ocrDetected` is true/false for a successful camera read and null when it failed. Existing configuration fields are not redefined as detection.
 - A launch check-in the Worker can't take is no longer also posted to the old Google Apps Script sheet. It stays queued on the unit and replays when the Worker is reachable (30 days, 200 entries). A unit whose network blocks `workers.dev` now shows in Vitals only once it can reach it. Nothing about the check-in's fields changed. The Worker still accepts the relay header from builds that have the sheet fallback.
 
 ## [0.2.2] - 2026-10-21

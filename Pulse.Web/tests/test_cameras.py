@@ -6,7 +6,7 @@ Stdlib unittest only — no pytest, no network, no PowerShell:
 
 These lock in the camera-identification, port-ordering, dedup, labeling,
 and finding logic that's easy to break silently when sessions edit
-main.py. Pure functions only.
+main.py. Pure functions and endpoint wiring with mocked collectors.
 """
 
 import asyncio
@@ -14,6 +14,7 @@ import os
 import sys
 import time
 import unittest
+from unittest import mock
 
 _APP_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app")
 if _APP_DIR not in sys.path:
@@ -35,9 +36,9 @@ def _arp(ip, mac):
     return {"ip": ip, "mac": mac}
 
 
-def _enrich(nics_ports, pix_config=None, probes=None, expected_main=None):
+def _enrich(nics_ports, probes=None, expected_main=None):
     return main._enrich_ports(
-        {"ports": nics_ports}, pix_config, probes or {},
+        {"ports": nics_ports}, probes or {},
         expected_main_cameras=expected_main,
     )
 
@@ -75,36 +76,94 @@ class TestIdentityLayering(unittest.TestCase):
     def setUp(self):
         main._PORT_STATE_TRACKER.clear()
 
-    def test_cgi_model_wins_over_wrong_cfg(self):
-        # cameras.cfg wrongly calls .52 a Main; CGI model (E8NC-G) says OCR.
-        cfg = {"cameras": [{"section": "C", "ip": "169.254.16.52",
-                            "mac": "00-D0-89-1E-89-08", "role": "Main"}]}
+    def test_cgi_model_identifies_ocr(self):
+        # The CGI model (E8NC-G) identifies the scoreboard camera.
         probes = {"00:D0:89:1E:89:08": {"mac": "00:D0:89:1E:89:08",
                   "ip": "169.254.16.52", "modelNumber": "E8NC-G"}}
         ports = _enrich([_port("E", "00-30-64-36-73-AA",
                          arp=[_arp("169.254.16.52", "00-D0-89-1E-89-08")])],
-                        cfg, probes)
+                        probes)
         cam = ports[0]["camerasDetected"][0]
         self.assertEqual(cam["role"], "OCR / Scoreboard")
         self.assertEqual(cam["identitySource"], "Camera model")
 
-    def test_default_ip_overrides_wrong_cfg(self):
-        # No CGI. cfg wrongly says .50 is OCR; default-IP convention wins.
-        cfg = {"cameras": [{"section": "C", "ip": "169.254.16.50",
-                            "mac": "00-D0-89-19-71-57", "role": "OCR"}]}
+    def test_default_ip_identifies_main_without_cgi(self):
         ports = _enrich([_port("E", "00-30-64-36-73-AA",
-                         arp=[_arp("169.254.16.50", "00-D0-89-19-71-57")])], cfg)
+                         arp=[_arp("169.254.16.50", "00-D0-89-19-71-57")])])
         cam = ports[0]["camerasDetected"][0]
         self.assertEqual(cam["role"], "Main Camera")
         self.assertEqual(cam["identitySource"], "Default IP")
 
-    def test_cfg_is_last_resort_for_non_default_ip(self):
-        cfg = {"cameras": [{"section": "C", "ip": "192.168.5.20",
-                            "mac": "00-0E-53-AA-01-01", "role": "Main"}]}
+    def test_non_default_ip_has_unknown_role_without_cgi(self):
         ports = _enrich([_port("E", "00-30-64-36-73-AA",
-                         arp=[_arp("192.168.5.20", "00-0E-53-AA-01-01")])], cfg)
+                         arp=[_arp("192.168.5.20", "00-0E-53-AA-01-01")])])
         cam = ports[0]["camerasDetected"][0]
-        self.assertEqual(cam["identitySource"], "cameras.cfg")
+        self.assertIsNone(cam["role"])
+        self.assertEqual(cam["identitySource"], "OUI vendor match")
+
+    def test_probe_targets_use_defaults_and_pixellot_neighbors(self):
+        ports = [_port("E", "00-30-64-36-73-AA", arp=[
+            _arp("192.168.5.20", "00-0E-53-AA-01-01"),
+            _arp("192.168.5.30", "AA-BB-CC-DD-EE-FF"),
+        ])]
+        self.assertEqual(main._collect_camera_ips(ports),
+                         main._DEFAULT_MAIN_IPS | main._DEFAULT_OCR_IPS | {"192.168.5.20"})
+
+
+class TestCameraEndpoints(unittest.TestCase):
+    def setUp(self):
+        main._PORT_STATE_TRACKER.clear()
+
+    def test_camera_connectivity_does_not_collect_software_configuration(self):
+        readings = {
+            "Get-NicAdapters.ps1": {"ports": [_port("E", "00-30-64-36-73-AA",
+                arp=[_arp("169.254.16.52", "00-D0-89-1E-89-08")])]},
+            "Get-CameraExpectations.ps1": {"expectedMainCameras": 2},
+            "Get-NetworkConfig.ps1": {},
+            "Get-PoePower.ps1": {},
+        }
+
+        async def collect(script, **kwargs):
+            return readings[script]  # Any extra collector is a regression.
+
+        with mock.patch.object(main, "run_ps", side_effect=collect) as collect_mock, \
+             mock.patch.object(main, "_probe_all_cameras", new_callable=mock.AsyncMock, return_value={}):
+            result = asyncio.run(main.api_cameras())
+        self.assertEqual(collect_mock.call_count, len(readings))
+        self.assertEqual(result["scoreboardCamera"]["port"], "Port 1")
+        self.assertTrue(result["scoreboardCamera"]["connected"])
+
+    def test_scoreconnect_detects_ocr_without_software_configuration(self):
+        nics = {"ports": [_port("E", "00-30-64-36-73-AA",
+            arp=[_arp("169.254.16.52", "00-D0-89-1E-89-08")])]}
+        with mock.patch.object(main, "DEMO_MODE", False), \
+             mock.patch.object(main, "run_ps", new_callable=mock.AsyncMock, return_value=nics) as collect, \
+             mock.patch.object(main, "_run_sc_status", new_callable=mock.AsyncMock,
+                               return_value={"reachable": False}), \
+             mock.patch.object(main, "_probe_all_cameras", new_callable=mock.AsyncMock, return_value={}), \
+             mock.patch.object(main, "_sc_chain_payload", return_value={}):
+            result = asyncio.run(main.api_scoreconnect())
+        collect.assert_awaited_once_with("Get-NicAdapters.ps1")
+        self.assertEqual(result["scoreboardSource"]["source"], "ocr")
+        self.assertTrue(result["scoreboardSource"]["ok"])
+
+    def test_software_configuration_keeps_registry_and_calibration(self):
+        registry = {"version": "2.3", "InstallPath": "C:\\Pixellot"}
+        calibration = {"multisport": {"calibrated": True, "primary": "Football"},
+                       "ocr": {"calibrated": True}}
+        readings = {"Get-PixellotConfig.ps1": {"registryConfig": registry, "calibration": calibration},
+                    "Get-SystemIdentity.ps1": {}, "Get-GpuInfo.ps1": {}}
+
+        async def collect(script, **kwargs):
+            return readings[script]
+
+        with mock.patch.object(main, "run_ps", side_effect=collect), \
+             mock.patch.object(main, "_probe_camera_ip", new_callable=mock.AsyncMock) as probe:
+            result = asyncio.run(main.api_pixellot_config())
+        self.assertEqual(set(result), {"registryConfig", "calibration", "compat"})
+        self.assertEqual(result["registryConfig"], registry)
+        self.assertEqual(result["calibration"], calibration)
+        probe.assert_not_awaited()
 
 
 class TestDownReason(unittest.TestCase):
@@ -206,14 +265,14 @@ class TestLabelingAndCap(unittest.TestCase):
         probes = {"00:D0:89:1E:89:08": {"mac": "00:D0:89:1E:89:08",
                   "ip": "169.254.16.52", "modelNumber": "E8NC-G"}}
         ports = _enrich([_port("E", "00-30-64-36-73-AA",
-                         arp=[_arp("169.254.16.52", "00-D0-89-1E-89-08")])], None, probes)
+                         arp=[_arp("169.254.16.52", "00-D0-89-1E-89-08")])], probes)
         self.assertEqual(ports[0]["cameraLabel"], "OCR-1G")
 
     def test_ocr_plain_for_100mbps(self):
         probes = {"00:D0:89:1B:03:01": {"mac": "00:D0:89:1B:03:01",
                   "ip": "169.254.16.52", "modelNumber": "R2SD-G"}}
         ports = _enrich([_port("E", "00-30-64-36-73-AA", speed=100,
-                         arp=[_arp("169.254.16.52", "00-D0-89-1B-03-01")])], None, probes)
+                         arp=[_arp("169.254.16.52", "00-D0-89-1B-03-01")])], probes)
         self.assertEqual(ports[0]["cameraLabel"], "OCR")
 
     def test_main_cap_uses_expected_count(self):
@@ -224,7 +283,7 @@ class TestLabelingAndCap(unittest.TestCase):
             _port("B", "00-30-64-36-73-AB", arp=[_arp("169.254.16.51", "00-D0-89-19-71-51")]),
             _port("C", "00-30-64-36-73-AC", arp=[_arp("169.254.16.55", "00-D0-89-19-71-55")]),
         ]
-        ports = _enrich(ps, None, None, expected_main=2)
+        ports = _enrich(ps, expected_main=2)
         labels = sorted(p["cameraLabel"] for p in ports)
         self.assertEqual(labels, ["Camera", "Main Camera 1", "Main Camera 2"])
 

@@ -4,10 +4,9 @@
     Which sports and the scoreboard (OCR/PiP) camera are calibrated, read from
     the Pixellot configuration folders only.
 .DESCRIPTION
-    The cheap half of Get-PixellotConfig.ps1's calibration block, for the
-    fleet monitor's telemetry (PV-57). Get-PixellotConfig.ps1 also probes every
-    camera over CGI, which the unattended monitor must not pay for. This reads
-    two folders and a handful of file times, all local, no network.
+    The calibration-only read for the fleet monitor's telemetry (PV-57).
+    Get-PixellotConfig.ps1 also reads the registry for the software page.
+    This reads two folders and a handful of file times, all local, no network.
 
     Calibration is recorded by file and folder presence (confirmed on a VPU
     2026-06-15):

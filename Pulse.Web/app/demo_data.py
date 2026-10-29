@@ -1269,18 +1269,6 @@ DEMO = {
         {"connected": True, "port": "COM7", "model": "",
          "statusLabel": "ScoreLink device connected (COM7)"}),
     "Get-PixellotConfig.ps1": lambda **kw: {
-        # Camera firmware / tvMode / serial mirror the live CGI probe
-        # (_probe_camera_ip in main.py) — Admin:1234 param.cgi, same data the
-        # Canopy getFirmwareAndTvMode.ps1 pulled. ntsc_60 = US venue.
-        "cameras": [
-            {"section": "Camera1", "ip": "192.168.10.100", "mac": "00:0E:53:AA:01:01", "role": "Main",
-             "firmwareVersion": "1.9.13", "tvMode": "ntsc_60", "serialNumber": "MC1-7741A", "model": "Pixellot SuperBowl"},
-            {"section": "Camera2", "ip": "192.168.11.100", "mac": "00:0E:53:BB:02:01", "role": "Main",
-             "firmwareVersion": "1.9.13", "tvMode": "ntsc_60", "serialNumber": "MC4-9920A", "model": "Pixellot SuperBowl"},
-            {"section": "OCR", "ip": "192.168.12.50", "mac": "00:D0:89:1B:03:01", "role": "OCR",
-             "firmwareVersion": "DC-2.4.1", "tvMode": "ntsc_60", "serialNumber": "DYN-OCR-3318", "model": "Dynacolor MPC-IPC"},
-        ],
-        "cameraCfgExists": True,
         # Selected HKLM:\SOFTWARE\Pixellot values (the live script dumps ALL).
         "registryConfig": {
             "version": _VENUE["swVersion"],
@@ -1310,7 +1298,7 @@ DEMO = {
         },
     },
     # Expected main-camera count from the Coordinator log. Demo box is an
-    # S2 (2 main cameras + 1 OCR), matching the Get-PixellotConfig demo.
+    # S2 (2 main cameras + 1 OCR), matching the demo NIC ports.
     # vpuRunning False → idle box, so frame capture is allowed in demo.
     "Get-CameraExpectations.ps1": lambda **kw: {
         "expectedMainCameras": 2,

@@ -547,7 +547,7 @@ def _cgi_probe_sync(ip: str, timeout: float = 2.0) -> Optional[dict]:
 
     Auth is the Pixellot/Dynacolor factory default (Admin / 1234). If a
     site has rotated camera credentials, probes will silently return None
-    and identification falls back to ARP/cameras.cfg only.
+    and identification falls back to ARP and the default-IP convention.
     """
     # Demo mode can't reach the synthetic camera IPs over HTTP — serve the
     # canned probe so camerasDetected carries the full probe on a Mac.
@@ -651,10 +651,9 @@ async def _probe_camera_ip(ip, is_ocr_ip):
     return None
 
 
-def _collect_camera_ips(ports, ocr_ips):
+def _collect_camera_ips(ports):
     """Collect all IPs worth probing: defaults + any Pixellot ARP entries."""
-    all_camera_ips = set(ocr_ips)
-    all_camera_ips.update(_DEFAULT_OCR_IPS)
+    all_camera_ips = set(_DEFAULT_OCR_IPS)
     all_camera_ips.update(_DEFAULT_MAIN_IPS)
     for port in ports:
         for arp in port.get("arpEntries", []):
@@ -682,7 +681,7 @@ def _cached_probes_by_mac() -> dict:
     return by_mac
 
 
-async def _probe_all_cameras(ports, ocr_ips, block: bool = True):
+async def _probe_all_cameras(ports, block: bool = True):
     """Probe all camera IPs found in ARP entries across all ports.
 
     block=True  — wait for probes (used for dashboard/WS preload).
@@ -693,7 +692,7 @@ async def _probe_all_cameras(ports, ocr_ips, block: bool = True):
 
     Returns a dict keyed by normalized MAC -> probe result.
     """
-    all_camera_ips = _collect_camera_ips(ports, ocr_ips)
+    all_camera_ips = _collect_camera_ips(ports)
 
     if not block:
         now = time.monotonic()
@@ -705,9 +704,7 @@ async def _probe_all_cameras(ports, ocr_ips, block: bool = True):
         if cold_ips:
             async def _warm_cache():
                 tasks = [
-                    _probe_camera_ip(
-                        ip, ip in ocr_ips or ip in _DEFAULT_OCR_IPS
-                    )
+                    _probe_camera_ip(ip, ip in _DEFAULT_OCR_IPS)
                     for ip in cold_ips
                 ]
                 await asyncio.gather(*tasks, return_exceptions=True)
@@ -716,7 +713,7 @@ async def _probe_all_cameras(ports, ocr_ips, block: bool = True):
 
     tasks = []
     for ip in all_camera_ips:
-        is_ocr = ip in ocr_ips or ip in _DEFAULT_OCR_IPS
+        is_ocr = ip in _DEFAULT_OCR_IPS
         tasks.append(_probe_camera_ip(ip, is_ocr))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -2350,7 +2347,7 @@ def _graphics_findings(gd) -> list:
     return out
 
 
-def _compute_findings(identity, performance, services, nics, hardware=None, installed_sw=None, network_config=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None, binaries=None) -> list:
+def _compute_findings(identity, performance, services, nics, hardware=None, installed_sw=None, network_config=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, expectations=None, disk_health=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None, binaries=None) -> list:
     findings = []
 
     # None vs {} matters for probe_results: None means the caller never
@@ -3017,7 +3014,7 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
         # camera-less VPU.
         known = isinstance(expected_main, int) and expected_main > 0
         if known or not (identity or {}).get("isNonVpuHost"):
-            enriched_ports = _enrich_ports(nics, pixellot_config, None)
+            enriched_ports = _enrich_ports(nics)
             _flag_uplink_ports(enriched_ports, network_config)
             findings.extend(_camera_count_findings(
                 enriched_ports, expected_main, probe_results, probes_attempted))
@@ -3338,50 +3335,6 @@ def _compute_readiness(findings, performance=None, disk_health=None,
     }
 
 
-def _build_camera_sets(pixellot_config=None):
-    """Return cameras.cfg-derived sets for OCR and Main camera identification.
-
-    Returns dict with keys:
-      ocr_ips, ocr_macs  — OCR cameras (role contains "OCR")
-      main_ips, main_macs — Main/Panoramic/Tactical cameras (other roles)
-    Always includes the hardcoded default OCR IPs.
-    """
-    ocr_ips = set(_DEFAULT_OCR_IPS)
-    ocr_macs = set()
-    main_ips = set()
-    main_macs = set()
-    cfg_cameras = []
-    if pixellot_config and not pixellot_config.get("error"):
-        cfg_cameras = pixellot_config.get("cameras", [])
-    for cam in cfg_cameras:
-        role = (cam.get("role") or cam.get("section") or "").strip()
-        ip = cam.get("ip", "").strip()
-        mac = cam.get("mac", "").strip().upper().replace("-", ":")
-        if role.upper() == "OCR":
-            if ip:
-                ocr_ips.add(ip)
-            if mac:
-                ocr_macs.add(mac)
-        elif role:
-            # Main, Panoramic, Tactical, etc — non-OCR Pixellot camera roles.
-            if ip:
-                main_ips.add(ip)
-            if mac:
-                main_macs.add(mac)
-    return {
-        "ocr_ips": ocr_ips,
-        "ocr_macs": ocr_macs,
-        "main_ips": main_ips,
-        "main_macs": main_macs,
-    }
-
-
-def _build_ocr_sets(pixellot_config=None):
-    """Backwards-compatible wrapper — returns (ocr_ips, ocr_macs)."""
-    s = _build_camera_sets(pixellot_config)
-    return s["ocr_ips"], s["ocr_macs"]
-
-
 def _mac_to_int(mac) -> int:
     """Normalize a MAC string to an int for sorting. Unknown → very large
     so MAC-less adapters sort last in ascending order."""
@@ -3440,35 +3393,25 @@ def _derive_down_reason(port: dict) -> str:
 
 def _enrich_ports(
     nics: dict,
-    pixellot_config: dict = None,
     probe_results=None,
     expected_main_cameras=None,
 ) -> list:
     """Enrich raw NIC port data with status flags and camera detection.
 
-    Identity resolution, highest authority first (CGI is the source of
-    truth; cameras.cfg is unreliable per field guidance):
+    Identity resolution, highest authority first (CGI is the source of truth):
       1. CGI model number → role + expected link speed (actual hardware)
       2. Pixellot default-IP convention (.50/.51 main, .52/.53/.60 OCR)
       3. CGI-confirmed Pixellot camera with unknown model → generic label
-      4. cameras.cfg role mapping (last resort — may be inaccurate)
-      5. Pixellot OUI only → vendor known, role unknown
+      4. Pixellot OUI only → vendor known, role unknown
+    Pixellot stopped using cameras.cfg around agent 2.3 (Logan, 2026-10-12),
+    so an old or missing file cannot establish which cameras are expected.
     Degraded = actual speed < expected speed for the camera model. When
     model is unknown, any sub-1 Gbps non-OCR port is treated as degraded.
 
     probe_results: dict keyed by normalized MAC -> {mac, ip, is_ocr, ...}
     from _probe_all_cameras(). Optional — when absent, falls back to
-    default-IP / cfg identification.
+    default-IP identification.
     """
-    cam_sets = _build_camera_sets(pixellot_config)
-    # cameras.cfg-derived sets ONLY (defaults handled separately below).
-    # Per field guidance the cameras.cfg role data is not always accurate,
-    # so it is used only as a last-resort identity hint — after CGI probe
-    # and the Pixellot default-IP convention.
-    cfg_ocr_ips = cam_sets["ocr_ips"] - _DEFAULT_OCR_IPS
-    cfg_ocr_macs = cam_sets["ocr_macs"]
-    cfg_main_ips = cam_sets["main_ips"]
-    cfg_main_macs = cam_sets["main_macs"]
     probe_results = probe_results or {}
 
     ports = []
@@ -3513,8 +3456,7 @@ def _enrich_ports(
                             cam_entry[pkey] = probe[pkey]
 
                 # ── Identity resolution, highest authority first ──
-                # CGI probe is the source of truth; cameras.cfg is a
-                # last-resort hint because its role data is unreliable.
+                # CGI probe is the source of truth.
                 model_role, model_speed = _lookup_camera_model(
                     cam_entry.get("modelNumber")
                 )
@@ -3537,20 +3479,11 @@ def _enrich_ports(
                     cam_entry["identitySource"] = "Default IP"
                 elif probe:
                     # 3. CGI-confirmed Pixellot camera, model not in our
-                    #    table — generic label beats a possibly-wrong
-                    #    cameras.cfg role.
+                    #    table — generic label.
                     cam_entry["role"] = "Pixellot Camera"
                     cam_entry["identitySource"] = "CGI probe"
-                elif arp_ip in cfg_ocr_ips or arp_mac in cfg_ocr_macs:
-                    # 4. cameras.cfg — last resort.
-                    cam_entry["role"] = "OCR / Scoreboard"
-                    cam_entry["identitySource"] = "cameras.cfg"
-                    is_ocr = True
-                elif arp_ip in cfg_main_ips or arp_mac in cfg_main_macs:
-                    cam_entry["role"] = "Main Camera"
-                    cam_entry["identitySource"] = "cameras.cfg"
                 else:
-                    # 5. Pixellot OUI only — vendor known, role unknown.
+                    # 4. Pixellot OUI only — vendor known, role unknown.
                     cam_entry["role"] = None
                     cam_entry["identitySource"] = "OUI vendor match"
 
@@ -3869,23 +3802,21 @@ def _main_camera_ports(ports) -> list:
     return out
 
 
-def _scoreboard_camera_state(ports, pixellot_config):
-    """For the Camera Connectivity reference panel: is a scoreboard (OCR)
-    camera configured, and is it connected? The OCR IP set always includes
-    Pixellot's default addresses, so "configured" comes from a cameras.cfg
-    entry whose role names OCR. None when neither is true: plenty of venues
-    have no scoreboard camera, and the panel shouldn't imply one is missing."""
-    cfg_cams = (pixellot_config or {}).get("cameras") or [] if isinstance(pixellot_config, dict) else []
-    configured = any("OCR" in str(c.get("role") or "").upper() for c in cfg_cams)
+def _scoreboard_camera_state(ports):
+    """Report a connected scoreboard (OCR) camera and its port, or None.
+
+    Detection only: no reliable configuration source says whether a venue
+    expects an OCR camera. An unplugged camera and a venue without one are
+    indistinguishable, so neither can be labelled "not connected".
+    """
     live = [p for p in ports or [] if p.get("isOcr") and p.get("isUp") and not p.get("hasInternetUplink")]
-    if not live and not configured:
+    if not live:
         return None
-    p = live[0] if live else None
+    p = live[0]
     return {
-        "configured": configured,
-        "connected": bool(p),
-        "port": p.get("portLabel") if p else None,
-        "speedMbps": p.get("linkSpeedMbps") if p else None,
+        "connected": True,
+        "port": p.get("portLabel"),
+        "speedMbps": p.get("linkSpeedMbps"),
     }
 
 
@@ -4050,7 +3981,7 @@ def _compute_camera_findings(ports: list, poe=None) -> list:
         # settled is a real "camera went away" — UNLESS that camera's MAC
         # reappeared on another port (it moved, not dropped). This replaces
         # the old stale-ARP "camera last detected" alarm, which fired on
-        # ports that never had a confirmed camera. Needs no cameras.cfg.
+        # ports that never had a confirmed camera.
         if (port.get("_everHadCamera") and not cams and port.get("_settled")):
             last = port.get("_lastCam") or {}
             last_mac = str(last.get("mac") or "").upper().replace("-", ":")
@@ -4110,7 +4041,7 @@ def _compute_camera_findings(ports: list, poe=None) -> list:
 # ─── Data-building helpers (shared by per-page and preload) ──
 
 
-def _build_dashboard(identity, performance, services, nics, network_config=None, hardware=None, installed_sw=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, perf_sample=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None, binaries=None):
+def _build_dashboard(identity, performance, services, nics, network_config=None, hardware=None, installed_sw=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, expectations=None, disk_health=None, perf_sample=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None, binaries=None):
     # Tag adapter roles (motherboard / camera / wifi) so both the findings and
     # the embedded "Network config" the dashboard ships carry them.
     _classify_network_adapters(network_config)
@@ -4174,7 +4105,7 @@ def _build_dashboard(identity, performance, services, nics, network_config=None,
         if isinstance(data, dict) and data.get("error")
     ]
 
-    findings = _compute_findings(identity, performance, services, nics, hardware, installed_sw, network_config, install_state, port_tests, gpu_info, wifi, pixellot_config=pixellot_config, expectations=expectations, disk_health=disk_health, probe_results=probe_results, tls_inspection=tls_inspection, lmi_log=lmi_log, graphics_delivery=graphics_delivery, binaries=binaries)
+    findings = _compute_findings(identity, performance, services, nics, hardware, installed_sw, network_config, install_state, port_tests, gpu_info, wifi, expectations=expectations, disk_health=disk_health, probe_results=probe_results, tls_inspection=tls_inspection, lmi_log=lmi_log, graphics_delivery=graphics_delivery, binaries=binaries)
 
     return {
         "identity": flat_identity,
@@ -4346,7 +4277,7 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
     async def _skipped():
         return None
     (identity, performance, services, nics, net_config, hardware, installed_sw,
-     install_state, port_tests, gpu_info, wifi, pixellot_config, expectations,
+     install_state, port_tests, gpu_info, wifi, expectations,
      disk_health, perf_sample, tls_inspection, lmi_log, graphics_delivery,
      binaries) = await asyncio.gather(
         run_ps("Get-SystemIdentity.ps1"),
@@ -4364,10 +4295,8 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
         _skipped() if skip_intrusive else run_ps("Test-NetworkPorts.ps1", timeout=30),
         run_ps("Get-GpuInfo.ps1", timeout=15),
         run_ps("Get-WifiAdapters.ps1", timeout=10),
-        # Pixellot config + expected camera count feed the dashboard's new
-        # "missing main cameras" finding (compared against what's detected on
-        # the camera NIC). Same scripts the Camera Connectivity tab uses.
-        run_ps("Get-PixellotConfig.ps1", timeout=15),
+        # Expected camera count feeds the dashboard's "missing main cameras"
+        # finding, using the same source as the Camera Connectivity tab.
         run_ps("Get-CameraExpectations.ps1", timeout=10),
         # Readiness inputs: D: volume (post-event VOD) for the C:/D: split, and
         # a short CPU/mem sample so a one-instant spike can't move the verdict.
@@ -4394,9 +4323,8 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
     # slow-port finding identifies the OCR by its actual camera model, not a
     # transient ARP entry — keeping the dashboard consistent with the Camera
     # Connectivity tab and free of the OCR "running slow" flicker.
-    ocr_ips, _ = _build_ocr_sets(pixellot_config)
     raw_ports = nics.get("ports", []) if nics and not nics.get("error") else []
-    probe_results = await _probe_all_cameras(raw_ports, ocr_ips)
+    probe_results = await _probe_all_cameras(raw_ports)
 
     # CPU observer-effect guard. The snapshot and the 3s sample above both run
     # INSIDE the collector fan-out — several concurrent powershell.exe startups
@@ -4424,7 +4352,7 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
     if raw_out is not None:
         raw_out.update(
             identity=identity, port_tests=port_tests, nics=nics,
-            pixellot_config=pixellot_config, network_config=net_config,
+            network_config=net_config,
             probe_results=probe_results, gpu_info=gpu_info,
             expectations=expectations, disk_health=disk_health,
             hardware=hardware, services=services, installed_sw=installed_sw,
@@ -4433,7 +4361,7 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
     return _build_dashboard(
         identity, performance, services, nics, net_config, hardware,
         installed_sw, install_state, port_tests, gpu_info, wifi,
-        pixellot_config=pixellot_config, expectations=expectations,
+        expectations=expectations,
         disk_health=disk_health, perf_sample=perf_sample,
         probe_results=probe_results, tls_inspection=tls_inspection,
         lmi_log=lmi_log, graphics_delivery=graphics_delivery,
@@ -4512,10 +4440,10 @@ async def api_peripherals():
 @app.get("/api/pixellot-config")
 async def api_pixellot_config():
     r"""Local, on-host Pixellot configuration (NOT the Pixellot Cloud lane):
-    install/agent version + GPU-vs-version compatibility, cameras.cfg
-    (IP/MAC/role) enriched with live per-camera firmware/tvMode/serial via the
-    shared CGI probe, and calibration status (main multisport + OCR) read from
-    C:\Pixellot\Data\Configuration.
+    install/agent version + GPU-vs-version compatibility, the Pixellot
+    registry values, and calibration status (main multisport + OCR) read from
+    C:\Pixellot\Data\Configuration. Per-camera firmware and serials live on
+    /api/cameras, from the CGI probe.
     """
     cfg, identity, gpu_info = await asyncio.gather(
         run_ps("Get-PixellotConfig.ps1", timeout=20),
@@ -4528,23 +4456,6 @@ async def api_pixellot_config():
     # Reuse the System Overview version-compatibility banner data.
     cfg["compat"] = _check_pixellot_compatibility(identity, gpu_info)
 
-    # Enrich each camera with live firmware / tvMode / serial / model via the
-    # same cached CGI probe the Camera Connectivity lane uses (Admin:1234
-    # param.cgi). Skipped in demo mode — demo data already carries these.
-    cams = cfg.get("cameras") or []
-    if not DEMO_MODE and cams:
-        ocr_ips, _ = _build_ocr_sets(cfg)
-        targets = [c for c in cams if c.get("ip")]
-        probes = await asyncio.gather(
-            *[_probe_camera_ip(c["ip"], c["ip"] in ocr_ips) for c in targets]
-        )
-        for cam, probe in zip(targets, probes):
-            cam["reachable"] = bool(probe)
-            if not probe:
-                continue
-            for key in ("firmwareVersion", "tvMode", "serialNumber", "model"):
-                if probe.get(key):
-                    cam[key] = probe[key]
     return cfg
 
 
@@ -4721,14 +4632,12 @@ async def api_cameras(refresh: bool = False):
     # a camera's draw is not a fast-changing value the way link state is.
     # In-flight dedup means the intervening page polls just reuse the cached
     # payload.
-    nics, pix_config, expectations, net_config, poe = await asyncio.gather(
+    nics, expectations, net_config, poe = await asyncio.gather(
         run_ps("Get-NicAdapters.ps1", cache_ttl=1.5),
-        run_ps("Get-PixellotConfig.ps1"),
         run_ps("Get-CameraExpectations.ps1", timeout=10),
         run_ps("Get-NetworkConfig.ps1", timeout=15),
         run_ps("Get-PoePower.ps1", timeout=20, cache_ttl=6),
     )
-    ocr_ips, _ = _build_ocr_sets(pix_config)
     # Expected main-camera count from the Coordinator log (S1=4/S2=2/S2S=1).
     # Authoritative — drives the main-camera cap and the system-type label.
     expected_main = None
@@ -4743,8 +4652,8 @@ async def api_cameras(refresh: bool = False):
     # Manual refresh blocks until probes complete so the user sees the
     # update immediately.
     raw_ports = nics.get("ports", []) if nics and not nics.get("error") else []
-    probe_results = await _probe_all_cameras(raw_ports, ocr_ips, block=refresh)
-    ports = _enrich_ports(nics, pix_config, probe_results, expected_main_cameras=expected_main)
+    probe_results = await _probe_all_cameras(raw_ports, block=refresh)
+    ports = _enrich_ports(nics, probe_results, expected_main_cameras=expected_main)
     _flag_uplink_ports(ports, net_config)
     # The camera tab renders `body`; the Dashboard's copy of this finding
     # uses `recommendation`. Same record either way.
@@ -4755,7 +4664,6 @@ async def api_cameras(refresh: bool = False):
     ]
     return {
         "ports": ports,
-        "pixellotConfig": pix_config,
         "findings": _tag_readiness(count_findings + _compute_camera_findings(ports, poe)),
         "systemType": system_type,
         "expectedMainCameras": expected_main,
@@ -4763,7 +4671,7 @@ async def api_cameras(refresh: bool = False):
         # panel ("0 of 2 main cameras connected").
         "detectedMainCameras": _count_main_cameras(ports, probe_results),
         "mainCameraPorts": _main_camera_ports(ports),
-        "scoreboardCamera": _scoreboard_camera_state(ports, pix_config),
+        "scoreboardCamera": _scoreboard_camera_state(ports),
         # Whole collector payload, not just the readings — the frontend needs
         # supported/available/reason to tell "this NIC family can't measure
         # power" apart from "the driver isn't installed" apart from "measured,
@@ -4945,14 +4853,10 @@ async def api_cameras_video_test(request: Request):
 
     sys_type = expectations.get("systemType") if isinstance(expectations, dict) else None
 
-    nics, pix_config = await asyncio.gather(
-        run_ps("Get-NicAdapters.ps1"),
-        run_ps("Get-PixellotConfig.ps1"),
-    )
-    ocr_ips, _ = _build_ocr_sets(pix_config)
+    nics = await run_ps("Get-NicAdapters.ps1")
     raw_ports = nics.get("ports", []) if nics and not nics.get("error") else []
-    probe_results = await _probe_all_cameras(raw_ports, ocr_ips, block=False)
-    ports = _enrich_ports(nics, pix_config, probe_results)
+    probe_results = await _probe_all_cameras(raw_ports, block=False)
+    ports = _enrich_ports(nics, probe_results)
 
     # Collect (ip, label) for every detected camera on an up port, plus a
     # per-IP link-health map so we can flag degraded streams on the frames:
@@ -5290,22 +5194,21 @@ def _scoreboard_source(sc, ocr) -> dict:
     from the scoreboard controller through ScoreConnect. Only the one in use
     matters (Ian, Armstrong IL 2026-09-28: Pulse warned "ScoreConnect not
     running" on a unit whose OCR camera was connected and doing the job):
-      - OCR configured or detected: fine while the camera is connected,
-        whatever ScoreConnect is doing; an issue when it isn't connected.
-      - no OCR: ScoreConnect (III, or legacy I/II) must be running.
+      - OCR camera connected: fine, whatever ScoreConnect is doing.
+      - no OCR camera seen: ScoreConnect (III, or legacy I/II) must be
+        running. Pulse cannot distinguish an unplugged OCR camera from a
+        venue without one (see _scoreboard_camera_state).
     `ocr` is _scoreboard_camera_state()'s answer; None means no OCR camera
-    is configured or seen. ocrKnown False means the camera read itself
+    is seen. ocrKnown False means the camera read itself
     failed, so the OCR half is unknown and ScoreConnect is judged alone."""
     sc = sc if isinstance(sc, dict) else {}
     sc_running = bool(not sc.get("error") and (
         sc.get("reachable") or (sc.get("sc2") or {}).get("reachable")))
     ocr_known = ocr != "unknown"
     ocr = ocr if isinstance(ocr, dict) else None
-    if ocr and (ocr.get("configured") or ocr.get("connected")):
-        connected = bool(ocr.get("connected"))
-        return {"source": "ocr", "ok": connected,
-                "issue": None if connected else "ocr-not-connected",
-                "ocrConnected": connected, "ocrPort": ocr.get("port"),
+    if ocr and ocr.get("connected"):
+        return {"source": "ocr", "ok": True, "issue": None,
+                "ocrConnected": True, "ocrPort": ocr.get("port"),
                 "scoreConnectRunning": sc_running, "ocrKnown": True}
     return {"source": "scoreconnect", "ok": sc_running,
             "issue": None if sc_running else "scoreconnect-down",
@@ -5317,22 +5220,20 @@ def _scoreboard_source(sc, ocr) -> dict:
 async def api_scoreconnect():
     url = sc3_base_url()
     # 15s timeout — SC III REST probes ~2-4s, SC II file-based probe < 2s.
-    # The camera reads ride along (both cached, and the CGI probe is usually
+    # The camera read rides along (cached, and the CGI probe is usually
     # warm from preload) so the page and the splash know whether an OCR
     # camera makes ScoreConnect optional on this unit.
-    result, nics, pix_config = await asyncio.gather(
+    result, nics = await asyncio.gather(
         _run_sc_status(url, timeout=15),
         run_ps("Get-NicAdapters.ps1"),
-        run_ps("Get-PixellotConfig.ps1"),
     )
     ocr = "unknown"
     try:
         if nics and not nics.get("error"):
-            ocr_ips, _ = _build_ocr_sets(pix_config)
-            # block=False: cached probes (warm from preload) or default-IP /
-            # cameras.cfg identity; never hold the page on a slow camera.
-            probes = await _probe_all_cameras(nics.get("ports", []), ocr_ips, block=False)
-            ocr = _scoreboard_camera_state(_enrich_ports(nics, pix_config, probes), pix_config)
+            # block=False: cached probes (warm from preload) or default-IP
+            # identity; never hold the page on a slow camera.
+            probes = await _probe_all_cameras(nics.get("ports", []), block=False)
+            ocr = _scoreboard_camera_state(_enrich_ports(nics, probes))
     except Exception as e:
         _server_log.warning("ScoreConnect OCR check failed: %s", e)
     if isinstance(result, dict):
@@ -6992,17 +6893,15 @@ async def build_report() -> dict:
     sections = {k: _norm(r) for k, r in zip(keys, raw)}
 
     nics = sections.get("nicAdapters")
-    pix_cfg = sections.get("pixellotConfig")
 
     # Enriched camera connectivity: physical ports + detected cameras/OCR +
     # live CGI probe (firmware, model) — the Camera Connectivity lane's output,
     # which the raw nicAdapters dump alone doesn't capture.
     cam_probes = None  # None = probes never ran (findings keep ARP-only behavior)
     try:
-        ocr_ips, _ = _build_ocr_sets(pix_cfg)
         raw_ports = nics.get("ports", []) if isinstance(nics, dict) and not nics.get("error") else []
-        cam_probes = await _probe_all_cameras(raw_ports, ocr_ips)
-        sections["cameras"] = _enrich_ports(nics, pix_cfg, cam_probes)
+        cam_probes = await _probe_all_cameras(raw_ports)
+        sections["cameras"] = _enrich_ports(nics, cam_probes)
     except Exception as e:
         sections["cameras"] = {"error": f"camera enrichment failed: {type(e).__name__}: {e}"}
 
@@ -7014,7 +6913,7 @@ async def build_report() -> dict:
             nics, sections.get("hardware"), sections.get("installedSoftware"),
             sections.get("networkConfig"), sections.get("pixellotInstallState"),
             sections.get("networkPorts"), sections.get("gpuInfo"), sections.get("wifi"),
-            pixellot_config=pix_cfg, expectations=sections.get("cameraExpectations"),
+            expectations=sections.get("cameraExpectations"),
             disk_health=sections.get("diskHealth"),
             probe_results=cam_probes,
             tls_inspection=sections.get("tlsInspection"),
@@ -7231,33 +7130,16 @@ def _on_ws_disconnect(ws: WebSocket):
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     """Live-metrics WebSocket. After accept, streams periodic snapshots (CPU /
-    memory / temperature), tails new log-buffer lines, and refreshes Pixellot
-    config on the poll interval from settings (pollIntervalMs, floored at 1s)
-    until the client disconnects."""
+    memory / temperature), enriched camera ports, and new log-buffer lines on
+    the poll interval from settings (pollIntervalMs, floored at 1s) until the
+    client disconnects."""
     await ws.accept()
     _on_ws_connect(ws)
     try:
         settings = load_settings()
         interval = max(settings.get("pollIntervalMs", 3000), 1000) / 1000
         last_log_idx = len(LOG_BUFFER)
-        # Cache pixellot config but refresh periodically so config changes
-        # made during a long session pick up without forcing a reconnect.
-        pix_cfg = await run_ps("Get-PixellotConfig.ps1", timeout=10)
-        ws_ocr_ips, _ = _build_ocr_sets(pix_cfg)
-        pix_cfg_ttl_secs = 120  # refresh every ~2 minutes
-        last_pix_refresh = time.time()
-
         while True:
-            # Periodically refresh pixellot config (cheap — runs in parallel below).
-            if time.time() - last_pix_refresh > pix_cfg_ttl_secs:
-                try:
-                    pix_cfg = await run_ps("Get-PixellotConfig.ps1", timeout=10)
-                    ws_ocr_ips, _ = _build_ocr_sets(pix_cfg)
-                    last_pix_refresh = time.time()
-                except Exception as e:
-                    ps_log("ws-refresh", 0, "warn", f"pix_cfg refresh failed: {e}")
-                    _server_log.warning(f"pix_cfg refresh failed: {e}")
-
             perf, nics, net_health = await asyncio.gather(
                 run_ps("Get-Performance.ps1", timeout=10),
                 run_ps("Get-NicAdapters.ps1", timeout=10),
@@ -7265,7 +7147,7 @@ async def ws_endpoint(ws: WebSocket):
             )
             # CGI probes use 30s cache — no extra network cost on each tick
             ws_raw = nics.get("ports", []) if nics and not nics.get("error") else []
-            ws_probes = await _probe_all_cameras(ws_raw, ws_ocr_ips)
+            ws_probes = await _probe_all_cameras(ws_raw)
             all_logs = list(LOG_BUFFER)
             new_logs = all_logs[last_log_idx:]
             last_log_idx = len(all_logs)
@@ -7274,7 +7156,7 @@ async def ws_endpoint(ws: WebSocket):
                 {
                     "type": "metrics",
                     "performance": perf,
-                    "ports": _enrich_ports(nics, pix_cfg, ws_probes),
+                    "ports": _enrich_ports(nics, ws_probes),
                     "networkHealth": net_health,
                     "logs": new_logs,
                     # Seconds until the LMI auto-close fires, or None when no
