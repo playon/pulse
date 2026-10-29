@@ -3014,7 +3014,7 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
         # camera-less VPU.
         known = isinstance(expected_main, int) and expected_main > 0
         if known or not (identity or {}).get("isNonVpuHost"):
-            enriched_ports = _enrich_ports(nics)
+            enriched_ports = _enrich_ports(nics, probe_results)
             _flag_uplink_ports(enriched_ports, network_config)
             findings.extend(_camera_count_findings(
                 enriched_ports, expected_main, probe_results, probes_attempted))

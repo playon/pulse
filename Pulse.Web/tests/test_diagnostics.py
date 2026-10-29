@@ -1166,6 +1166,16 @@ class TestNoCamerasNeverPasses(unittest.TestCase):
         f = main._camera_count_findings(ports, 2, {}, True)
         self.assertEqual([x["code"] for x in f], ["cam-none"])
 
+    def test_custom_address_ocr_is_not_counted_as_a_main_camera(self):
+        port = self._port("Camera NIC", "00:30:64:5F:61:86", True)
+        port["arpEntries"] = [{"ip": "192.168.5.20", "mac": "00-D0-89-1E-89-08"}]
+        probes = {"00:D0:89:1E:89:08": {"mac": "00:D0:89:1E:89:08",
+                  "ip": "192.168.5.20", "modelNumber": "E8NC-G", "is_ocr": False}}
+        findings = self._findings({"ports": [port]}, expected=1, probes=probes)
+        cameras = [f for f in findings if f["code"].startswith("cam-")]
+        self.assertEqual([f["code"] for f in cameras], ["cam-none"])
+        self.assertIn("scoreboard camera", " ".join(cameras[0]["details"]))
+
 
 class TestMainCameraCount(unittest.TestCase):
     """_count_main_cameras counts each camera once, by MAC, across the
