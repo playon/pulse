@@ -587,8 +587,10 @@ class TestCalibrationCache(unittest.TestCase):
         # A recalibration, as the next read after the cache expires would see it.
         with open(self.cache, encoding="utf-8") as fh:
             data = json.load(fh)
-        data[self.SCRIPT]["result"]["multisport"]["sports"].append(
-            {"name": "Volleyball", "at": "2026-10-16T09:00:00-04:00"})
+        from datetime import datetime, timedelta
+        sports = data[self.SCRIPT]["result"]["multisport"]["sports"]
+        recalibrated_at = max(datetime.fromisoformat(s["at"]) for s in sports) + timedelta(seconds=1)
+        sports.append({"name": "Volleyball", "at": recalibrated_at.isoformat()})
         with open(self.cache, "w", encoding="utf-8") as fh:
             json.dump(data, fh)
         runs, changed, raw2 = self._pass()
