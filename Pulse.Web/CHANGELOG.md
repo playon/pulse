@@ -32,6 +32,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - A VPU missing one of its main cameras (for example 1 of 2 on an S2) now reads FAIL and says it won't stream. Before, it read only as a warning.
 - The readiness line no longer says "No risks tonight" right after "1 thing is stopping tonight's game". When something is stopping the game it leaves out the risk count unless there are risks.
 - Pulse now refuses requests that another web page open in the browser on the VPU makes to it. Before, a page could have triggered a reboot, a service restart or an update just by being open. Pulse's own page works as before, at `localhost` or `127.0.0.1`, on any port. A request that arrives under any other hostname, or from any other origin, is refused with "only answers requests from its own page".
+- ScoreConnect III install: the install log no longer closes itself a second after you open it.
+- ScoreConnect III install: Pulse no longer says the install failed when ScoreConnect III takes more than 30 seconds to start after installing. If the installer goes quiet, Pulse keeps watching and turns the install green if it finishes.
 
 ## [1.4.1] - 2026-10-13
 
