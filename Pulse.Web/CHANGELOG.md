@@ -21,6 +21,11 @@ flow shows testers when a new build is available.
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 `Pulse.Web/VERSION`.
 
+## [1.4.2] - 2026-11-02
+
+### Fixed
+- Pulse installs on a new VPU again. Since 2026-11-02, a first run (or a repair of Pulse's Python) stopped at "installing pip" with "ERROR: To modify pip, please run the following command", because a download Pulse uses changed. Run Pulse again to finish setup.
+
 ## [1.4.1] - 2026-10-13
 
 ### Changed
