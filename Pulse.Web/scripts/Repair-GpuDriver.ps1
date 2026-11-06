@@ -32,16 +32,33 @@
     swaps. -noreboot is kept: the tech chooses when to restart.
 
     Emits one JSON object on stdout. Nothing else may print to stdout.
+
+    Pulse runs this DETACHED (gpu_job.py) with -StatusPath, so the install
+    outlives a page reload, a browser that crashes while the display driver
+    swaps, and Pulse itself closing. Progress then goes to the status file:
+    the current stage, download bytes, the steps so far, a heartbeat at least
+    every few seconds, and finally the same result object stdout gets.
 .PARAMETER DownloadDir
     Where the installer is saved. Default matches the field procedure.
 .PARAMETER Reinstall
     1 = install the approved driver even though the card works (a technician
     asked for it and confirmed in Pulse). Default 0: a working card is left alone.
+.PARAMETER StatusPath
+    Where to write progress JSON (Pulse passes
+    C:\ProgramData\Pulse\gpu-driver-status.json). Empty = no status file.
+.PARAMETER RunId
+    Pulse's id for this run, echoed into the status file.
+.PARAMETER Kind
+    What the technician clicked (install, reinstall, rescan, enable), echoed
+    into the status file so a reopened page shows the right steps.
 #>
 [CmdletBinding()]
 param(
     [string]$DownloadDir  = 'C:\pixellot\downloadedversion',
-    [int]$Reinstall = 0
+    [int]$Reinstall = 0,
+    [string]$StatusPath = '',
+    [string]$RunId = '',
+    [string]$Kind = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,6 +66,7 @@ $ProgressPreference    = 'SilentlyContinue'
 . (Join-Path $PSScriptRoot '_GpuDriverCommon.ps1')
 
 $t0            = Get-Date
+$script:startedEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 $installerName = $null
 $installerPath = $null
 $partialPath   = $null
@@ -57,12 +75,66 @@ $minFreeBytes  = 4GB
 $installWaitMs = 20 * 60 * 1000
 $steps         = New-Object System.Collections.ArrayList
 
+$script:runStage   = 'checking'
+$script:runMessage = ''
+$script:bytesDone  = $null
+$script:bytesTotal = $null
+$stagesSeen        = New-Object System.Collections.ArrayList
+
 function Add-Step([string]$name, [bool]$ok, [string]$detail) {
     [void]$steps.Add([pscustomobject]@{ step = $name; ok = $ok; detail = $detail })
 }
 
+# Writes the status file (no-op without -StatusPath). Called on every stage
+# change and as a heartbeat inside every long wait, so Pulse can tell a slow
+# install from a dead one. Written to a temp file and swapped in, so a reader
+# never sees half a file. Never throws and never prints: a failed status
+# write must not stop a driver install halfway.
+function Write-RunStatus($result) {
+    if (-not $StatusPath) { return }
+    $json = $null
+    try {
+        $dir = Split-Path -Parent $StatusPath
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) { $null = New-Item -ItemType Directory -Path $dir -Force }
+        $json = [pscustomobject]@{
+            runId         = $RunId
+            kind          = $Kind
+            pid           = $PID
+            reinstall     = ($Reinstall -ne 0)
+            stage         = $script:runStage
+            message       = $script:runMessage
+            stagesSeen    = $stagesSeen.ToArray()
+            bytesDone     = $script:bytesDone
+            bytesTotal    = $script:bytesTotal
+            steps         = $steps.ToArray()
+            startedEpoch  = $script:startedEpoch
+            updatedEpoch  = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            updatedAt     = (Get-Date).ToUniversalTime().ToString('o')
+            result        = $result
+        } | ConvertTo-Json -Depth 6 -Compress
+        $tmp = "$StatusPath.tmp"
+        [IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
+        if (Test-Path -LiteralPath $StatusPath) {
+            [IO.File]::Replace($tmp, $StatusPath, [NullString]::Value)
+        } else {
+            [IO.File]::Move($tmp, $StatusPath)
+        }
+    } catch {
+        # Pulse may be reading the file at this instant; a direct write is
+        # second best but still moves the heartbeat on.
+        if ($json) { try { [IO.File]::WriteAllText($StatusPath, $json, (New-Object System.Text.UTF8Encoding($false))) } catch { } }
+    }
+}
+
+function Set-Stage([string]$name, [string]$message) {
+    $script:runStage   = $name
+    $script:runMessage = $message
+    if ($stagesSeen.Count -eq 0 -or $stagesSeen[$stagesSeen.Count - 1] -ne $name) { [void]$stagesSeen.Add($name) }
+    Write-RunStatus $null
+}
+
 function Emit([string]$status, [string]$message, $before, $after, $exitCode) {
-    [pscustomobject]@{
+    $o = [pscustomobject]@{
         status      = $status
         message     = $message
         stateBefore = $before
@@ -71,7 +143,49 @@ function Emit([string]$status, [string]$message, $before, $after, $exitCode) {
         installer   = $installerName
         steps       = $steps.ToArray()
         durationSec = [int]((Get-Date) - $t0).TotalSeconds
-    } | ConvertTo-Json -Depth 5 -Compress
+    }
+    $script:runStage   = 'done'
+    $script:runMessage = $message
+    Write-RunStatus $o
+    $o | ConvertTo-Json -Depth 5 -Compress
+}
+
+# Streams the download to disk in 1 MB chunks so the status file can report
+# how far it has got (Invoke-WebRequest blocks silently for the whole ~700 MB).
+# ReadWriteTimeout fails a download that stalls instead of hanging for ever.
+function Save-WithProgress([string]$url, [string]$dest) {
+    $req = [Net.HttpWebRequest]::Create($url)
+    $req.Timeout = 60000
+    $req.ReadWriteTimeout = 120000
+    $resp = $req.GetResponse()
+    try {
+        $total = [long]$resp.ContentLength
+        if ($total -gt 0) { $script:bytesTotal = $total } else { $script:bytesTotal = $null }
+        $script:bytesDone = [long]0
+        $in  = $resp.GetResponseStream()
+        $out = [IO.File]::Create($dest)
+        try {
+            $buf  = New-Object byte[] (1MB)
+            $done = [long]0
+            $beat = Get-Date
+            while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) {
+                $out.Write($buf, 0, $n)
+                $done += $n
+                if (((Get-Date) - $beat).TotalSeconds -ge 2) {
+                    $script:bytesDone = $done
+                    Write-RunStatus $null
+                    $beat = Get-Date
+                }
+            }
+            $script:bytesDone = $done
+        } finally {
+            $out.Close()
+            $in.Close()
+        }
+        if ($total -gt 0 -and $done -ne $total) { throw "The download stopped early ($done of $total bytes)." }
+    } finally {
+        $resp.Close()
+    }
 }
 
 function Test-NvidiaSigned([string]$path) {
@@ -83,6 +197,7 @@ function Test-NvidiaSigned([string]$path) {
 }
 
 try {
+    Set-Stage 'checking' 'Checking the graphics card.'
     if (-not (Test-IsAdmin)) {
         Emit 'no-admin' 'Pulse is not running as administrator, so it cannot install a driver. Close Pulse and start it again, choosing Yes at the Windows prompt.' $null $null $null
         return
@@ -108,6 +223,7 @@ try {
     $state = $before
 
     if ($state.state -eq 'not-detected') {
+        Set-Stage 'rescanning' 'Asking Windows to rescan for the graphics card.'
         try {
             $scan = Invoke-HardwareRescan
             Add-Step 'rescan for hardware' $scan.ok "Windows hardware rescan returned code $($scan.code) (0 = success)"
@@ -121,6 +237,7 @@ try {
 
     # A card that is merely turned off needs turning on, not a reinstall.
     if ($state.state -eq 'disabled') {
+        Set-Stage 'enabling' 'Turning the graphics card on.'
         foreach ($dev in @($state.devices | Where-Object { $_.state -eq 'disabled' })) {
             try {
                 Enable-PnpDevice -InstanceId $dev.deviceId -Confirm:$false -ErrorAction Stop
@@ -166,6 +283,7 @@ try {
     }
 
     # -- Choose the approved driver for THIS card; unknown cards fail closed
+    Set-Stage 'preparing' 'Choosing the approved driver and checking disk space.'
     $target = @($state.devices | Where-Object { $_.state -in @('no-driver', 'driver-error') })[0]
     if (-not $target -and $Reinstall -ne 0) {
         # Reinstall on request: the card works, the tech wants the approved driver anyway.
@@ -201,6 +319,7 @@ try {
 
     # -- Download (reuse a complete, correctly signed copy) ----------------
     $haveGood = $false
+    Set-Stage 'downloading' 'Downloading the driver.'
     if (Test-Path -LiteralPath $installerPath) {
         $existing = Test-NvidiaSigned $installerPath
         if ($existing.ok) {
@@ -215,7 +334,7 @@ try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]'Tls,Tls11,Tls12'
         try {
             if (Test-Path -LiteralPath $partialPath) { Remove-Item -LiteralPath $partialPath -Force }
-            Invoke-WebRequest -Uri $DriverUrl -OutFile $partialPath -UseBasicParsing
+            Save-WithProgress $DriverUrl $partialPath
             Move-Item -LiteralPath $partialPath -Destination $installerPath -Force
             $mb = [int]((Get-Item -LiteralPath $installerPath).Length / 1MB)
             Add-Step 'download driver' $true "$mb MB from $DriverUrl"
@@ -228,6 +347,7 @@ try {
     }
 
     # -- Never run an unsigned or foreign installer ------------------------
+    Set-Stage 'verifying' 'Checking the installer is signed by NVIDIA.'
     $sig = Test-NvidiaSigned $installerPath
     if (-not $sig.ok) {
         Remove-Item -LiteralPath $installerPath -Force -ErrorAction SilentlyContinue
@@ -238,9 +358,17 @@ try {
     Add-Step 'verify signature' $true $sig.signer
 
     # -- Install -----------------------------------------------------------
+    Set-Stage 'installing' 'Installing the driver. The screen goes black for a few seconds, maybe more than once, while Windows swaps the driver.'
     $proc = Start-Process -FilePath $installerPath -ArgumentList '-s -clean -noreboot' -PassThru -ErrorAction Stop
     $null = $proc.Handle
-    if (-not $proc.WaitForExit($installWaitMs)) {
+    $installDeadline = (Get-Date).AddMilliseconds($installWaitMs)
+    $installExited = $false
+    while ($true) {
+        if ($proc.WaitForExit(3000)) { $installExited = $true; break }
+        if ((Get-Date) -gt $installDeadline) { break }
+        Write-RunStatus $null
+    }
+    if (-not $installExited) {
         Add-Step 'run installer' $false 'still running after 20 minutes'
         Emit 'install-timeout' 'The driver installer was still running after 20 minutes. It was left running. Wait, then check the graphics card again before trying anything else.' $before.state $state.state $null
         return
@@ -249,9 +377,11 @@ try {
     Add-Step 'run installer' $true "exit code $exitCode"
 
     # Windows re-enumerates the card a little after the installer exits.
+    Set-Stage 'confirming' 'Checking the card works with the new driver.'
     $final = Get-GpuDriverState
     $waited = 0
     while ($final.state -in @('no-driver', 'driver-error') -and $waited -lt 120) {
+        Write-RunStatus $null
         Start-Sleep -Seconds 10
         $waited += 10
         $final = Get-GpuDriverState
@@ -271,10 +401,14 @@ try {
     }
 }
 catch {
-    [pscustomobject]@{
+    $o = [pscustomobject]@{
         error   = $true
         message = $_.Exception.Message
         script  = 'Repair-GpuDriver.ps1'
         steps   = $steps.ToArray()
-    } | ConvertTo-Json -Depth 5 -Compress
+    }
+    $script:runStage   = 'done'
+    $script:runMessage = $_.Exception.Message
+    Write-RunStatus $o
+    $o | ConvertTo-Json -Depth 5 -Compress
 }
