@@ -104,6 +104,136 @@ class EventWatchTest(unittest.TestCase):
         self.tick(ev, 30, pid="300")
         self.assertEqual(event_watch.verdict(ev, T0 + 30), "restart-loop")
 
+    def status(self, sec, fps=25, fails=0, health=1):
+        return line(sec, "StatusReporter::reportStatus |VPU:"
+                    f"|HD_Writer0_Stream0_FPS:Lst={fps} |HD_Writer0_Stream0_Fails:Lst={fails} "
+                    f"|Health:Lst={health} |Camera0AvgFps:Lst=25 |Camera1AvgFps:Lst=25 |")
+
+    def launch(self, sec, running=False):
+        text = line(sec, "START NEW LOG SESSION >>> VPU.exe - Version: 5.37.2")
+        text += line(sec + 1, "VPU Checking Instances")
+        if running:
+            text += line(sec + 26, "urlToStreamWriter for urls zixi://stream.invalid:2088/test")
+            text += line(sec + 27, "Created Zixi stream: HD_Writer0_Stream0")
+            text += self.status(sec + 28)
+        return text
+
+    def crash_loop(self):
+        ev = {"startedAt": T0}
+        self.write(self.vpu, self.launch(0, True) + self.launch(60, True) + self.launch(120, True))
+        self.tick(ev, 150)
+        return ev
+
+    def test_two_hung_initializations_then_healthy_delivery_are_not_a_crash_loop(self):
+        ev = {"startedAt": T0}
+        self.write(self.vpu, self.launch(0) + self.launch(420)
+                   + line(1019, "Reached 2 consecutive failed attempts, rebooting...")
+                   + self.launch(1020, True))
+        self.tick(ev, 1050)
+        s = event_watch.summary(ev, T0 + 1050, ended=False)
+        self.assertEqual(s["restarts"], 2)  # legacy launch history is unchanged
+        self.assertEqual(s["startupHangs"], 2)
+        self.assertEqual(s["runningRestarts"], 0)
+        self.assertEqual(s["state"], "on-air")
+        self.tick(ev, 1060)  # no recount on the next read
+        self.assertEqual(ev["startupHangs"], 2)
+
+    def test_running_crash_loop_clears_only_after_five_healthy_minutes(self):
+        ev = self.crash_loop()
+        self.assertEqual(ev["runningRestarts"], 2)
+        self.assertEqual(event_watch.verdict(ev, T0 + 150), "restart-loop")
+        self.write(self.vpu, self.status(447))
+        self.tick(ev, 447)
+        self.assertEqual(event_watch.verdict(ev, T0 + 447), "restart-loop")
+        self.write(self.vpu, self.status(448))
+        self.tick(ev, 448)
+        s = event_watch.summary(ev, T0 + 448, ended=False)
+        self.assertEqual(s["state"], "on-air")
+        self.assertEqual(s["restarts"], 2)
+        self.assertEqual(s["runningRestarts"], 2)
+        self.assertEqual(s["startupHangs"], 0)
+        self.write(self.vpu, self.status(750, health=0))
+        self.tick(ev, 750)
+        self.assertNotEqual(event_watch.verdict(ev, T0 + 750), "restart-loop")
+        self.write(self.vpu, self.launch(800, True) + self.launch(860, True))
+        self.tick(ev, 890)
+        self.assertEqual(event_watch.verdict(ev, T0 + 890), "restart-loop")
+
+    def test_failure_interrupts_the_healthy_recovery_interval(self):
+        ev = self.crash_loop()
+        self.write(self.vpu, line(400, "Failed connecting to zixi://stream.invalid:2088/test, because x return value: -2")
+                   + line(410, "Created Zixi stream: HD_Writer0_Stream0") + self.status(420))
+        self.tick(ev, 420)
+        self.write(self.vpu, self.status(448))
+        self.tick(ev, 448)
+        self.assertEqual(event_watch.verdict(ev, T0 + 448), "restart-loop")
+        self.write(self.vpu, self.status(720))
+        self.tick(ev, 720)
+        self.assertEqual(event_watch.verdict(ev, T0 + 720), "on-air")
+
+    def test_stale_or_unhealthy_status_cannot_clear_a_loop(self):
+        for kwargs in ({}, {"fps": 0}, {"fails": 1}, {"health": 0}):
+            with self.subTest(kwargs=kwargs):
+                ev = self.crash_loop()
+                if kwargs:
+                    self.write(self.vpu, self.status(448, **kwargs))
+                self.tick(ev, 448)
+                self.assertEqual(event_watch.verdict(ev, T0 + 448), "restart-loop")
+                # Isolate each fixture without changing the reader implementation.
+                os.remove(self.vpu)
+
+    def test_new_launch_does_not_inherit_the_previous_connection_or_status(self):
+        ev = {"startedAt": T0}
+        self.write(self.vpu, self.launch(0, True) + self.launch(60))
+        self.tick(ev, 90)
+        self.assertEqual(ev["runningRestarts"], 1)
+        self.assertNotIn("connectedAt", ev)
+        self.assertNotIn("status", ev)
+        self.assertEqual(event_watch.verdict(ev, T0 + 90), "connecting")
+        self.write(self.vpu, self.launch(120, True))
+        self.tick(ev, 150)
+        self.assertEqual(ev["startupHangs"], 1)
+        self.assertEqual(ev["runningRestarts"], 1)
+
+    def test_stream_setup_without_delivery_is_running_not_a_startup_hang(self):
+        ev = {"startedAt": T0}
+        self.write(self.vpu, self.launch(0)
+                   + line(26, "urlToStreamWriter for urls zixi://stream.invalid:2088/test")
+                   + self.launch(60))
+        self.tick(ev, 90)
+        self.assertEqual(ev["runningRestarts"], 1)
+        self.assertEqual(ev.get("startupHangs", 0), 0)
+
+    def test_explicitly_closed_initialization_is_not_a_startup_hang(self):
+        ev = {"startedAt": T0}
+        self.write(self.vpu, self.launch(0)
+                   + line(30, 'CloseUnit ... Reason: "stopStreaming event command"')
+                   + self.launch(60, True))
+        self.tick(ev, 90)
+        s = event_watch.summary(ev, T0 + 90, ended=False)
+        self.assertEqual(s["restarts"], 1)
+        self.assertEqual(s["startupHangs"], 0)
+        self.assertEqual(s["runningRestarts"], 0)
+        self.assertEqual(s["state"], "on-air")
+
+    def test_mid_event_crashes_without_a_new_connection_stay_a_loop(self):
+        ev = {"startedAt": T0}
+        self.write(self.vpu, self.launch(0, True) + self.launch(60, True) + self.launch(120))
+        self.tick(ev, 150)
+        self.assertEqual(ev["runningRestarts"], 2)
+        self.assertEqual(event_watch.verdict(ev, T0 + 150), "restart-loop")
+        self.tick(ev, 1000)
+        self.assertEqual(event_watch.verdict(ev, T0 + 1000), "restart-loop")
+
+    def test_never_connected_hung_launches_do_not_end_with_crash_loop_reason(self):
+        ev = {"startedAt": T0}
+        self.write(self.vpu, self.launch(0) + self.launch(420) + self.launch(1020))
+        self.tick(ev, 1050)
+        s = event_watch.summary(ev, T0 + 1050, ended=True)
+        self.assertEqual(s["restarts"], 2)
+        self.assertEqual(s["startupHangs"], 2)
+        self.assertEqual(s["reason"], "never-connected")
+
     def test_a_camera_nic_that_drops_to_zero_is_camera_link_down(self):
         ev = {"startedAt": T0}
         self.write(self.bench, bench_row(10))

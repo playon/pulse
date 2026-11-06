@@ -48,7 +48,9 @@ MAX_READ_BYTES = 4 * 1024 * 1024    # per tick; a busier log is skipped to its t
 CATCH_UP_BYTES = 96 * 1024 * 1024   # once, when the monitor starts mid-event
 BENCH_TAIL_BYTES = 16 * 1024        # ~40 rows of AgentBenchmarks
 FAILING_AFTER_SECONDS = 120         # failed tries for this long with no connect
-RESTART_LOOP_COUNT = 2              # VPU.exe restarts within one event
+RESTART_LOOP_COUNT = 2              # running-session restarts before recovery
+RESTART_RECOVERY_SECONDS = 300      # a full monitor interval of healthy delivery
+STATUS_FRESH_SECONDS = 120          # status is normally written every second
 CAMERA_SLOW_FPS = 15.0              # a camera below this is degrading the picture
 SCHEMA = "pulse.event/v1"
 SC3_SETTINGS = r"C:\ProgramData\Sportzcast LLC\ScoreConnectIII\Files\settings.json"
@@ -245,6 +247,9 @@ def parse_vpu_lines(text: str) -> list:
                 and "Start Reason:" not in line and "ReplayManager::init(" not in line
                 and "recordedEvents" not in line):
             continue
+        if status:
+            out.append({"t": _line_time(status), "kind": "status", "values": parse_status(status)})
+            status = None
         t = _line_time(line)
         if "START NEW LOG SESSION" in line:
             m = re.search(r"Version: ([0-9.]+)", line)
@@ -417,7 +422,7 @@ def slow_cameras(ev: dict) -> list:
 
 def verdict(ev: dict, now: float) -> str:
     """One word for what the event is doing now."""
-    if (ev.get("restarts") or 0) >= RESTART_LOOP_COUNT:
+    if (ev.get("loopRestarts") or 0) >= RESTART_LOOP_COUNT:
         return "restart-loop"
     down = ev.get("nicsDown") or []
     if down:
@@ -439,6 +444,46 @@ def verdict(ev: dict, now: float) -> str:
     if first_fail and now - first_fail >= FAILING_AFTER_SECONDS:
         return "stream-failing"
     return "connecting"
+
+
+def _next_session(ev: dict, t: float):
+    """Classify the session being replaced; keep legacy launch history separate.
+
+    A stream chain, connection attempt/failover, connect or status reporter
+    proves stream setup was reached, not delivery. Without those, an unclosed
+    known launch is a startup hang. Missing
+    logs are unknown, so a PID-only replacement counts conservatively as a
+    running restart, never as a proven startup hang.
+    """
+    if ev.get("sessionRunning") is False:
+        if not ev.get("closedAt"):
+            ev["startupHangs"] = (ev.get("startupHangs") or 0) + 1
+    else:
+        ev["runningRestarts"] = (ev.get("runningRestarts") or 0) + 1
+        ev["loopRestarts"] = (ev.get("loopRestarts") or 0) + 1
+    if ev.get("connectedAt") and not ev.get("downSince"):
+        ev["downSince"] = t
+    for key in ("connectedAt", "status", "statusAt", "healthySince", "closedAt", "closeReason", "failingSince"):
+        ev.pop(key, None)
+    ev["sessionRunning"] = False
+
+
+def _update_restart_recovery(ev: dict, now: float):
+    """Only fresh, healthy on-air observations retire the active loop count."""
+    st = ev.get("status") or {}
+    conn = ev.get("connectedAt")
+    healthy = (conn and (ev.get("lastFailAt") or 0) <= conn
+               and not ev.get("closedAt") and not ev.get("nicsDown") and not slow_cameras(ev)
+               and 0 <= now - (ev.get("statusAt") or 0) <= STATUS_FRESH_SECONDS
+               and st.get("HD_Writer0_Stream0_Fails") == 0
+               and st.get("HD_Writer0_Stream0_FPS", 0) >= CAMERA_SLOW_FPS
+               and st.get("Health") == 1)
+    if not healthy:
+        ev.pop("healthySince", None)
+    else:
+        ev.setdefault("healthySince", ev["statusAt"])
+        if ev["statusAt"] - ev["healthySince"] >= RESTART_RECOVERY_SECONDS:
+            ev["loopRestarts"] = 0
 
 
 def observe(ev: dict, vpu_pid: Optional[str], now: float,
@@ -478,19 +523,24 @@ def observe(ev: dict, vpu_pid: Optional[str], now: float,
             if k == "chain":
                 ev["chain"] = e["urls"]
                 ev["pendingPath"] = _path_of(e["urls"][0] if e["urls"] else None)
+                ev["sessionRunning"] = True
             elif k == "fail":
+                ev["sessionRunning"] = True
                 ev["fails"] = (ev.get("fails") or 0) + 1
                 if ev.get("connectedAt") and not ev.get("downSince"):
                     ev["downSince"] = t          # an outage starts at the first failed try after a connect
                 ev["lastFailAt"] = t
+                ev.pop("healthySince", None)
                 ev["lastFailUrl"] = e.get("url")
                 ev["lastFailCode"] = e.get("returnValue")
                 if not ev.get("connectedAt") or (ev.get("lastFailAt") or 0) > ev["connectedAt"]:
                     ev.setdefault("failingSince", t)
             elif k == "move":
+                ev["sessionRunning"] = True
                 ev["failovers"] = (ev.get("failovers") or 0) + 1
                 ev["pendingPath"] = _path_of(e.get("to"))
             elif k == "connected":
+                ev["sessionRunning"] = True
                 if ev.get("downSince"):
                     ev["offAirSeconds"] = (ev.get("offAirSeconds") or 0) + max(0, t - ev.pop("downSince"))
                 ev["connectedAt"] = t
@@ -504,9 +554,10 @@ def observe(ev: dict, vpu_pid: Optional[str], now: float,
             elif k == "drop":
                 ev["drops"] = (ev.get("drops") or 0) + 1
             elif k == "session":
+                if ev.get("sessions") or ev.get("sessionRunning") is not None:
+                    _next_session(ev, t)
                 ev["sessions"] = (ev.get("sessions") or 0) + 1
-                if ev.get("connectedAt") and not ev.get("downSince"):
-                    ev["downSince"] = t          # VPU.exe restarted while on air
+                ev["sessionRunning"] = False
                 ev["vpuVersion"] = e.get("version")
             elif k == "poeReset":
                 ev["poeResets"] = (ev.get("poeResets") or 0) + 1
@@ -532,6 +583,11 @@ def observe(ev: dict, vpu_pid: Optional[str], now: float,
             elif k == "status":
                 ev["status"] = e["values"]
                 ev["statusAt"] = t
+                ev["sessionRunning"] = True
+                st = e["values"]
+                if (st.get("HD_Writer0_Stream0_Fails") != 0 or st.get("Health") != 1
+                        or st.get("HD_Writer0_Stream0_FPS", 0) < CAMERA_SLOW_FPS or slow_cameras(ev)):
+                    ev.pop("healthySince", None)
     if ev.pop("midEventStart", False) and not ev.get("sessions"):
         # Started reading mid-event, past the session line: VPU.exe is in a
         # session we didn't see begin, so the next one is a restart.
@@ -543,6 +599,8 @@ def observe(ev: dict, vpu_pid: Optional[str], now: float,
     restarts_now = max(new_sessions - (1 if sessions_before == 0 else 0), 0)
     if restarts_now == 0 and pid_changed and not newest:
         restarts_now = 1
+        _next_session(ev, now)
+        ev.pop("sessionRunning", None)  # no log: initialization remains unknown
     if restarts_now:
         ev["restarts"] = (ev.get("restarts") or 0) + restarts_now
     if not ev.get("eventId"):
@@ -576,6 +634,7 @@ def observe(ev: dict, vpu_pid: Optional[str], now: float,
         if not sc:
             ev["scoreConnectDownSeen"] = True
     ev["lastReadAt"] = now
+    _update_restart_recovery(ev, now)
     return cost
 
 
@@ -615,6 +674,8 @@ def summary(ev: dict, now: float, ended: bool) -> dict:
         "lastFailUrl": ev.get("lastFailUrl"),
         "lastFailCode": ev.get("lastFailCode"),
         "restarts": ev.get("restarts") or 0,
+        "runningRestarts": ev.get("runningRestarts") or 0,
+        "startupHangs": ev.get("startupHangs") or 0,
         "drops": ev.get("drops") or 0,
         "camerasDown": len(ev.get("nicsDown") or []),
         "camerasSlow": slow_cameras(ev),
@@ -682,7 +743,7 @@ def summary(ev: dict, now: float, ended: bool) -> dict:
         out["endedAt"] = _iso(ev.get("closedAt") or now)
         # Why it never aired, in the order a tech would rule things out.
         if not first:
-            out["reason"] = ("restart-loop" if out["restarts"] >= RESTART_LOOP_COUNT else
+            out["reason"] = ("restart-loop" if v == "restart-loop" else
                              "camera-link-down" if out["camerasDown"] else
                              "camera-degraded" if out["camerasSlow"] else
                              "stream-failing" if out["fails"] else "never-connected")
