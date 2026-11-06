@@ -2590,7 +2590,53 @@ def _vpu_restart_findings(restarts) -> list:
     })]
 
 
-def _compute_findings(identity, performance, services, nics, hardware=None, installed_sw=None, network_config=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, expectations=None, disk_health=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None, binaries=None, vpu_restarts=None) -> list:
+def _calibration_findings(calibration, identity=None) -> list:
+    """Main camera with no saved calibration for any sport.
+
+    Without a multisport calibration the VPU can't stitch the head's sensors
+    into one picture, so the game streams as the separate camera views side
+    by side. It still streams (Ian, 2026-10-14), so this is a warning, never
+    a blocker. Prompted by Corvallis MT, 2026-10-12: read stream-ready and
+    was fixed by repairing in the right mode and recalibrating. Whether it
+    had no calibration at all, or one for the wrong mode, is unconfirmed;
+    this only catches the first.
+
+    `calibration` is a Get-CalibrationStatus.ps1 read (the same collector the
+    fleet monitor reports as telemetry.calibration). That collector errors
+    when it can't read the Pixellot Configuration folder, which is also what
+    a box with no Pixellot install gives, so silent on an error, on a host
+    that isn't a VPU, and on no read at all. A readable Configuration folder
+    with no sport folders is a real answer: nothing calibrated.
+    """
+    cal = calibration if isinstance(calibration, dict) else None
+    if not cal or cal.get("error") or (identity or {}).get("isNonVpuHost"):
+        return []
+    multi = cal.get("multisport")
+    if not isinstance(multi, dict):
+        return []
+    if multi.get("exists") and not multi.get("readable"):
+        return []
+    if not multi.get("exists") and not cal.get("configRootReadable"):
+        return []
+    if multi.get("sports"):
+        return []
+    return [{
+        "code": "cal-main-missing",
+        "severity": "warning",
+        "category": "Pixellot",
+        "title": "The main camera isn't calibrated for any sport",
+        "recommendation": (
+            "The main camera has no saved calibration, so the stream shows each camera's view "
+            "side by side instead of one joined picture. The game still streams. Support: open "
+            "Head Setup, choose the sport played here, and calibrate it."
+        ),
+        "evidence": (
+            "C:\\Pixellot\\Data\\Configuration\\multisportcalibration has no sport folders."
+        ),
+    }]
+
+
+def _compute_findings(identity, performance, services, nics, hardware=None, installed_sw=None, network_config=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, expectations=None, disk_health=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None, binaries=None, vpu_restarts=None, calibration=None) -> list:
     findings = []
 
     # None vs {} matters for probe_results: None means the caller never
@@ -3311,6 +3357,9 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
     # ── Scorebug never reached the broadcast (on-box, not network) ──
     findings.extend(_graphics_findings(graphics_delivery))
 
+    # ── Main camera never calibrated (streams split, still streams) ──
+    findings.extend(_calibration_findings(calibration, identity))
+
     # ── Missing / under-count main cameras ─────────────────────
     # One helper for the Dashboard, readiness, the ticket and Camera
     # Connectivity; see _camera_count_findings.
@@ -3450,6 +3499,11 @@ _READINESS_POLICY = {
                                          #     scoreboard type is selected. Airs clean
                                          #     of graphics every game until fixed.
                                          #     Field: Merrol Hyde, 2026-08-17.
+    "cal-main-missing":      "risk",     # F44 main camera has no multisport
+                                         #     calibration: the game streams as split
+                                         #     camera views, but it streams (Ian,
+                                         #     2026-10-14). Prompted by Corvallis
+                                         #     MT, 2026-10-12 (read stream-ready).
     "disk-smart-wear":       "risk",     # SSD at 80%+ of rated write life (Ian, 2026-10-15: was info)
     "sw-security":           "risk",     # F29 (blocking agent.exe would surface as F2) (Ian, 2026-10-15: was info)
     "sw-crypto-miner":       "risk",     # F30 (Ian, 2026-10-15: was info)
@@ -4357,7 +4411,7 @@ def _compute_camera_findings(ports: list, poe=None) -> list:
 # ─── Data-building helpers (shared by per-page and preload) ──
 
 
-def _build_dashboard(identity, performance, services, nics, network_config=None, hardware=None, installed_sw=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, expectations=None, disk_health=None, perf_sample=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None, binaries=None, vpu_restarts=None):
+def _build_dashboard(identity, performance, services, nics, network_config=None, hardware=None, installed_sw=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, expectations=None, disk_health=None, perf_sample=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None, binaries=None, vpu_restarts=None, calibration=None):
     # Tag adapter roles (motherboard / camera / wifi) so both the findings and
     # the embedded "Network config" the dashboard ships carry them.
     _classify_network_adapters(network_config)
@@ -4422,7 +4476,7 @@ def _build_dashboard(identity, performance, services, nics, network_config=None,
         if isinstance(data, dict) and data.get("error")
     ]
 
-    findings = _compute_findings(identity, performance, services, nics, hardware, installed_sw, network_config, install_state, port_tests, gpu_info, wifi, expectations=expectations, disk_health=disk_health, probe_results=probe_results, tls_inspection=tls_inspection, lmi_log=lmi_log, graphics_delivery=graphics_delivery, binaries=binaries, vpu_restarts=vpu_restarts)
+    findings = _compute_findings(identity, performance, services, nics, hardware, installed_sw, network_config, install_state, port_tests, gpu_info, wifi, expectations=expectations, disk_health=disk_health, probe_results=probe_results, tls_inspection=tls_inspection, lmi_log=lmi_log, graphics_delivery=graphics_delivery, binaries=binaries, vpu_restarts=vpu_restarts, calibration=calibration)
 
     return {
         "identity": flat_identity,
@@ -4596,7 +4650,7 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
     (identity, performance, services, nics, net_config, hardware, installed_sw,
      install_state, port_tests, gpu_info, wifi, expectations,
      disk_health, perf_sample, tls_inspection, lmi_log, graphics_delivery,
-     binaries, vpu_restarts) = await asyncio.gather(
+     binaries, vpu_restarts, calibration) = await asyncio.gather(
         run_ps("Get-SystemIdentity.ps1"),
         run_ps("Get-Performance.ps1"),
         run_ps("Get-Services.ps1"),
@@ -4637,6 +4691,10 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
         run_ps("Test-PixellotBinaries.ps1", timeout=20),
         # VPU.exe session history: a crash loop still reads Running in services.
         run_ps("Get-VpuRestarts.ps1", timeout=20),
+        # Main-camera calibration (cal-main-missing). Two folders and a few
+        # file times. The same no-args call the fleet monitor's telemetry
+        # makes, so on a unit it comes from the monitor's 6 h disk cache.
+        run_ps("Get-CalibrationStatus.ps1", timeout=15),
     )
     # CGI probe (cached 30s; usually already warm from preload) so the
     # slow-port finding identifies the OCR by its actual camera model, not a
@@ -4686,6 +4744,7 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
         lmi_log=lmi_log, graphics_delivery=graphics_delivery,
         binaries=binaries,
         vpu_restarts=vpu_restarts,
+        calibration=calibration,
     )
 
 
@@ -7205,6 +7264,7 @@ async def build_report() -> dict:
         ("scoreConnect",         _run_sc_status(sc_url, timeout=20)),
         ("scoreLink",            run_ps("Get-ScoreLinkStatus.ps1", timeout=15)),
         ("pixellotConfig",       run_ps("Get-PixellotConfig.ps1", timeout=15)),
+        ("calibrationStatus",    run_ps("Get-CalibrationStatus.ps1", timeout=15)),
         ("pixellotInstallState", run_ps("Test-PixellotInstallState.ps1", timeout=15)),
         ("pixellotDependencies", run_ps("Get-PixellotDependencies.ps1", timeout=15)),
         ("pixellotBinaries",     run_ps("Test-PixellotBinaries.ps1", timeout=20)),
@@ -7267,6 +7327,7 @@ async def build_report() -> dict:
             tls_inspection=sections.get("tlsInspection"),
             binaries=sections.get("pixellotBinaries"),
             vpu_restarts=sections.get("vpuRestarts"),
+            calibration=sections.get("calibrationStatus"),
         )
     except Exception as e:
         sections["findings"] = {"error": f"findings computation failed: {type(e).__name__}: {e}"}

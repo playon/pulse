@@ -11,6 +11,7 @@ silently when multiple sessions edit main.py and powershell.py. They do NOT
 exercise PowerShell or the network — pure functions only.
 """
 
+import inspect
 import os
 import sys
 import unittest
@@ -1811,6 +1812,65 @@ class TestGraphicsDeliveryFinding(unittest.TestCase):
                 [{"code": code, "severity": "critical", "category": "Pixellot",
                   "title": "t", "recommendation": "r"}])
             self.assertEqual(verdict["status"], "WARN", code)
+
+
+# ── Corvallis MT (2026-10-12): read stream-ready, fixed by recalibrating ──
+# No multisport calibration means split camera views on stream, not a dead
+# stream, so it warns and never fails readiness.
+class TestCalibrationFinding(unittest.TestCase):
+    """Fed by Get-CalibrationStatus.ps1, not Get-PixellotConfig.ps1: the
+    cameras.cfg gate this used to lean on was removed in #279."""
+
+    def _cal(self, sports=None, exists=True, readable=True, root=True):
+        return {"configRootReadable": root,
+                "multisport": {"exists": exists, "readable": readable,
+                               "primary": None, "sports": sports or []},
+                "pip": {"exists": False, "readable": False, "hasEnhancedPip": False,
+                        "hasInnerObjects": False, "at": None}}
+
+    def _codes(self, cal, identity=None):
+        return [f["code"] for f in main._calibration_findings(cal, identity)]
+
+    def test_uncalibrated_main_camera_warns(self):
+        f = main._calibration_findings(self._cal())
+        self.assertEqual([x["code"] for x in f], ["cal-main-missing"])
+        self.assertEqual(f[0]["severity"], "warning")
+        self.assertEqual(f[0]["category"], "Pixellot")
+
+    def test_missing_folder_under_readable_root_warns(self):
+        self.assertEqual(self._codes(self._cal(exists=False, readable=False)),
+                         ["cal-main-missing"])
+
+    def test_calibrated_is_quiet(self):
+        sports = [{"name": "Football", "at": "2026-09-01T00:00:00-04:00"}]
+        self.assertEqual(self._codes(self._cal(sports)), [])
+
+    def test_dead_collector_and_non_vpu_are_quiet(self):
+        self.assertEqual(self._codes(None), [])
+        self.assertEqual(self._codes({"error": True, "message": "boom"}), [])
+        self.assertEqual(self._codes(self._cal(), {"isNonVpuHost": True}), [])
+        self.assertEqual(self._codes(self._cal(readable=False)), [])
+        self.assertEqual(self._codes(self._cal(exists=False, readable=False, root=False)), [])
+        self.assertEqual(self._codes({"configRootReadable": True}), [])
+
+    def test_title_has_no_effect_tail(self):
+        # #244 title style: the effect goes in the recommendation.
+        title = main._calibration_findings(self._cal())[0]["title"]
+        self.assertNotIn(", so ", title)
+
+    def test_warns_not_fails_readiness(self):
+        verdict = main._compute_readiness(main._calibration_findings(self._cal()))
+        self.assertEqual(verdict["status"], "WARN")
+
+    def test_reaches_compute_findings(self):
+        codes = [f["code"] for f in main._compute_findings(
+            {}, {}, {}, {}, calibration=self._cal())]
+        self.assertIn("cal-main-missing", codes)
+
+    def test_dashboard_collects_calibration(self):
+        src = inspect.getsource(main._collect_dashboard)
+        self.assertIn('run_ps("Get-CalibrationStatus.ps1", timeout=15)', src)
+        self.assertIn("calibration=calibration", src)
 
 
 # ── Armstrong IL (2026-09-28): FortiGate blocking LogMeIn's website ──────
