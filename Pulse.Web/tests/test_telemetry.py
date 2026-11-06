@@ -7,6 +7,7 @@ import re
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 
 _APP_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app")
 if _APP_DIR not in sys.path:
@@ -598,10 +599,13 @@ class TestCalibrationCache(unittest.TestCase):
         same = fp(raw)
         self.assertEqual(fp(self._pass()[2]), same)              # served from cache: no change
         # A recalibration, as the next read after the cache expires would see it.
+        # Dated relative to now: the demo's newest sport is 12 days old, and a
+        # fixed date here fell behind it once the calendar passed it.
         with open(self.cache, encoding="utf-8") as fh:
             data = json.load(fh)
+        at = (datetime.now().astimezone() - timedelta(hours=1)).replace(microsecond=0).isoformat()
         data[self.SCRIPT]["result"]["multisport"]["sports"].append(
-            {"name": "Volleyball", "at": "2026-10-16T09:00:00-04:00"})
+            {"name": "Volleyball", "at": at})
         with open(self.cache, "w", encoding="utf-8") as fh:
             json.dump(data, fh)
         runs, changed, raw2 = self._pass()

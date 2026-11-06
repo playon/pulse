@@ -16,7 +16,14 @@ set "PYDIR=%~dp0app\python"
 set "PYEXE=%PYDIR%\python.exe"
 set "PYZIP=python-%PYVER%-embed-amd64.zip"
 set "PYURL=https://www.python.org/ftp/python/%PYVER%/%PYZIP%"
-set "PIPURL=https://bootstrap.pypa.io/get-pip.py"
+:: pip is bootstrapped from its versioned zipapp, not get-pip.py. On
+:: 2026-11-02 get-pip.py began running its bundled pip from a folder named
+:: "pip", which trips pip's Windows "To modify pip, please run..." guard, and
+:: every first run failed. A pinned file can't change under us; the deps step
+:: still self-updates pip afterwards.
+set "PIPVER=26.2.2"
+set "PIPPYZ=pip-%PIPVER%.pyz"
+set "PIPURL=https://bootstrap.pypa.io/pip/zipapp/%PIPPYZ%"
 set "PORT=8765"
 set "URL=http://localhost:%PORT%"
 
@@ -103,11 +110,11 @@ if errorlevel 1 (
 )
 
 if defined HAS_CURL (
-    curl.exe -L --silent -o "%PYDIR%\get-pip.py" "%PIPURL%"
+    curl.exe -L --silent --fail -o "%PYDIR%\%PIPPYZ%" "%PIPURL%"
 ) else (
-    call :dl_spin "%L_PY%downloading pip" "%PIPURL%" "%PYDIR%\get-pip.py" "-" "-"
+    call :dl_spin "%L_PY%downloading pip" "%PIPURL%" "%PYDIR%\%PIPPYZ%" "-" "-"
 )
-if not exist "%PYDIR%\get-pip.py" (
+if not exist "%PYDIR%\%PIPPYZ%" (
     echo !L_PY!could not download pip
     set "FAIL_WHY=pip, Python's installer, could not be downloaded."
     set "FAIL_DO=Check this VPU's internet connection, then run Pulse again."
@@ -116,14 +123,14 @@ if not exist "%PYDIR%\get-pip.py" (
 )
 set "SPIN_LABEL=%L_PY%installing pip"
 set "SPIN_DONE=-"
-set "SPIN_PSCMD=$log=$env:TEMP+'\pulse-bootstrap.log';& '%PYEXE%' '%PYDIR%\get-pip.py' --no-warn-script-location --quiet *> $log;if($LASTEXITCODE -ne 0){throw 'get-pip exited '+$LASTEXITCODE+' - see '+$log}"
+set "SPIN_PSCMD=$log=$env:TEMP+'\pulse-bootstrap.log';& '%PYEXE%' '%PYDIR%\%PIPPYZ%' install --force-reinstall pip --no-warn-script-location --quiet *> $log;if($LASTEXITCODE -ne 0){throw 'pip bootstrap exited '+$LASTEXITCODE+' - see '+$log}"
 call :spin
 if errorlevel 1 (
     set "FAIL_WHY=pip, Python's installer, could not be set up."
     set "FAIL_DO=Run Pulse again. If it fails again, send %TEMP%\pulse-bootstrap.log to the Pulse team."
     goto :fatal
 )
-del "%PYDIR%\get-pip.py"
+del "%PYDIR%\%PIPPYZ%"
 echo !L_PY!!PY_DONE!
 
 :deps
