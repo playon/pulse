@@ -11,7 +11,9 @@
     1. Static imports. Read the import table of each Pixellot exe in
        C:\Pixellot\Bin and resolve every DLL the way the Windows loader
        does: KnownDLLs, the exe's folder, System32, System, Windows, then
-       PATH (machine + user + this process). DLLs that resolve under
+       PATH (machine + user + this process). Run as SYSTEM (the fleet
+       monitor), "user" means every user logged in on the unit: see
+       Get-LoggedOnUserPathDirs. DLLs that resolve under
        C:\Pixellot are scanned in turn, because a DLL that is present but
        missing its own dependency fails the same way. Delay-load imports
        are skipped (they don't stop the program from starting), and so are
@@ -120,6 +122,65 @@ function Get-PeImports([string]$path) {
     finally { if ($fs) { $fs.Dispose() } }
 }
 
+# -- PATH of the users logged in -------------------------------------------
+# As SYSTEM (the fleet monitor's scheduled task), the 'User' Path is SYSTEM's
+# own, which is empty, not the Path of the user who runs VPU.exe. Pixellot can
+# put its dependency folders on that user's Path, and then every DLL in them
+# read as missing: De La Salle (CA), 2026-10-16, 22 DLLs "missing" while
+# VPU.exe ran its daily test that morning. So as SYSTEM, read the Path of each
+# user logged in, from HKEY_USERS\<SID>\Environment. A logged-off user's hive
+# isn't loaded and can't be read; the output says how many were.
+
+# One user's raw Path (REG_EXPAND_SZ, read unexpanded) as folders. %VAR%
+# resolves from that user's own variables first (USERPROFILE, LOCALAPPDATA,
+# their Environment values): expanded as SYSTEM, %USERPROFILE% would be
+# SYSTEM's profile. Then the machine's. Pure, so a test can run it anywhere.
+function ConvertTo-UserPathDirs([string]$raw, [hashtable]$vars) {
+    $dirs = New-Object 'System.Collections.Generic.List[string]'
+    if (-not $raw) { return ,$dirs }
+    foreach ($entry in ($raw -split ';')) {
+        $e = $entry.Trim().Trim('"')
+        if (-not $e) { continue }
+        foreach ($m in [regex]::Matches($e, '%([^%]+)%')) {
+            $name = $m.Groups[1].Value
+            if ($vars -and $vars.ContainsKey($name)) { $e = $e.Replace($m.Value, [string]$vars[$name]) }
+        }
+        $e = [Environment]::ExpandEnvironmentVariables($e)
+        if ($e -and -not $dirs.Contains($e)) { $dirs.Add($e) }
+    }
+    return ,$dirs
+}
+
+# Every logged-in user's Path folders: { users = hives read; dirs = [...] }.
+function Get-LoggedOnUserPathDirs {
+    $out = New-Object 'System.Collections.Generic.List[string]'
+    $users = 0
+    $hku = [Microsoft.Win32.Registry]::Users
+    $raw = [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+    foreach ($sid in $hku.GetSubKeyNames()) {
+        # Local and domain accounts only; not S-1-5-18/19/20 or *_Classes.
+        if ($sid -notmatch '^S-1-5-21-[0-9-]+$') { continue }
+        $envKey = $hku.OpenSubKey($sid + '\Environment')
+        if (-not $envKey) { continue }
+        $vars = @{}
+        $vol = $hku.OpenSubKey($sid + '\Volatile Environment')
+        foreach ($k in @($vol, $envKey)) {
+            if (-not $k) { continue }
+            foreach ($n in $k.GetValueNames()) {
+                if ($n -and $n -ne 'Path') { $vars[$n] = [string]$k.GetValue($n, '', $raw) }
+            }
+        }
+        $pathRaw = [string]$envKey.GetValue('Path', '', $raw)
+        if ($vol) { $vol.Close() }
+        $envKey.Close()
+        $users++
+        foreach ($d in (ConvertTo-UserPathDirs $pathRaw $vars)) {
+            if (-not $out.Contains($d)) { $out.Add($d) }
+        }
+    }
+    return [pscustomobject]@{ users = $users; dirs = $out.ToArray() }
+}
+
 try {
     # -- Loader search list ------------------------------------------------
     $winDir = $env:windir
@@ -128,16 +189,62 @@ try {
     if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
         $sys32 = Join-Path $winDir 'Sysnative'
     }
+    # The loader uses the PATH of the account that starts the exe, and
+    # Pixellot's installer puts C:\Pixellot\dependencies on the Pixellot
+    # account's own user PATH, not the machine PATH. The fleet monitor runs
+    # this script as SYSTEM, whose user PATH lacks it, so every opencv and
+    # cpprest DLL read missing and a working unit read FAIL (6493,
+    # 2026-10-15). So add the user PATH of each account that runs a Pixellot
+    # exe; with none running, that of every signed-in user (their registry
+    # hives are the ones loaded under HKEY_USERS).
+    $pixSids = New-Object 'System.Collections.Generic.List[string]'
+    try {
+        $procs = @(Get-CimInstance Win32_Process -ErrorAction Stop -Filter (
+            "Name='VPU.exe' OR Name='Agent.exe' OR Name='Coordinator.exe' OR Name='KeepAgentUp.exe'"))
+        foreach ($proc in $procs) {
+            $own = Invoke-CimMethod -InputObject $proc -MethodName GetOwnerSid -ErrorAction SilentlyContinue
+            if ($own -and $own.Sid -and -not $pixSids.Contains($own.Sid)) { $pixSids.Add($own.Sid) }
+        }
+    } catch { }
+    if ($pixSids.Count -eq 0) {
+        try {
+            foreach ($hive in @(Get-ChildItem -LiteralPath 'Registry::HKEY_USERS' -ErrorAction Stop)) {
+                $sid = $hive.PSChildName
+                if ($sid -match '^S-1-5-21-[0-9-]+$' -and -not $pixSids.Contains($sid)) { $pixSids.Add($sid) }
+            }
+        } catch { }
+    }
+    $accountPaths = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($sid in $pixSids) {
+        try {
+            $v = (Get-ItemProperty -LiteralPath ('Registry::HKEY_USERS\' + $sid + '\Environment') -Name 'Path' -ErrorAction Stop).Path
+            if ($v) { $accountPaths.Add($v) }
+        } catch { }
+    }
+
     $pathDirs = New-Object 'System.Collections.Generic.List[string]'
-    foreach ($p in @(
+    foreach ($p in (@(
             [Environment]::GetEnvironmentVariable('Path', 'Machine'),
             [Environment]::GetEnvironmentVariable('Path', 'User'),
-            $env:Path)) {
+            $env:Path) + $accountPaths.ToArray())) {
         if (-not $p) { continue }
         foreach ($d in ($p -split ';')) {
             $d = [Environment]::ExpandEnvironmentVariables($d.Trim().Trim('"'))
             if ($d -and -not $pathDirs.Contains($d)) { $pathDirs.Add($d) }
         }
+    }
+    $runAs = 'user'
+    $userPathsRead = $null
+    if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -eq 'S-1-5-18') {
+        $runAs = 'system'
+        $userPathsRead = 0
+        try {
+            $loggedOn = Get-LoggedOnUserPathDirs
+            $userPathsRead = $loggedOn.users
+            foreach ($d in $loggedOn.dirs) {
+                if (-not $pathDirs.Contains($d)) { $pathDirs.Add($d) }
+            }
+        } catch { }    # an unreadable hive must not fail the whole check
     }
     $searchDirs = @($PIX_BIN, $sys32, (Join-Path $winDir 'System'), $winDir) + $pathDirs.ToArray()
 
@@ -305,6 +412,8 @@ try {
         vpuProcesses  = $procOut
         binHasLibcef  = [System.IO.File]::Exists((Join-Path $PIX_BIN 'libcef.dll'))
         cefPackages   = $cefDirs
+        runAs         = $runAs
+        userPathsRead = $userPathsRead
     } | ConvertTo-Json -Depth 5 -Compress
 }
 catch {

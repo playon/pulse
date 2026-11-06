@@ -20,7 +20,7 @@ Every path, filename, log format and field below was read off vpu-home over ssh,
 | Log root | `C:\Pixellot\Data\Log\` | plus an `archive\` subdir |
 | Graphics log | `GraphicsManager_vpu_YYYYMMDD_HHMMSS.log` | named per day, but **appends across process restarts** — one file holds many `START NEW LOG SESSION` blocks |
 | Agent log | `agent_vpu_YYYYMMDD_HHMMSS.log` | 13-15 MB/day on an idle box |
-| Graphics config | `C:\Pixellot\Data\Configuration\graphics.cfg` | INI-style, same shape `Get-PixellotConfig.ps1` already parses |
+| Graphics config | `C:\Pixellot\Data\Configuration\graphics.cfg` | INI-style configuration |
 | PiP config | `C:\Pixellot\Data\Configuration\PiP.cfg` | |
 
 **Size guard is mandatory.** Idle GraphicsManager log = 713 bytes. The failing Tanque Verde

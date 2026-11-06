@@ -20,12 +20,30 @@
     build without app\monitor_once.py, the task fails quietly until a build
     with it is installed again, and the unit stops checking in.
 
+    If Register-ScheduledTask fails (some units have a broken CIM task
+    provider: "Invalid class", 0x80041010), the same XML is registered with
+    schtasks.exe instead, and the output says so. -Uninstall and -RunNow fall
+    back to schtasks.exe the same way. Show-Status and the "already current"
+    check only read, and reads work on those units, so they are left on the
+    ScheduledTask cmdlets.
+
     Needs an elevated shell (registering a SYSTEM task needs admin).
 
     ASCII ONLY (CLAUDE.md PowerShell 5.1 rules). Unwanted returns go to $null.
 
 .PARAMETER InstallDir
     Pulse install root. Default C:\Pulse (what the launchers use).
+
+.PARAMETER Runner
+    Register the task to run the fleet agent's runner (PV-49) instead of the
+    monitor directly:
+
+        <InstallDir>\runtime\python\python.exe <InstallDir>\agent_runner.py
+
+    The runner runs the monitor from one of two slots under
+    <InstallDir>\slots and moves the unit between agent builds as fleet
+    control says. fleet_enroll.py (Pulse Settings, Fleet Monitoring) sets the
+    folder up and passes this.
 
 .PARAMETER Uninstall
     Remove the task. The state, queue, cache and log files are left in place
@@ -54,7 +72,8 @@ param(
     [switch]$Status,
     [switch]$RunNow,
     [switch]$Purge,
-    [switch]$Force
+    [switch]$Force,
+    [switch]$Runner
 )
 
 $ErrorActionPreference = 'Stop'
@@ -65,16 +84,60 @@ $TaskName = 'Pulse Fleet Monitor'
 # it, batch after batch, and nobody could tell which units had it
 # (#leaf-deploy-coordination, 2023-05). Which units run the monitor is read
 # from the check-in data, not from installs.
-$TaskVersion = '2'
+$TaskVersion = '3'
 $MonitorFiles = @('pulse-monitor-state.json', 'pulse-monitor-state.json.tmp',
                   'pulse-monitor-checkin-queue.json', 'pulse-monitor-checkin-queue.json.tmp',
                   'pulse-monitor-posts.json', 'pulse-monitor-posts.json.tmp',
                   'pulse-monitor-cache.json', 'pulse-monitor-cache.json.tmp',
                   'pulse-monitor.log', 'pulse-monitor.log.1',
-                  'pulse-monitor-ticks.log', 'pulse-monitor-ticks.log.1')
+                  'pulse-monitor-ticks.log', 'pulse-monitor-ticks.log.1',
+                  'pulse-monitor-event.json', 'pulse-monitor-event.json.tmp',
+                  'agent-slots.json', 'agent-slots.json.tmp', 'agent-update.json', 'agent-update.json.tmp',
+                  'agent-tick.running', 'agent-download.tmp', 'agent-runner.log', 'agent-runner.log.1')
 
 function Info($msg) { Write-Host "  $msg" }
+function Warn($msg) { Write-Host "  [WARN] $msg" -ForegroundColor Yellow }
 function Fail($msg) { Write-Host "  [ERROR] $msg" -ForegroundColor Red; exit 1 }
+
+# schtasks.exe fallback. Some units have a CIM/WMI Task Scheduler provider that
+# can read tasks but not write them: Register-ScheduledTask dies with "Invalid
+# class" (0x80041010) while schtasks.exe, which talks to the Task Scheduler
+# service directly, works. Returns Code and Text. Native stderr is read with
+# 'Continue' because 5.1 turns it into a terminating error under 'Stop'.
+function Invoke-Schtasks([string[]]$SchArgs) {
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $text = (& schtasks.exe @SchArgs 2>&1 | Out-String).Trim()
+        return [pscustomobject]@{ Code = $LASTEXITCODE; Text = $text }
+    } catch {
+        return [pscustomobject]@{ Code = -1; Text = [string]$_.Exception.Message }
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+}
+
+function Remove-MonitorTask {
+    try {
+        $null = Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+        return $true
+    } catch {
+        Warn "Unregister-ScheduledTask failed ($($_.Exception.Message.Trim())); trying schtasks.exe."
+        $r = Invoke-Schtasks @('/Delete', '/TN', $TaskName, '/F')
+        if ($r.Code -ne 0) { Fail "Could not remove $TaskName. schtasks.exe: $($r.Text)" }
+        return $true
+    }
+}
+
+function Start-MonitorTask {
+    try {
+        $null = Start-ScheduledTask -TaskName $TaskName
+    } catch {
+        Warn "Start-ScheduledTask failed ($($_.Exception.Message.Trim())); trying schtasks.exe."
+        $r = Invoke-Schtasks @('/Run', '/TN', $TaskName)
+        if ($r.Code -ne 0) { Fail "Could not start $TaskName. schtasks.exe: $($r.Text)" }
+    }
+}
 
 function Show-Status {
     $t = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -110,7 +173,7 @@ if (-not $elevated) {
 if ($Uninstall) {
     $t = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if ($t) {
-        $null = Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+        $null = Remove-MonitorTask
         Info "Removed $TaskName."
     } else {
         Info "$TaskName was not installed."
@@ -126,15 +189,22 @@ if ($Uninstall) {
     exit 0
 }
 
-$pyExe = Join-Path $InstallDir 'app\python\python.exe'
-$tick  = Join-Path $InstallDir 'app\monitor_once.py'
+if ($Runner) {
+    $pyExe   = Join-Path $InstallDir 'runtime\python\python.exe'
+    $tick    = Join-Path $InstallDir 'agent_runner.py'
+    $workDir = $InstallDir
+} else {
+    $pyExe   = Join-Path $InstallDir 'app\python\python.exe'
+    $tick    = Join-Path $InstallDir 'app\monitor_once.py'
+    $workDir = Join-Path $InstallDir 'app'
+}
 if (-not (Test-Path -LiteralPath $pyExe)) { Fail "Embedded Python not found at $pyExe. Launch Pulse once so it sets up its runtime." }
 if (-not (Test-Path -LiteralPath $tick))  { Fail "$tick not found. This Pulse build has no fleet monitor; install one that does." }
 
 # XML text: escape the paths for element content.
 $pyXml   = [Security.SecurityElement]::Escape($pyExe)
 $argXml  = [Security.SecurityElement]::Escape('"' + $tick + '"')
-$dirXml  = [Security.SecurityElement]::Escape((Join-Path $InstallDir 'app'))
+$dirXml  = [Security.SecurityElement]::Escape($workDir)
 
 # Task Scheduler 1.2 schema.
 #   Repetition PT5M with no Duration = every 5 minutes, indefinitely.
@@ -198,7 +268,7 @@ if ($existing -and -not $Force) {
     if ($sameVersion -and $sameFiles -and $existing.State -ne 'Disabled') {
         Info "$TaskName is already installed and current (definition $TaskVersion). Nothing to do."
         if ($RunNow) {
-            $null = Start-ScheduledTask -TaskName $TaskName
+            Start-MonitorTask
             Info "Started one tick now."
         }
         Show-Status
@@ -206,13 +276,43 @@ if ($existing -and -not $Force) {
     }
 }
 
-$null = Register-ScheduledTask -TaskName $TaskName -Xml $xml -Force
+$regError = $null
+$viaSchtasks = $false
+try {
+    $null = Register-ScheduledTask -TaskName $TaskName -Xml $xml -Force
+} catch {
+    $regError = $_.Exception.Message.Trim()
+}
+if ($regError) {
+    # Same XML, registered through schtasks.exe. It wants UTF-16 on disk.
+    Warn "Register-ScheduledTask failed: $regError"
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ('pulse-monitor-task-' + [guid]::NewGuid().ToString('N') + '.xml')
+    try {
+        Set-Content -LiteralPath $tmp -Value $xml -Encoding Unicode
+        $r = Invoke-Schtasks @('/Create', '/TN', $TaskName, '/XML', $tmp, '/F')
+    } finally {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
+    if ($r.Code -ne 0) {
+        Fail "Could not register $TaskName. Register-ScheduledTask: $regError | schtasks.exe (exit $($r.Code)): $($r.Text)"
+    }
+    $viaSchtasks = $true
+}
 $t = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-if (-not $t -or $t.State -eq 'Disabled') { Fail "The task did not register as enabled." }
+if (-not $t -and $viaSchtasks) {
+    # The CIM read can be as sick as the CIM write. Ask the service directly.
+    $q = Invoke-Schtasks @('/Query', '/TN', $TaskName)
+    if ($q.Code -ne 0) { Fail "The task did not register. schtasks.exe /Query: $($q.Text)" }
+} elseif (-not $t -or $t.State -eq 'Disabled') {
+    Fail "The task did not register as enabled."
+}
 Info "Installed $TaskName (every 5 minutes, as SYSTEM, below-normal priority)."
+if ($viaSchtasks) {
+    Info "Registered via schtasks.exe because Register-ScheduledTask failed ($regError)."
+}
 
 if ($RunNow) {
-    $null = Start-ScheduledTask -TaskName $TaskName
+    Start-MonitorTask
     Info "Started one tick now. Check the log in a minute or two."
 }
 Show-Status

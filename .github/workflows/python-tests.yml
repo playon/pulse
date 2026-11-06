@@ -36,6 +36,7 @@ on:
       - "Pulse.Web/app/static/app.js"
       - "Pulse.Web/scripts/**.ps1"
       - ".github/workflows/python-tests.yml"
+      - "tools/agent-release/**"
   pull_request:
     paths:
       - "Pulse.Web/app/**.py"
@@ -48,6 +49,7 @@ on:
       - "Pulse.Web/app/static/app.js"
       - "Pulse.Web/scripts/**.ps1"
       - ".github/workflows/python-tests.yml"
+      - "tools/agent-release/**"
   workflow_dispatch:
 
 permissions:
@@ -73,3 +75,5 @@ jobs:
       - name: Run unittest suite
         working-directory: Pulse.Web
         run: python -m unittest discover -s tests -v
+      - name: Agent release build (PV-49)
+        run: python -m unittest discover -s tools/agent-release -v
