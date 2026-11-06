@@ -38,6 +38,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - Settings (dev channel only): a **Fleet Monitoring** card. **Opt in this unit** installs the fleet monitor, which checks every 5 minutes whether the VPU is ready to stream and reports to Pulse Vitals. The card shows when it last checked and reported, and **Opt out** removes it. A production launch on the same VPU doesn't affect it.
 
 ### Fixed
+- Fleet Monitoring: **Opt in this unit** no longer fails with "Invalid class" on VPUs whose Windows task-scheduling interface is damaged. The installer now falls back to schtasks.exe and says it did.
 - A drive with a few uncorrected read/write errors that still reads Healthy now shows as "Fix soon" with a back-up-and-replace note. Before, it was flagged as predicting failure. 100 or more errors, an Unhealthy drive, or Windows' own failure warning are still critical.
 - Software tab: Chrome web-app shortcuts such as "Google Drive", Gmail and Docs no longer trigger the cloud-sync warning.
 - Pixellot Software no longer flags a missing retired camera-config file; cameras are identified from live camera data and standard addresses. Scoreboard cameras are detection-only: the startup check and ScoreConnect no longer claim a configured camera is unplugged, and check ScoreConnect when no scoreboard camera is seen.
