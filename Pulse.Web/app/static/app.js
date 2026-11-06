@@ -172,16 +172,38 @@ function updateNav() {
 // findings, so the sidebar doubles as the at-a-glance health map (replaces the
 // old Subsystems panel). Only warning/critical show an icon — healthy and
 // non-subsystem links (Dashboard, Settings, …) show nothing.
-function updateNavHealth() {
-  const health = {};
+// Lane -> tone, from the same rules the Dashboard uses for its findings
+// (_dashToneFn), so the sidebar, the palette and the Dashboard say the same
+// thing about the same problem. "Worth knowing" and "Fix soon" findings do not
+// flag a lane: the triangle means tonight is at risk. Windows Events has no
+// findings of its own; it is derived from the event log (_subsystemHealth) and
+// stays a plain risk.
+var _LANE_RANK = { critical: 3, warning: 2, soon: 1 };
+function _laneTones(dash, includeSoon) {
+  var out = {};
+  if (dash && !dash.error) {
+    var toneOf = _dashToneFn(dash);
+    (dash.findings || []).forEach(function(f) {
+      var t = toneOf(f);
+      if (!_LANE_RANK[t] || (t === "soon" && !includeSoon)) return;
+      var page = _findingPageFor(f.category);
+      if (!out[page] || _LANE_RANK[t] > _LANE_RANK[out[page]]) out[page] = t;
+    });
+  }
   try {
-    _subsystemHealth((cached("dashboard") || {}).findings || [])
-      .forEach((s) => { health[s.id] = s.health; });
-  } catch (e) { return; }
+    _subsystemHealth((dash && dash.findings) || []).forEach(function(sub) {
+      if (sub.id === "events" && sub.health !== "OK" && !out.events) out.events = "warning";
+    });
+  } catch (e) {}
+  return out;
+}
+
+function updateNavHealth() {
+  const lanes = _laneTones(cached("dashboard"));
   document.querySelectorAll(".nav-item").forEach((el) => {
     const slot = el.querySelector(".nav-status");
     if (!slot) return;
-    const h = health[el.dataset.page];
+    const h = lanes[el.dataset.page] === "critical" ? "Critical" : lanes[el.dataset.page] === "warning" ? "Warning" : "";
     if (h === "Critical" || h === "Warning") {
       slot.className = "nav-status " + (h === "Critical" ? "nav-status-crit" : "nav-status-warn");
       // The glyph is identical for both levels; only its colour differs. Give
@@ -202,6 +224,278 @@ function updateNavHealth() {
   });
 }
 
+// ── Confirm dialog ───────────────────────────────────────────
+// Replaces the native confirm(): it names the action on its button, shows the
+// consequence formatted, never makes Enter the destructive answer, and does
+// not freeze the page. confirmAction() resolves true or false.
+//   opts.title         what is about to happen, as a question
+//   opts.body          text; blank line = new paragraph, "\u2022 " lines = list
+//   opts.confirmLabel  the action, e.g. "Delete 12 folders" (never "OK"/"Yes")
+//   opts.tone          "danger" for irreversible or disruptive, else neutral
+var _confirmOpen = null;
+function confirmAction(opts) {
+  if (_confirmOpen) _confirmOpen(false);
+  return new Promise(function(resolve) {
+    var opener = document.activeElement;
+    var danger = opts.tone === "danger";
+    var paras = String(opts.body || "").split("\n\n").filter(Boolean).map(function(p) {
+      var lines = p.split("\n");
+      if (lines.every(function(l) { return l.indexOf("\u2022 ") === 0; })) {
+        return "<ul>" + lines.map(function(l) { return "<li>" + esc(l.slice(2)) + "</li>"; }).join("") + "</ul>";
+      }
+      return "<p>" + lines.map(esc).join("<br>") + "</p>";
+    }).join("");
+    var wrap = document.createElement("div");
+    wrap.className = "confirm-modal";
+    wrap.innerHTML = '<div class="confirm-box" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-body">'
+      + '<h2 class="confirm-title" id="confirm-title">' + esc(opts.title) + '</h2>'
+      + '<div class="confirm-body" id="confirm-body">' + paras + '</div>'
+      + '<div class="confirm-actions">'
+      +   '<button type="button" class="btn-outline btn-ol-muted confirm-cancel">' + esc(opts.cancelLabel || "Cancel") + '</button>'
+      +   '<button type="button" class="btn-outline ' + (danger ? "btn-ol-red" : "btn-ol-blue") + ' confirm-ok">' + esc(opts.confirmLabel) + '</button>'
+      + '</div></div>';
+    var cancel = wrap.querySelector(".confirm-cancel"), ok = wrap.querySelector(".confirm-ok");
+    function done(v) {
+      document.removeEventListener("keydown", onKey, true);
+      wrap.remove();
+      _confirmOpen = null;
+      if (opener && opener.focus) { try { opener.focus(); } catch (e) {} }
+      resolve(v);
+    }
+    function onKey(e) {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); done(false); }
+      else if (e.key === "Tab") {
+        e.preventDefault();
+        (document.activeElement === cancel ? ok : cancel).focus();
+      }
+    }
+    cancel.addEventListener("click", function() { done(false); });
+    ok.addEventListener("click", function() { done(true); });
+    wrap.addEventListener("mousedown", function(e) { if (e.target === wrap) done(false); });
+    document.addEventListener("keydown", onKey, true);
+    _confirmOpen = done;
+    document.body.appendChild(wrap);
+    // A destructive question starts on Cancel so a stray Enter cannot confirm it.
+    (danger ? cancel : ok).focus();
+  });
+}
+
+// ── Command palette ──────────────────────────────────────────
+// 21 tabs, all reached by clicking down a sidebar. "/" (or Ctrl/Cmd+K) opens a
+// search over the tabs and the current findings, and "Next problem" jumps to
+// the worst flagged lane, so an agent on a live call does not hunt for it.
+// Built from the same sources as the sidebar (NAV_SECTIONS, _subsystemHealth)
+// and the Dashboard's finding rows (findingJump), so it cannot disagree.
+var _palette = null;
+
+function _paletteEntries(query) {
+  var dash = cached("dashboard");
+  var q = (query || "").trim().toLowerCase();
+  var RANK = { critical: 3, warning: 2, soon: 1 };
+  var findings = [], laneTone = _laneTones(dash, true);
+  if (dash && !dash.error) {
+    var toneOf = _dashToneFn(dash);
+    (dash.findings || []).forEach(function(f) {
+      var tone = toneOf(f);
+      if (!RANK[tone]) return;          // "Worth knowing" is context, not a problem
+      var page = _findingPageFor(f.category);
+      findings.push({ kind: "finding", id: page, title: f.title || "", label: f.title || "", group: _pageLabel(page),
+        icon: "alert", tone: tone, flag: VERDICT[tone].word, rank: RANK[tone] });
+    });
+    findings.sort(function(a, b) { return b.rank - a.rank; });
+  }
+
+  var WORD = { critical: VERDICT.critical.word, warning: VERDICT.warning.word, soon: VERDICT.soon.word };
+  var pages = [];
+  NAV_SECTIONS.forEach(function(sec) {
+    sec.pages.forEach(function(p) {
+      var t = p.id === "dashboard" ? "" : (laneTone[p.id] || "");
+      pages.push({ kind: "page", id: p.id, label: p.label, group: sec.label, icon: p.icon, tone: t, flag: t ? WORD[t] : "", rank: RANK[t] || 0 });
+    });
+  });
+  pages.push({ kind: "page", id: "fault-isolator", label: "Camera Connection Troubleshooting", group: "TROUBLESHOOTING", icon: "zap", tone: "", flag: "", rank: 0 });
+
+  var worst = pages.filter(function(p) { return p.rank; }).sort(function(a, b) { return b.rank - a.rank; })[0];
+  var next = worst ? { kind: "page", id: worst.id, label: "Next problem: " + worst.label, group: worst.flag, icon: "triangle", tone: worst.tone, flag: "", next: true } : null;
+
+  function score(e) {
+    var hay = (e.label + " " + e.group).toLowerCase();
+    if (!q) return 1;
+    if (e.label.toLowerCase().indexOf(q) === 0) return 3;
+    if (e.label.toLowerCase().indexOf(q) !== -1) return 2;
+    return q.split(/\s+/).every(function(w) { return hay.indexOf(w) !== -1; }) ? 1 : 0;
+  }
+  var out = [];
+  if (!q) {
+    if (next) out.push(next);
+    out = out.concat(findings.slice(0, 8));
+    out = out.concat(pages.filter(function(p) { return p.tone; }).sort(function(a, b) { return b.rank - a.rank; }));
+    out = out.concat(pages.filter(function(p) { return !p.tone; }));
+  } else {
+    var all = findings.concat(pages).map(function(e) { return { e: e, s: score(e) }; }).filter(function(x) { return x.s; });
+    all.sort(function(a, b) { return b.s - a.s; });
+    out = all.map(function(x) { return x.e; });
+  }
+  var note = "";
+  if (!dash) note = "Findings appear once the Dashboard check finishes.";
+  else if (dash.error) note = "Findings are unavailable because the Dashboard check failed.";
+  return { items: out, note: note };
+}
+
+function _paletteRender() {
+  var p = _palette; if (!p) return;
+  var res = _paletteEntries(p.input.value);
+  p.items = res.items;
+  if (p.index >= p.items.length) p.index = Math.max(0, p.items.length - 1);
+  p.list.innerHTML = p.items.map(function(e, i) {
+    return '<li id="pal-opt-' + i + '" class="pal-opt' + (i === p.index ? " pal-active" : "") + (e.tone ? " pal-" + e.tone : "")
+      + '" role="option" aria-selected="' + (i === p.index) + '" data-i="' + i + '">'
+      + '<span class="pal-icon">' + svgIcon(e.icon || "grid", 14) + '</span>'
+      + '<span class="pal-label">' + esc(e.label) + '</span>'
+      + '<span class="pal-meta">' + (e.flag ? '<span class="pal-flag">' + esc(e.flag) + '</span>' : "") + esc(e.group || "") + '</span></li>';
+  }).join("") || '<li class="pal-empty">Nothing matches. Try a tab name, or part of a finding.</li>';
+  p.note.textContent = res.note;
+  p.note.hidden = !res.note;
+  p.input.setAttribute("aria-activedescendant", p.items.length ? "pal-opt-" + p.index : "");
+  p.status.textContent = p.items.length + (p.items.length === 1 ? " result" : " results");
+  var act = p.list.querySelector(".pal-active");
+  if (act && act.scrollIntoView) act.scrollIntoView({ block: "nearest" });
+}
+
+function _paletteChoose(i) {
+  var p = _palette; if (!p || !p.items[i]) return;
+  var e = p.items[i];
+  closePalette(false);
+  if (e.kind === "finding") findingJump(e.id, encodeURIComponent(e.title));
+  else navigate(e.id);
+}
+
+function closePalette(restoreFocus) {
+  var p = _palette; if (!p) return;
+  document.removeEventListener("keydown", p.onKey, true);
+  p.wrap.remove();
+  _palette = null;
+  if (restoreFocus !== false && p.opener && p.opener.focus) { try { p.opener.focus(); } catch (e) {} }
+}
+
+function openPalette(viaSlash) {
+  if (_palette || _confirmOpen) return;
+  var splash = document.getElementById("splash");
+  if (splash && getComputedStyle(splash).display !== "none" && !splash.classList.contains("splash-hidden")) return;
+  var opener = document.activeElement;
+  var wrap = document.createElement("div");
+  wrap.className = "pal-modal";
+  wrap.innerHTML = '<div class="pal-box" role="dialog" aria-modal="true" aria-label="Search tabs and findings">'
+    + '<div class="pal-search">' + svgIcon("search", 16)
+    + '<input type="text" class="pal-input" role="combobox" aria-expanded="true" aria-controls="pal-list" aria-autocomplete="list" placeholder="Search tabs and findings" autocomplete="off" spellcheck="false"></div>'
+    + '<p class="pal-note" hidden></p>'
+    + '<ul class="pal-list" id="pal-list" role="listbox" aria-label="Results"></ul>'
+    + '<div class="pal-foot"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>Enter</kbd> open</span><span><kbd>Esc</kbd> close</span></div>'
+    + '<div class="sr-only" role="status" aria-live="polite" id="pal-status"></div></div>';
+  var p = _palette = { wrap: wrap, opener: opener, index: 0, items: [],
+    input: wrap.querySelector(".pal-input"), list: wrap.querySelector(".pal-list"),
+    note: wrap.querySelector(".pal-note"), status: wrap.querySelector("#pal-status") };
+  p.onKey = function(e) {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closePalette(); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); p.index = Math.min(p.items.length - 1, p.index + 1); _paletteRender(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); p.index = Math.max(0, p.index - 1); _paletteRender(); }
+    else if (e.key === "Home") { e.preventDefault(); p.index = 0; _paletteRender(); }
+    else if (e.key === "End") { e.preventDefault(); p.index = Math.max(0, p.items.length - 1); _paletteRender(); }
+    else if (e.key === "Enter") { e.preventDefault(); _paletteChoose(p.index); }
+    else if (e.key === "Tab") { e.preventDefault(); }
+  };
+  p.openedAt = Date.now(); p.viaSlash = viaSlash === true;
+  p.input.addEventListener("input", function() {
+    // Some input paths deliver the "/" that opened the palette as a typed
+    // character after focus has moved; it is the shortcut, not a query.
+    if (p.viaSlash && Date.now() - p.openedAt < 400 && p.input.value === "/") p.input.value = "";
+    p.viaSlash = false;
+    p.index = 0; _paletteRender();
+  });
+  p.list.addEventListener("mousemove", function(e) {
+    var li = e.target.closest(".pal-opt");
+    if (li && +li.dataset.i !== p.index) { p.index = +li.dataset.i; _paletteRender(); }
+  });
+  p.list.addEventListener("click", function(e) {
+    var li = e.target.closest(".pal-opt");
+    if (li) _paletteChoose(+li.dataset.i);
+  });
+  wrap.addEventListener("mousedown", function(e) { if (e.target === wrap) closePalette(); });
+  document.addEventListener("keydown", p.onKey, true);
+  document.body.appendChild(wrap);
+  _paletteRender();
+  p.input.focus();
+}
+
+// "/" opens it unless the user is typing somewhere; Ctrl/Cmd+K works anywhere.
+document.addEventListener("keydown", function(e) {
+  if (_palette || e.defaultPrevented) return;
+  var t = e.target, tag = t && t.tagName;
+  var typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (t && t.isContentEditable);
+  if ((e.key === "k" || e.key === "K") && (e.ctrlKey || e.metaKey) && !e.altKey) { e.preventDefault(); openPalette(); }
+  else if (e.key === "/" && !typing && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); openPalette(true); }
+});
+
+// ── Verdict strip ────────────────────────────────────────────
+// The unit verdict ("is tonight's game OK") is the sentence an agent reads to
+// the school, and it lives on the Dashboard. On every other tab it vanished,
+// leaving only a nav triangle. This strip carries it under the page title
+// everywhere except the Dashboard (whose card already says it), in the same
+// words as the readiness card, and links back.
+//
+// It makes the four-state promise: loading, no verdict, failed and stale each
+// look different from a real verdict, and a stale verdict says how old it is.
+var _VERDICT_STALE_MS = 15 * 60 * 1000;
+function _verdictStripModel() {
+  var dash = cached("dashboard");
+  if (!dash) return { tone: "muted", word: "Checking", text: "Stream readiness is still being checked." };
+  if (dash.error) return { tone: "muted", word: "No verdict", text: "The Dashboard check failed, so there is no readiness verdict. Check each tab." };
+  var v = resolveReadiness(dash.readiness);
+  if (!v || !v.status) return { tone: "muted", word: "No verdict", text: "No readiness verdict for this unit." };
+  var meta = _RDY_META[v.status] || _RDY_META.WARN;
+  var blockers = (v.blockers || []).length, risks = (v.risks || []).length;
+  var text = (blockers ? blockers + (blockers === 1 ? " thing is" : " things are") + " stopping tonight's game"
+                       : "Nothing is stopping tonight's game")
+    + (risks ? " \u00b7 " + risks + (risks === 1 ? " risk" : " risks") + " tonight" : (blockers ? "" : " \u00b7 No risks tonight"));
+  var here = 0;
+  if (currentPage !== "dashboard") {
+    var tf = _dashToneFn(dash);
+    (dash.findings || []).forEach(function(f) {
+      if (_LANE_RANK[tf(f)] && _findingPageFor(f.category) === currentPage) here++;
+    });
+  }
+  if (here) text += " \u00b7 " + here + " on this tab";
+  var t = v.timestamp ? new Date(v.timestamp) : null;
+  var age = t && !isNaN(t) ? Date.now() - t.getTime() : null;
+  var asOf = t && !isNaN(t) ? t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+  if (age !== null && age > _VERDICT_STALE_MS && !(window.__PULSE_DEMO_MODE && _readinessDemoState)) {
+    return { tone: "muted", word: meta.word, icon: meta.icon, dot: meta.tone,
+      text: text + " \u00b7 as of " + asOf + ", " + Math.round(age / 60000) + " min old. Refresh the Dashboard for a current verdict." };
+  }
+  return { tone: meta.tone, word: meta.word, icon: meta.icon, text: text + (asOf ? " \u00b7 as of " + asOf : "") };
+}
+
+function updateVerdictStrip() {
+  var el = document.getElementById("verdict-strip");
+  if (!el) return;
+  if (currentPage === "dashboard") { el.hidden = true; el.innerHTML = ""; return; }
+  var m = _verdictStripModel();
+  el.hidden = false;
+  el.className = "verdict-strip verdict-strip-" + m.tone;
+  el.innerHTML = (m.icon ? svgIcon(m.icon, 14) : "")
+    + '<span class="verdict-strip-word">' + (m.dot ? '<span class="verdict-strip-dot verdict-strip-dot-' + esc(m.dot) + '" aria-hidden="true"></span>' : "") + esc(m.word) + '</span>'
+    + '<span class="verdict-strip-text">' + esc(m.text) + '</span>'
+    + '<a href="#dashboard" class="verdict-strip-link" onclick="event.preventDefault();navigate(\'dashboard\')">Open Dashboard</a>';
+  // Tell a screen reader when the verdict CHANGES while you stay on a page,
+  // not on every tab switch (the strip is rewritten on each render). The
+  // as-of time is left out so a clock tick is not a change.
+  var live = document.getElementById("verdict-live");
+  var said = m.word + " " + m.text.replace(/ \u00b7 as of .*$/, "");
+  if (live && _verdictSaid !== null && _verdictSaidPage === currentPage && said !== _verdictSaid) live.textContent = "Stream readiness changed: " + said;
+  _verdictSaid = said; _verdictSaidPage = currentPage;
+}
+var _verdictSaid = null, _verdictSaidPage = null;
+
 function renderPage(id) {
   const fn = pageRenderers[id];
   if (!fn) { $page().innerHTML = `<p class="text-pulse-muted">Unknown page: ${esc(id)}</p>`; return; }
@@ -215,6 +509,7 @@ function renderPage(id) {
   }
   try {
     fn();
+    updateVerdictStrip();
   } catch (err) {
     console.error("Render error on", id, err);
     $page().innerHTML = `<div class="card"><p class="text-red-400 font-bold">Render Error</p>
@@ -333,11 +628,9 @@ function badge(text, type) {
 // nested inside another function, so it was not reachable from here.
 // "OCR" -> the words a tech uses, at the DISPLAY layer only.
 //
-// The data value must not change. `role` comes from Pixellot's cameras.cfg on
-// a real unit and the backend pattern-matches the substring to identify the
-// scoreboard camera at all (main.py:1991, 2390, 2406, and the model table at
-// 445 maps R2SD-G/S5SD-G/E8NC-G to "OCR / Scoreboard"). Renaming it would
-// break camera identification app-wide. So translate on the way out.
+// The data value must not change. `role` comes from the camera model table
+// or the default-IP convention in main.py. The backend pattern-matches "OCR"
+// to identify scoreboard cameras, so translate only on the way out.
 //
 // The variants carry real meaning and are preserved:
 //   OCR        the 100 Mbps scoreboard camera
@@ -436,7 +729,7 @@ function loading() {
 
 function card(title, body, extra) {
   return `<div class="card ${extra || ""}">
-    ${title ? `<h3 class="text-sm font-semibold text-pulse-muted uppercase tracking-wide mb-3">${esc(title)}</h3>` : ""}
+    ${title ? `<h2 class="text-sm font-semibold text-pulse-muted uppercase tracking-wide mb-3">${esc(title)}</h2>` : ""}
     ${body}
   </div>`;
 }
@@ -519,6 +812,7 @@ function fetchSection(key) {
     }
     // Refresh the sidebar health dots when the data that drives them lands.
     if (key === "dashboard" || key === "events") updateNavHealth();
+    if (key === "dashboard") updateVerdictStrip();
     // Re-render the current page only when the completed fetch is relevant to it.
     // For dashboard, only its own deps trigger a refresh — non-dashboard data
     // (events, audio, scoreconnect, etc.) doesn't change anything visible.
@@ -642,7 +936,7 @@ const SPLASH_SCRIPT_LABELS = {
   "Get-InstalledSoftware.ps1": "Listing installed software",
   "Get-Services.ps1": "Checking Pixellot services",
   "Test-PixellotInstallState.ps1": "Checking the Pixellot install",
-  "Get-PixellotConfig.ps1": "Reading Pixellot camera configuration",
+  "Get-PixellotConfig.ps1": "Reading Pixellot settings and calibration",
   "Get-PixellotDependencies.ps1": "Checking Pixellot dependencies",
   "Get-NicAdapters.ps1": "Reading camera ports and adapters",
   "Get-NetworkConfig.ps1": "Reading IP, gateway and DNS settings",
@@ -791,9 +1085,7 @@ function _splashRowState(key) {
   if (key === "scoreconnect") {
     const src = d.scoreboardSource;
     if (src && src.source === "ocr") {
-      return src.ok
-        ? { state: "pass", word: "Pass", detail: "The OCR camera reads the score" + (src.ocrPort ? " (" + src.ocrPort + ")" : "") + ", so ScoreConnect isn't needed", ms }
-        : { state: "warn", word: "Warning", detail: "The OCR camera that reads the score isn't connected", ms };
+      return { state: "pass", word: "Pass", detail: "The OCR camera reads the score" + (src.ocrPort ? " (" + src.ocrPort + ")" : "") + ", so ScoreConnect isn't needed", ms };
     }
     const running = src ? src.scoreConnectRunning : d.reachable !== false;
     if (!running) {
@@ -1822,15 +2114,15 @@ function _ceEsrChip(cloud) {
   const esr = cloud.esr;
   if (!esr) {
     const why = cloud.errors && cloud.errors.events ? "couldn't load events" : "unavailable";
-    return `<span title="Pulse could not load this school's event history, so it could not count ESR.">${severityChip("muted", `ESR ${why}`)}</span>`;
+    return `<span title="Pulse could not load this school's event history, so it could not work out the event success rate.">${severityChip("muted", `Event success rate ${why}`)}</span>`;
   }
   if (!esr.counted) {
-    return `<span title="No past public events with a known result yet.">${severityChip("muted", "ESR: no past events")}</span>`;
+    return `<span title="No past public events with a known result yet.">${severityChip("muted", "Event success rate: no past events")}</span>`;
   }
   const pct = Math.round(esr.rate * 100);
   const tip = `Event Success Rate: ${esr.succeeded} of the last ${esr.counted} public events went on air. ` +
     "Unlisted and test events are not counted. Pulse counts this from the NFHS events API, so it can differ slightly from the Sigma ESR dashboard.";
-  return `<span title="${esc(tip)}">${severityChip(esr.rate >= 0.9 ? "ok" : "warning", `ESR ${pct}% (${esr.succeeded}/${esr.counted})`)}</span>`;
+  return `<span title="${esc(tip)}">${severityChip(esr.rate >= 0.9 ? "ok" : "warning", `Event success rate ${pct}% (${esr.succeeded} of ${esr.counted})`)}</span>`;
 }
 
 function renderCloudEvents() {
@@ -1967,8 +2259,7 @@ function _ceLocalOnlyTable(localEv) {
 // ── Pixellot Configuration ───────────────────────────────────
 // Local, on-host view of how the Pixellot software has this VPU + cameras
 // configured (NOT the Pixellot Cloud lane). Data: /api/pixellot-config —
-// registry + cameras.cfg + filesystem calibration, with live per-camera
-// firmware/tvMode from the shared CGI probe.
+// registry + filesystem calibration.
 
 const _PC_STALE_DAYS = 180; // calibration older than this is flagged stale
 
@@ -2034,7 +2325,6 @@ function renderPixellotSoftware() {
         <div class="kv-grid">
           ${kvRow("Install Path", installPath)}
           ${kvRow("Dependencies", reg.dependencies || reg.Dependencies)}
-          ${kvRowHtml("cameras.cfg", pc.cameraCfgExists ? badge("Present", "pass") : badge("Missing", "fail"))}
         </div>
       `}
     </div>
@@ -2075,7 +2365,7 @@ function renderCameraHardware() {
   const cards = entries.map((e) => _camHardwareCard(e.cam, e.port)).join("");
   const empty = `<div class="cam-no-detect">No cameras detected on any active port.</div>`;
   const noCgiNote = (entries.length && !anyCgi)
-    ? `<div class="cam-connecting-note">${svgIcon("refresh", 12)} Probing camera heads (Admin CGI)… identity-only data shown until probes complete. Use Refresh to force a re-probe.</div>`
+    ? `<div class="cam-connecting-note">${svgIcon("refresh", 12)} Checking each camera's admin page… only identity details are shown until the checks finish. Use Refresh to check again.</div>`
     : "";
 
   $page().innerHTML = `
@@ -2466,7 +2756,7 @@ function _findingRowHtml(r, scope, i, opts) {
   var v = VERDICT[r.t] || verdictFor(f.severity);
   var key = scope + ":" + (f.title || "");
   var remembered = _findingOpen[key];
-  var open = remembered == null ? (i === 0 && r.t === "critical") : remembered;
+  var open = remembered == null ? (i === 0 && (r.t === "critical" || (opts.lone && r.t !== "info"))) : remembered;
   var id = "fd-" + scope + "-" + i;
   var rec = (f.recommendation || f.body || "").trim();
   var extra = opts.detailExtra ? opts.detailExtra(f) : "";
@@ -2495,6 +2785,9 @@ function findingListHtml(items, opts) {
   var rows = _sortByTone(items || [], opts.toneOf || _findingTone);
   var act = rows.filter(function(r) { return r.t !== "info"; });
   var notes = rows.filter(function(r) { return r.t === "info"; });
+  // A lone problem opens by default: nothing else competes for attention, so
+  // hiding its fix behind a click is just a click.
+  opts = Object.assign({}, opts, { lone: act.length === 1 });
   var html = act.map(function(r, i) { return _findingRowHtml(r, scope, i, opts); }).join("");
   if (notes.length && act.length) {
     // Folded: context, not work. Opened, the notes are ordinary rows.
@@ -2686,7 +2979,7 @@ function _demoVerdict(state) {
     { code: "disk-d-critical", category: "Storage", title: "Recording drive (D:) almost full", recommendation: "D: is 93% full. The game recording is saved to D:, so if it fills during the game the recording may not save. Free up space on D:." },
   ] };
   return { status: "FAIL", policyVersion: "v1", timestamp: stamp, info: [], risks: [nicRisk], blockers: [
-    { code: "stream-blocked", category: "Network", title: "Streaming is blocked, so the VPU can't broadcast",
+    { code: "stream-blocked", category: "Network", title: "Streaming is blocked by the venue's network",
       recommendation: "The venue's network is blocking all three connections the VPU uses to send live video, so the game can't broadcast. Ask venue IT to open at least one.",
       it: "Outbound UDP 2088 and UDP 443 to prod-echo.pixellot.tv, and TCP 1935. Filters that match by destination must also allow *.pixellot.stream, because the streaming servers change for every event." },
   ] };
@@ -2728,7 +3021,7 @@ function readinessCard(verdict, freshness) {
     + '<div class="rdy-main">'
     +   '<div class="rdy-badge rdy-badge-' + meta.tone + '">' + svgIcon(meta.icon, 28) + '<span class="rdy-badge-word">' + meta.word + '</span></div>'
     +   '<div class="rdy-headline">'
-    +     '<div class="rdy-title-row"><h3 class="rdy-title">Stream Readiness</h3>' + (asOf ? '<span class="rdy-asof">as of ' + esc(asOf) + '</span>' : '') + '</div>'
+    +     '<div class="rdy-title-row"><h2 class="rdy-title">Stream Readiness</h2>' + (asOf ? '<span class="rdy-asof">as of ' + esc(asOf) + '</span>' : '') + '</div>'
     +     '<p class="rdy-tag">' + esc(meta.tag) + '</p>'
     +     (freshness ? '<p class="rdy-fresh">' + svgIcon("check", 12) + ' ' + esc(freshness) + '</p>' : '')
     +   '</div>'
@@ -2737,12 +3030,68 @@ function readinessCard(verdict, freshness) {
     +   '<span>' + (blockers.length
           ? blockers.length + (blockers.length === 1 ? ' thing is' : ' things are') + " stopping tonight's game"
           : "Nothing is stopping tonight's game") + '</span>'
-    +   '<span>' + (risks.length
+    +   (risks.length || !blockers.length ? '<span>' + (risks.length
           ? risks.length + (risks.length === 1 ? ' risk' : ' risks') + ' tonight'
-          : 'No risks tonight') + '</span>'
+          : 'No risks tonight') + '</span>' : '')
     + '</div>'
     + demoBar
     + '</div>';
+}
+
+// The Dashboard's verdict tone for a finding: the readiness policy's class
+// (with its supersede / never-demote rules, documented below), falling back to
+// the collector severity capped at a risk. Shared so the Dashboard, and the
+// command palette, say the same thing about the same finding.
+function _dashToneFn(dash) {
+  const _rdy = dash.readiness || {};
+  const _toneByCode = {};
+  (_rdy.blockers || []).forEach((b) => { if (b.code) _toneByCode[b.code] = "critical"; });
+  (_rdy.risks    || []).forEach((r) => { if (r.code) _toneByCode[r.code] = "warning";  });
+  (_rdy.info     || []).forEach((n) => { if (n.code) _toneByCode[n.code] = "info";     });
+  // The policy may ESCALATE a finding -- deciding what stops tonight's game is
+  // exactly its job -- but it must never silently DEMOTE one to an FYI.
+  //
+  // Demotion is the dangerous direction, and it happens for a legitimate
+  // reason: main.py:2540 classes `disk-critical` as info *because* readiness
+  // gates the same volume through its own per-drive F15a/F15b checks. One
+  // full drive, two records. Letting the info class win printed "Worth
+  // knowing" on a drive the same card was counting as a risk one line above.
+  //
+  // So: a blocker is critical, a risk is a risk, and anything the collector
+  // called a problem stays at least a risk even where the policy has no
+  // opinion or is deferring to a check it already counted.
+  return (f) => {
+    const own = verdictFor(f.severity).tone;
+    // A finding can name the readiness entry that supersedes it (main.py sets
+    // supersededBy where one condition is reported by two records -- a full
+    // C:/D: drive). Take that entry's class: it is the one the policy actually
+    // weighed, and the one the counts on this card are built from.
+    const superseded = f.supersededBy ? _toneByCode[f.supersededBy] : null;
+    if (superseded) return superseded;
+    const policy = _toneByCode[f.code];
+    if (!policy) {
+      // No policy class for this finding. Two ways to get here on a live
+      // unit: no readiness record rode along at all (an older payload, or a
+      // bundle shared in from another unit via peer.py), or the finding named
+      // a superseding entry whose own check did not fire -- `disk-critical`
+      // declares supersededBy: "disk-d-critical", and _compute_readiness
+      // skips it, so if F15b does not fire the finding has no class anywhere.
+      //
+      // Fall back to the collector's severity but CAP IT AT "risk". A
+      // collector severity of "critical" means "serious finding"; it does NOT
+      // mean "stops tonight's game". Those are different scales and only the
+      // policy decides the second one. Reading `own` unguarded is what put
+      // "Stops tonight's game" on a 91%-full recording drive, which does not
+      // stop an event.
+      return own === "info" ? "info" : "warning";
+    }
+    // The policy may ESCALATE -- deciding what stops tonight's game is its
+    // job -- but it must never silently DEMOTE a finding to an FYI.
+    // Demoting in words is still wrong ("Worth knowing"), but so is claiming
+    // tonight is at risk when the policy decided it isn't: "Fix soon".
+    if (policy === "info" && own !== "info") return "soon";
+    return policy;
+  };
 }
 
 function renderDashboard() {
@@ -2788,55 +3137,7 @@ function renderDashboard() {
   // on the PASS chip the card read "Nothing is stopping tonight's game" above
   // two rows reading "Stops tonight's game". The card previews a state; the
   // findings describe the unit, and they stay true in every preview.
-  const _rdy = dash.readiness || {};
-  const _toneByCode = {};
-  (_rdy.blockers || []).forEach((b) => { if (b.code) _toneByCode[b.code] = "critical"; });
-  (_rdy.risks    || []).forEach((r) => { if (r.code) _toneByCode[r.code] = "warning";  });
-  (_rdy.info     || []).forEach((n) => { if (n.code) _toneByCode[n.code] = "info";     });
-  // The policy may ESCALATE a finding -- deciding what stops tonight's game is
-  // exactly its job -- but it must never silently DEMOTE one to an FYI.
-  //
-  // Demotion is the dangerous direction, and it happens for a legitimate
-  // reason: main.py:2540 classes `disk-critical` as info *because* readiness
-  // gates the same volume through its own per-drive F15a/F15b checks. One
-  // full drive, two records. Letting the info class win printed "Worth
-  // knowing" on a drive the same card was counting as a risk one line above.
-  //
-  // So: a blocker is critical, a risk is a risk, and anything the collector
-  // called a problem stays at least a risk even where the policy has no
-  // opinion or is deferring to a check it already counted.
-  const toneOf = (f) => {
-    const own = verdictFor(f.severity).tone;
-    // A finding can name the readiness entry that supersedes it (main.py sets
-    // supersededBy where one condition is reported by two records -- a full
-    // C:/D: drive). Take that entry's class: it is the one the policy actually
-    // weighed, and the one the counts on this card are built from.
-    const superseded = f.supersededBy ? _toneByCode[f.supersededBy] : null;
-    if (superseded) return superseded;
-    const policy = _toneByCode[f.code];
-    if (!policy) {
-      // No policy class for this finding. Two ways to get here on a live
-      // unit: no readiness record rode along at all (an older payload, or a
-      // bundle shared in from another unit via peer.py), or the finding named
-      // a superseding entry whose own check did not fire -- `disk-critical`
-      // declares supersededBy: "disk-d-critical", and _compute_readiness
-      // skips it, so if F15b does not fire the finding has no class anywhere.
-      //
-      // Fall back to the collector's severity but CAP IT AT "risk". A
-      // collector severity of "critical" means "serious finding"; it does NOT
-      // mean "stops tonight's game". Those are different scales and only the
-      // policy decides the second one. Reading `own` unguarded is what put
-      // "Stops tonight's game" on a 91%-full recording drive, which does not
-      // stop an event.
-      return own === "info" ? "info" : "warning";
-    }
-    // The policy may ESCALATE -- deciding what stops tonight's game is its
-    // job -- but it must never silently DEMOTE a finding to an FYI.
-    // Demoting in words is still wrong ("Worth knowing"), but so is claiming
-    // tonight is at risk when the policy decided it isn't: "Fix soon".
-    if (policy === "info" && own !== "info") return "soon";
-    return policy;
-  };
+  const toneOf = _dashToneFn(dash);
 
   const warnCount = findings.filter((f) => toneOf(f) === "warning").length;
   const critCount = findings.filter((f) => toneOf(f) === "critical").length;
@@ -2922,7 +3223,7 @@ function renderDashboard() {
       lines.push("Stream readiness: " + meta.word + " - " + meta.tag);
       var nb = (rdy.blockers || []).length, nr = (rdy.risks || []).length;
       lines.push(nb
-        ? nb + (nb === 1 ? " thing is" : " things are") + " stopping tonight's game, " + nr + " risk" + (nr === 1 ? "" : "s") + " tonight"
+        ? nb + (nb === 1 ? " thing is" : " things are") + " stopping tonight's game" + (nr ? ", " + nr + " risk" + (nr === 1 ? "" : "s") + " tonight" : "")
         : "Nothing is stopping tonight's game, " + nr + " risk" + (nr === 1 ? "" : "s") + " tonight");
       lines.push("");
     }
@@ -3056,7 +3357,7 @@ function renderDashboard() {
       <div class="findings-hdr">
         <div class="dash-card-hdr mb-0">
           <span class="dash-hdr-icon">${svgIcon("clipboard-list", 16)}</span>
-          <h3 class="card-label mb-0">FINDINGS</h3>
+          <h2 class="card-label mb-0">FINDINGS</h2>
         </div>
         ${dashList.summary}
         <button class="finding-copy" id="finding-copy-btn" aria-live="polite" onclick="copyFindingsForTicket()" title="Copy the unit, the verdict and every finding with its fix, ready to paste into a ticket">Copy for ticket</button>
@@ -3082,7 +3383,7 @@ function renderDashboard() {
       <div class="card">
         <div class="dash-card-hdr">
           <span class="dash-hdr-icon">${svgIcon("id-card", 16)}</span>
-          <h3 class="card-label mb-0">VPU IDENTITY</h3>
+          <h2 class="card-label mb-0">VPU IDENTITY</h2>
         </div>
         ${vpuName ? `<div class="text-sm text-pulse-muted mb-3">${esc(vpuName)}</div>` : ""}
         <div class="dash-kv">
@@ -3096,7 +3397,7 @@ function renderDashboard() {
       <div class="card">
         <div class="dash-card-hdr">
           <span class="dash-hdr-icon">${svgIcon("package", 16)}</span>
-          <h3 class="card-label mb-0">PIXELLOT SOFTWARE</h3>
+          <h2 class="card-label mb-0">PIXELLOT SOFTWARE</h2>
         </div>
         <div class="text-lg font-bold text-white">${esc(id.pixellotVersion || "—")}</div>
         <div class="text-xs text-pulse-muted mb-3">App Version</div>
@@ -3112,7 +3413,7 @@ function renderDashboard() {
       <div class="dash-card-hdr-row">
         <div class="dash-card-hdr mb-0">
           <span class="dash-hdr-icon">${svgIcon("activity", 16)}</span>
-          <h3 class="card-label mb-0">SYSTEM STATUS</h3>
+          <h2 class="card-label mb-0">SYSTEM STATUS</h2>
         </div>
         <span id="live-indicator" class="live-indicator">${_liveIndicatorHtml()}</span>
       </div>
@@ -3154,14 +3455,14 @@ function renderDashboard() {
       <div class="card">
         <div class="dash-card-hdr">
           <span class="dash-hdr-icon">${svgIcon("link", 16)}</span>
-          <h3 class="card-label mb-0">NETWORK INTERFACE CARD (NIC) CONNECTIONS</h3>
+          <h2 class="card-label mb-0">NETWORK INTERFACE CARD (NIC) CONNECTIONS</h2>
         </div>
         <div class="dash-nic-table" id="dash-nic-table">${_renderNicRows(nicPorts)}</div>
       </div>
       <div class="card">
         <div class="dash-card-hdr">
           <span class="dash-hdr-icon">${svgIcon("wifi", 16)}</span>
-          <h3 class="card-label mb-0">NETWORK</h3>
+          <h2 class="card-label mb-0">NETWORK</h2>
         </div>
         <div class="dash-net-kv">
           <div class="dash-net-row"><span></span><span class="dash-kv-l">Uplink Adapter</span><span class="dash-kv-v">${uplinkDisplay}</span></div>
@@ -3178,14 +3479,14 @@ function renderDashboard() {
       <div class="card">
         <div class="dash-card-hdr">
           <span class="dash-hdr-icon">${svgIcon("database", 16)}</span>
-          <h3 class="card-label mb-0">STORAGE</h3>
+          <h2 class="card-label mb-0">STORAGE</h2>
         </div>
         ${_renderVolumes(volumes)}
       </div>
       <div class="card">
         <div class="dash-card-hdr">
           <span class="dash-hdr-icon">${svgIcon("server", 16)}</span>
-          <h3 class="card-label mb-0">PIXELLOT SERVICES</h3>
+          <h2 class="card-label mb-0">PIXELLOT SERVICES</h2>
         </div>
         <div class="dash-svc-list">
           ${svcs.map((s) => `
@@ -3269,7 +3570,7 @@ function pageHeader(title, subtitle, actionsHtml) {
 function sectionTitle(icon, text) {
   return `<div class="section-hdr">
     <span class="section-hdr-icon">${svgIcon(icon, 16)}</span>
-    <h3 class="section-hdr-text">${esc(text)}</h3>
+    <h2 class="section-hdr-text">${esc(text)}</h2>
   </div>`;
 }
 
@@ -3476,6 +3777,7 @@ function renderHardware() {
     <div class="dash-2col">
       <div class="card">
         ${sectionTitle("monitor", "Graphics")}
+        <div id="gpu-driver-panel"></div>
         ${gpus.length ? gpus.map(g => {
           // Dedicated GPU (NVIDIA/AMD with VRAM) gets a green chip; Intel iGPU
           // and others get a muted chip. Pixellot VPUs need at least one dedicated.
@@ -3508,6 +3810,186 @@ function renderHardware() {
     </div>
 
   `;
+  _loadGpuDriverPanel();
+}
+
+// ── Graphics driver check + repair ───────────────────────────
+// Fed by Get-GpuDriverState.ps1 (read-only). When the NVIDIA card has no
+// driver or shows an error, offers Repair-GpuDriver.ps1: Pixellot's approved
+// driver, installed clean. A card Windows cannot see at all gets a rescan and
+// a plain statement that a driver cannot fix it -- never a download.
+var _gpuDriverBusy = false;
+var _gpuDriverResult = null;   // last repair result, kept across re-renders
+
+async function _loadGpuDriverPanel() {
+  var el = document.getElementById("gpu-driver-panel");
+  if (!el) return;
+  if (!_gpuDriverBusy) {
+    el.innerHTML = `<div class="text-xs text-pulse-muted mb-2">Checking the graphics driver…</div>`;
+  }
+  var s = await api("/api/gpu-driver");
+  if (currentPage !== "hardware") return;
+  _renderGpuDriverPanel(s);
+}
+
+function _gpuDriverResultHtml(r) {
+  if (!r) return "";
+  if (r.error) {
+    return `<div class="dh-repair-result-err mt-2">
+      ${svgIcon("alert", 14)} <span><span class="font-semibold">Driver install failed to run.</span>
+      ${esc(r.message || "(no message)")}</span></div>`;
+  }
+  var good = ["installed", "installed-reboot", "rescan-fixed", "enabled", "not-needed"].indexOf(r.status) !== -1;
+  var steps = (r.steps || []).map(function(st) {
+    return (st.ok ? "OK    " : "FAIL  ") + st.step + ": " + (st.detail || "");
+  }).join("\n");
+  return `<div class="${good ? "dh-repair-result-ok" : "dh-repair-result-err"} mt-2">
+      ${svgIcon(good ? "check" : "alert", 14)} <span>${esc(r.message || r.status)}</span>
+    </div>
+    ${steps ? `<details class="dh-repair-details">
+      <summary class="text-xs text-pulse-muted">What Pulse did${r.durationSec != null ? " · " + esc(String(r.durationSec)) + "s" : ""}</summary>
+      <pre class="dh-repair-output">${esc(steps)}</pre>
+    </details>` : ""}`;
+}
+
+// The "replace the driver anyway" option: null when Pixellot has approved no
+// driver for this card (Pulse installs nothing else). `working` is true when the
+// card has no fault, false for a turned-off card, which Pulse turns on first.
+function _gpuReinstallKind(s, d, working) {
+  if (!s.approvedDriver) return null;
+  var ver = d.driverVersion ? " (" + d.driverVersion + ")" : "";
+  return {
+    kind: "reinstall", reinstall: true, tone: "danger",
+    confirmTitle: working ? "Replace the working graphics driver?" : "Reinstall the graphics driver?",
+    confirmLabel: "Reinstall anyway",
+    confirmBody: (working
+        ? "The graphics driver on this VPU is working and shows no error" + ver + ". Reinstalling replaces it"
+        : "The graphics card is turned off. Pulse turns it on first, then reinstalls the driver" + ver + ", replacing it")
+      + " with Pixellot's approved driver (" + s.approvedDriver + "), installed clean.\n\n"
+      + "\u2022 It downloads about 1 GB and takes around 10 minutes.\n"
+      + "\u2022 The screen may go blank and a remote session may drop.\n"
+      + "\u2022 The VPU software can't process video while the driver is swapped.\n"
+      + "\u2022 Restart the VPU afterward.\n\n"
+      + "Do not run this during a live event or shortly before one."
+      + (working ? " If the card is working and you aren't fixing a known graphics problem, cancel." : ""),
+  };
+}
+
+function _renderGpuDriverPanel(s) {
+  var el = document.getElementById("gpu-driver-panel");
+  if (!el) return;
+  var result = _gpuDriverResultHtml(_gpuDriverResult);
+
+  if (!s || s.error) {
+    el.innerHTML = `<div class="dh-repair-result-err mb-2">
+        ${svgIcon("alert", 14)} <span>Could not check the graphics driver: ${esc(s?.message || "no answer")}</span>
+        <button class="btn-outline btn-ol-blue" onclick="_loadGpuDriverPanel()">Retry</button>
+      </div>${result}`;
+    return;
+  }
+
+  if (s.state === "ok") {
+    var d = (s.devices || [])[0] || {};
+    var note = `NVIDIA driver installed${d.driverVersion ? " (" + esc(d.driverVersion) + ")" : ""}; Windows reports no error.`;
+    // Reinstall is offered on a working card too, behind a warning: a driver can
+    // be installed and error-free yet still wrong for the VPU software. Only for
+    // a card Pixellot has approved a driver for; Pulse installs nothing else.
+    var rk = _gpuReinstallKind(s, d, true);
+    if (!rk) {
+      el.innerHTML = `<div class="text-xs text-pulse-muted mb-2">${note} Pulse has no approved driver for this card${s.pciId ? " (PCI ID 10DE:" + esc(s.pciId) + ")" : ""}, so it can't reinstall one.</div>${result}`;
+      return;
+    }
+    el.innerHTML = `<div class="text-xs text-pulse-muted mb-2">${note}</div>
+      <button class="btn-outline btn-ol-amber" id="gpu-driver-btn" ${_gpuDriverBusy ? "disabled" : ""}>
+        ${svgIcon(_gpuDriverBusy ? "refresh" : "play", 12)} ${_gpuDriverBusy ? "Working…" : "Reinstall the driver…"}
+      </button>
+      ${_gpuDriverBusy ? `<div class="text-xs text-pulse-muted mt-2">Working. This can take 10 to 20 minutes. Keep this page open.</div>` : ""}
+      ${result}`;
+    var rbtn = document.getElementById("gpu-driver-btn");
+    if (rbtn) rbtn.addEventListener("click", function() { _runGpuDriverRepair(rk); });
+    return;
+  }
+  if (s.state === "reboot-needed") {
+    el.innerHTML = `<div class="dh-repair-card mb-2">
+        <div class="dh-repair-title">Restart needed</div>
+        <div class="dh-repair-body">${esc(s.reason)} Restart the VPU; no driver install is needed.</div>
+      </div>${result}`;
+    return;
+  }
+
+  // Three different fixes, so three different buttons. A state word this code
+  // does not know gets a neutral line and NO button: never default to a
+  // reinstall for something we cannot name.
+  var kinds = {
+    "not-detected": { kind: "rescan", title: "Graphics card not detected", button: "Rescan for the card",
+      confirmTitle: "Rescan for the graphics card?", confirmLabel: "Rescan",
+      confirmBody: "Pulse asks Windows to rescan its hardware. Nothing is downloaded unless the card turns up.",
+      cmd: "Windows hardware rescan (same as Device Manager: Scan for hardware changes)",
+      extra: " Pulse can rescan for it. If it is still missing, a driver cannot fix it: check that the card is seated and powered, and that the BIOS shows it." },
+    "disabled": { kind: "enable", title: "Graphics card is turned off", button: "Turn the card on",
+      confirmTitle: "Turn the graphics card on?", confirmLabel: "Turn on",
+      confirmBody: "Pulse enables the card in Device Manager. No driver is downloaded or installed.",
+      cmd: "Enable-PnpDevice (same as Device Manager: Enable device)",
+      extra: " A driver reinstall will not fix a card that is turned off, so Pulse turns it on instead." },
+    "no-driver": { kind: "install", title: "Graphics card has no driver" },
+    "driver-error": { kind: "install", title: "Graphics card shows an error" },
+  };
+  var k = kinds[s.state];
+  if (!k) {
+    el.innerHTML = `<div class="dh-repair-result-err mb-2">
+        ${svgIcon("alert", 14)} <span>Could not read the graphics driver state (got "${esc(String(s.state))}"). Pulse can't say whether the card is working.</span>
+        <button class="btn-outline btn-ol-blue" onclick="_loadGpuDriverPanel()">Retry</button>
+      </div>${result}`;
+    return;
+  }
+  if (k.kind === "install") {
+    // Pulse only installs a driver Pixellot approved for this card model. A
+    // card with no approved driver (approvedDriver null) gets no button.
+    if (!s.approvedDriver) {
+      el.innerHTML = `<div class="dh-repair-card mb-2">
+          <div class="dh-repair-title">${esc(k.title)}</div>
+          <div class="dh-repair-body">${esc(s.reason)} Pulse has no approved driver for this card${s.pciId ? " (PCI ID 10DE:" + esc(s.pciId) + ")" : ""}, so it won't install one. Install the driver Pixellot support approves for this card by hand.</div>
+        </div>${result}`;
+      return;
+    }
+    var ver = s.approvedDriver;
+    k.button = "Install the driver";
+    k.confirmTitle = "Install NVIDIA driver " + ver + "?";
+    k.confirmLabel = "Install driver";
+    k.confirmBody = "This downloads and installs Pixellot's approved NVIDIA driver (" + ver + ") for this card. The screen may go blank for a few seconds and a remote session may drop. Do not run it during a live event. Restart the VPU afterward.";
+    k.cmd = "Download the " + ver + " installer from software.pixellot.tv; run it with: -s -clean -noreboot";
+    k.extra = " Pulse can install Pixellot's approved driver for this card (" + ver + ", about 1 GB). It takes around 10 minutes, the screen may go blank briefly, and a remote session may drop. Don't run it during a live event.";
+  }
+  // A turned-off card can also be reinstalled: Pulse turns it on first, then installs.
+  var rk2 = k.kind === "enable" ? _gpuReinstallKind(s, (s.devices || [])[0] || {}, false) : null;
+  el.innerHTML = `<div class="dh-repair-card mb-2">
+      <div class="dh-repair-title">${esc(k.title)}</div>
+      <div class="dh-repair-body">${esc(s.reason + k.extra)}</div>
+      <div class="dh-repair-cmd font-mono">${esc(k.cmd)}</div>
+      <button class="btn-outline btn-ol-amber" id="gpu-driver-btn" ${_gpuDriverBusy ? "disabled" : ""}>
+        ${svgIcon(_gpuDriverBusy ? "refresh" : "play", 12)} ${_gpuDriverBusy ? "Working…" : esc(k.button)}
+      </button>
+      ${rk2 && !_gpuDriverBusy ? `<button class="btn-outline btn-ol-muted" id="gpu-driver-reinstall-btn">Reinstall the driver…</button>` : ""}
+      ${_gpuDriverBusy ? `<div class="text-xs text-pulse-muted mt-2">Working. This can take 10 to 20 minutes. Keep this page open.</div>` : ""}
+    </div>${result}`;
+  var btn = document.getElementById("gpu-driver-btn");
+  if (btn) btn.addEventListener("click", function() { _runGpuDriverRepair(k); });
+  var btn2 = document.getElementById("gpu-driver-reinstall-btn");
+  if (btn2 && rk2) btn2.addEventListener("click", function() { _runGpuDriverRepair(rk2); });
+}
+
+async function _runGpuDriverRepair(k) {
+  if (_gpuDriverBusy) return;
+  var ok = await confirmAction({ title: k.confirmTitle, body: k.confirmBody, confirmLabel: k.confirmLabel, tone: k.tone });
+  if (!ok) return;
+  _gpuDriverBusy = true;
+  _gpuDriverResult = null;
+  var s0 = await api("/api/gpu-driver");
+  _renderGpuDriverPanel(s0);
+  var r = await apiPost("/api/gpu-driver/repair", k.reinstall ? { reinstall: true } : {});
+  _gpuDriverBusy = false;
+  _gpuDriverResult = r;
+  if (currentPage === "hardware") _loadGpuDriverPanel();
 }
 
 // ── Applications ─────────────────────────────────────────────
@@ -3549,30 +4031,32 @@ function renderApplications() {
         <input type="text" id="sw-filter" placeholder="Filter software..." class="sw-filter-input"/>
         <div class="sw-table-wrap">
           ${(() => {
-            const hasConcerns = swList.some(s => s.concern);
-            // Drop the Concern column entirely when nothing is flagged —
-            // saves a wasted column of dashes on a healthy box.
+            // Review class comes from the backend (software_review.py), by
+            // application name only: risk > informational > approved.
+            const cls = s => s.review || (s.concern ? "risk" : "informational");
+            const rank = { risk: 0, informational: 1, approved: 2 };
             const sevRank = { critical: 0, warning: 1 };
             const sorted = [...swList].sort((a, b) => {
-              const ra = a.concern ? sevRank[a.concern.severity] ?? 9 : 99;
-              const rb = b.concern ? sevRank[b.concern.severity] ?? 9 : 99;
-              return ra - rb;
+              const d = rank[cls(a)] - rank[cls(b)];
+              if (d) return d;
+              return (sevRank[a.concern?.severity] ?? 9) - (sevRank[b.concern?.severity] ?? 9);
             });
             const rows = sorted.map(s => {
               const c = s.concern;
+              const k = cls(s);
               const rowCls = c ? ` class="sw-row-${esc(c.severity)}"` : "";
-              const concernCell = hasConcerns ? `<td>${c
-                ? `<span class="sw-concern-badge sw-concern-${esc(c.severity)}" title="${esc(c.reason)}">${esc(c.shortLabel || c.label)}</span>`
-                : `<span class="text-pulse-muted text-xs">—</span>`}</td>` : "";
+              const reviewCell = `<td>${k === "risk" && c
+                ? `<span class="sw-concern-badge sw-concern-${esc(c.severity)}">${esc(c.shortLabel || c.label)}</span><div class="sw-concern-reason">${esc(c.reason)}</div>`
+                : k === "approved" ? badge("Approved", "muted") : badge("Informational", "info")}</td>`;
               return `<tr${rowCls}>
                 <td>${esc(s.displayName)}</td>
                 <td class="font-mono text-xs">${esc(s.displayVersion)}</td>
                 <td class="text-pulse-muted">${esc(s.publisher)}</td>
-                ${concernCell}
+                ${reviewCell}
               </tr>`;
             }).join("");
             return `<table class="data-table" id="sw-table"><thead><tr>
-              <th>Name</th><th>Version</th><th>Publisher</th>${hasConcerns ? "<th>Concern</th>" : ""}
+              <th>Name</th><th>Version</th><th>Publisher</th><th>Review</th>
             </tr></thead><tbody>${rows}</tbody></table>`;
           })()}
         </div>
@@ -3837,7 +4321,7 @@ async function runLocalPing(count) {
 
   try {
     while (_localPingState.running) {
-      var resp = await fetch("/api/network/local-ping?count=" + batchSize, { signal: _localPingState.abortCtrl.signal });
+      var resp = await fetch("/api/network/local-ping?count=" + batchSize, { method: "POST", signal: _localPingState.abortCtrl.signal });
       var data = await resp.json();
       if (!_localPingState.running) break;
 
@@ -3955,7 +4439,7 @@ async function _runTraceroute(target) {
   if (out) out.innerHTML = '<p class="text-pulse-muted text-sm loading-pulse">Running traceroute to ' + esc(target) + '…</p>';
 
   try {
-    var resp = await fetch("/api/network/traceroute?target=" + encodeURIComponent(target));
+    var resp = await fetch("/api/network/traceroute?target=" + encodeURIComponent(target), { method: "POST" });
     var data = await resp.json();
     if (data.error) {
       if (out) out.innerHTML = '<p class="text-sm status-fail">' + esc(data.message) + '</p>';
@@ -4214,7 +4698,7 @@ async function _runCapture(duration) {
   if (out) out.innerHTML = '<p class="text-pulse-muted text-sm loading-pulse">Running ' + duration + 's packet capture, reading TCP headers on ports 443, 1935, 80, UDP 2088…</p>';
 
   try {
-    var resp = await fetch("/api/network/capture?duration=" + duration);
+    var resp = await fetch("/api/network/capture?duration=" + duration, { method: "POST" });
     var data = await resp.json();
     if (data.error) {
       if (out) out.innerHTML = '<p class="text-sm status-fail">' + esc(data.message) + '</p>';
@@ -5084,10 +5568,16 @@ function renderNetwork() {
 
   const issues = _buildNetIssues(cfg, ports, domains, local, dnsResolution, wifi, tls, lmiLog, data.findings);
 
-  const hasCrit = issues.some(function(f) { return f.severity === "critical"; });
-  const hasWarn = issues.some(function(f) { return f.severity === "warning"; });
-  const sevClass = hasCrit ? "critical" : hasWarn ? "warn" : "ok";
-  const sevLabel = hasCrit ? "Fail" : hasWarn ? "Warning" : "Pass";
+  // The chip uses the verdict words and tones the Issues panel below it uses
+  // (_findingTone), not the raw collector severity: a collector "critical" is
+  // not "stops tonight's game", and the chip used to say FAIL above a row
+  // reading "Risk tonight".
+  const _netTones = issues.map(_findingTone);
+  const hasCrit = _netTones.indexOf("critical") !== -1;
+  const hasWarn = _netTones.indexOf("warning") !== -1;
+  const hasSoon = _netTones.indexOf("soon") !== -1;
+  const sevClass = hasCrit ? "critical" : hasWarn ? "warn" : hasSoon ? "soon" : "ok";
+  const sevLabel = hasCrit ? VERDICT.critical.word : hasWarn ? VERDICT.warning.word : hasSoon ? VERDICT.soon.word : "No problems";
   const statusChip = `<span class="dash-sev-pill dash-sev-${sevClass}"><span class="dash-sev-dot"></span> ${sevLabel}</span>`;
 
   // Primary adapter — join uplinkAdapter with adapters[] and ipConfig[]
@@ -5639,6 +6129,18 @@ function _camFindingsHtml(findings) {
   </div>`;
 }
 
+// A port problem puts the port cards above the reference diagrams, so an agent
+// reaches the broken port without scrolling past three pictures. With nothing
+// wrong the diagrams stay first.
+function _camSyncPortOrder(ports, info) {
+  var grid = document.getElementById("cam-port-grid");
+  if (!grid) return;
+  info = info || {};
+  var degraded = (ports || []).some(function(p) { return p && p.isUp && p.isDegraded; });
+  var short = info.expectedMainCameras != null && info.detectedMainCameras != null && info.detectedMainCameras < info.expectedMainCameras;
+  grid.classList.toggle("cam-port-grid-first", !!(degraded || short));
+}
+
 function _camPortGridHtml(ports) {
   const portSlots = [];
   for (let i = 0; i < Math.max(4, ports.length); i++) {
@@ -5830,17 +6332,14 @@ function _camHeadPanelHtml(sysInfo) {
       facts + '</div>';
   }
   if (sb) {
-    // Only shown when a scoreboard camera is configured or present: many
-    // venues have none, and the panel must not imply one is missing.
-    var sbConn = sb.connected
-      ? (sb.port || "Connected") + (sb.speedMbps ? " at " + fmtSpeed(sb.speedMbps) : "")
-      : "Not connected";
+    // Only shown when a scoreboard camera is connected: many venues have
+    // none, and detection alone cannot say one is missing.
+    var sbConn = (sb.port || "Connected") + (sb.speedMbps ? " at " + fmtSpeed(sb.speedMbps) : "");
     items += '<div class="cam-head-item">' +
       _camFigHtml(SCOREBOARD_CAMERA.img, SCOREBOARD_CAMERA.w, SCOREBOARD_CAMERA.h, SCOREBOARD_CAMERA.alt) +
       '<div class="cam-head-name">Scoreboard camera</div>' +
       '<div class="orient-caption">Reads the scoreboard for the on-screen score</div>' +
-      _camFactsHtml(sb.configured ? "1 scoreboard camera" : "Not set up",
-                    sbConn, sb.connected ? "status-pass" : "status-warn") +
+      _camFactsHtml("1 scoreboard camera", sbConn, "status-pass") +
       '</div>';
   }
   return '<div class="nic-orient-panel cam-head-panel">' +
@@ -5908,7 +6407,7 @@ function _camOrientationPanelHtml() {
 // A POE port rectangle + centered number.
 function _orientPort(x, y, w, h, num) {
   return '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="1.5" class="orient-port"/>' +
-         '<text x="' + (x + w / 2) + '" y="' + (y + h / 2 + 3) + '" class="orient-port-num">' + num + '</text>';
+         '<text x="' + (x + w / 2) + '" y="' + (y + h / 2 + 4) + '" class="orient-port-num">' + num + '</text>';
 }
 
 // Force a fresh camera probe — clears the backend CGI cache and re-polls.
@@ -6378,7 +6877,7 @@ function renderCameras() {
         ${svgIcon("refresh", 14)} Refresh
       </button>
       <button id="cam-frames-btn" class="btn-outline btn-ol-blue" onclick="_camVerifyVideo()"${data.vpuRunning ? " disabled" : ""}
-        title="${data.vpuRunning ? "Disabled while the Pixellot capture engine (vpu.exe) is running, because capturing frames could interfere with the live stream." : "Grabs a single frame from each camera to confirm it is streaming and show what it sees."}">
+        title="Grabs a single frame from each camera to confirm it is streaming and show what it sees.">
         ${svgIcon("camera", 14)} Get Camera Frames
       </button>
       <button class="btn-outline btn-ol-blue" onclick="navigate('fault-isolator')">
@@ -6386,6 +6885,7 @@ function renderCameras() {
       </button>`
     )}
 
+    ${data.vpuRunning ? `<div class="cam-frames-note">Get Camera Frames is off while the Pixellot video software (vpu.exe) is running, because grabbing frames could interrupt the live stream.</div>` : ""}
     <div class="cam-page-body">
       <div id="cam-findings-wrap">${_camFindingsHtml(findings)}</div>
 
@@ -6403,6 +6903,8 @@ function renderCameras() {
     </div>
 
   `;
+
+  _camSyncPortOrder(ports, data);
 
   // Restore a previously-captured frame set so navigating away and back (a
   // full re-render) doesn't silently discard it. Stamped with its capture
@@ -6459,6 +6961,7 @@ function renderCameras() {
             openDetails[d.dataset.portIdx] = true;
           });
           grid.innerHTML = _camPortGridHtml(freshPorts);
+          _camSyncPortOrder(freshPorts, fresh);
           Object.keys(openDetails).forEach(function(idx) {
             var d = grid.querySelector('details[data-port-idx="' + idx + '"]');
             if (d) d.setAttribute('open', '');
@@ -6564,7 +7067,7 @@ function renderServices() {
     function section(title, subtitle, items, emptyMsg) {
       return `<section class="svc-section">
         <div class="svc-section-head">
-          <h3 class="svc-section-title">${esc(title)}</h3>
+          <h2 class="svc-section-title">${esc(title)}</h2>
           <p class="svc-section-sub">${esc(subtitle)}</p>
         </div>
         <div class="svc-grid">
@@ -6756,12 +7259,12 @@ function renderServices() {
 
   // keepagentup.exe — confirmation modal + inline result
   document.getElementById("svc-keepagent-btn")?.addEventListener("click", async () => {
-    const ok = confirm(
-      "Restart Pixellot Agent + Coordinator?\n\n" +
-      "This runs c:\\pixellot\\bin\\keepagentup.exe, which will briefly stop and " +
-      "relaunch both services. Recording may pause for a few seconds.\n\n" +
-      "Proceed?"
-    );
+    const ok = await confirmAction({
+      title: "Restart Pixellot Agent and Coordinator?",
+      body: "This runs c:\\pixellot\\bin\\keepagentup.exe, which will briefly stop and " +
+        "relaunch both services. Recording may pause for a few seconds.",
+      confirmLabel: "Restart both services",
+    });
     if (!ok) return;
 
     const btn = document.getElementById("svc-keepagent-btn");
@@ -6847,20 +7350,26 @@ function renderDiskHealth() {
   const haveSmart = physical.length > 0;
   const predictFail = data.predictFailure === true;
   const anyUnhealthy = haveSmart && physical.some(d => (d.healthStatus || "").toLowerCase() !== "healthy");
-  const anyUncorrected = haveSmart && physical.some(d => {
+  // Uncorrected errors: a few on a Healthy drive is "Fix soon"; 100+ is critical.
+  // Mirrors SMART_ERRORS_CRITICAL in main.py.
+  const SMART_ERRORS_CRITICAL = 100;
+  const uncorrectedByDisk = haveSmart ? physical.map(d => {
     const s = d.smart || {};
-    return (s.readErrorsUncorrected || 0) + (s.writeErrorsUncorrected || 0) > 0;
-  });
+    return (s.readErrorsUncorrected || 0) + (s.writeErrorsUncorrected || 0);
+  }) : [];
+  const maxUncorrected = uncorrectedByDisk.reduce((m, n) => Math.max(m, n), 0);
   const maxWear = haveSmart ? physical.reduce((m, d) => {
     const w = (d.smart || {}).wearPercent;
     return (w != null && w > m) ? w : m;
   }, 0) : 0;
-  const smartBad  = predictFail || anyUnhealthy || anyUncorrected;
-  const smartWarn = !smartBad && maxWear >= 80;
+  const smartBad  = predictFail || anyUnhealthy || maxUncorrected >= SMART_ERRORS_CRITICAL;
+  const smartFewErrors = !smartBad && maxUncorrected > 0;
+  const smartWarn = !smartBad && (smartFewErrors || maxWear >= 80);
   const smartSev  = !haveSmart ? "muted" : smartBad ? "critical" : smartWarn ? "warning" : "ok";
-  const smartChip = !haveSmart ? "No data" : smartBad ? "Issue" : smartWarn ? "Wear high" : "OK";
+  const smartChip = !haveSmart ? "No data" : smartBad ? "Issue" : smartFewErrors ? "Errors" : smartWarn ? "Wear high" : "OK";
   const smartVal  = !haveSmart ? "SMART not reported"
     : smartBad ? "Drive predicting failure"
+    : smartFewErrors ? `${maxUncorrected} uncorrected error${maxUncorrected === 1 ? "" : "s"}`
     : smartWarn ? `Highest wear ${maxWear}%`
     : `${physical.length} disk${physical.length === 1 ? "" : "s"} checked`;
 
@@ -6989,7 +7498,7 @@ function renderDiskHealth() {
     <div class="card mt-4">
       ${sectionTitle("hdd", "Physical Disks")}
       <table class="data-table"><thead><tr>
-        <th>Name</th><th>Type</th><th>Bus</th><th>Size</th><th title="Percentage of the SSD's rated write life used. From the drive's SMART/reliability counters.">Wear</th><th>Temp</th><th title="Total powered-on hours">Power-On</th><th>Health</th>
+        <th>Name</th><th>Type</th><th>Bus</th><th>Size</th><th title="Percentage of the SSD's rated write life used. From the drive's SMART/reliability counters.">Wear used</th><th>Temp</th><th title="Total powered-on hours">Hours on</th><th>Health</th>
       </tr></thead><tbody>
       ${physical.map(d => {
         const s = d.smart || {};
@@ -7078,10 +7587,11 @@ async function _runRepairTool(action) {
   };
   const slow = action === "RestoreHealth" || action === "SfcScan";
   if (slow) {
-    const ok = confirm(
-      `${titles[action]} can take 10–30 minutes to complete. ` +
-      `Pulse will block waiting for it.\n\nProceed?`
-    );
+    const ok = await confirmAction({
+      title: `${titles[action]}?`,
+      body: "This can take 10–30 minutes to complete. Pulse will block waiting for it.",
+      confirmLabel: "Start repair",
+    });
     if (!ok) return;
   }
 
@@ -7220,12 +7730,14 @@ async function _runStorageCleanup(preview) {
   const lines = [];
   if (daily.count) lines.push(`• ${daily.count} daily test clips older than 90 days (${daily.sizeGB} GB)`);
   if (recs.count) lines.push(`• ${recs.count} game recordings older than 1 year (${recs.sizeGB} GB)`);
-  const ok = confirm(
-    `Permanently delete ${totalCount} folders from D:\\recordedevents?\n\n` +
-    lines.join("\n") + "\n\n" +
-    "This cannot be undone. The folders do not go to the Recycle Bin.\n" +
-    "Nothing from the last 90 days will be touched.\n\nProceed?"
-  );
+  const ok = await confirmAction({
+    title: `Permanently delete ${totalCount} folders from D:\\recordedevents?`,
+    body: lines.join("\n") + "\n\n" +
+      "This cannot be undone. The folders do not go to the Recycle Bin.\n" +
+      "Nothing from the last 90 days will be touched.",
+    confirmLabel: `Delete ${totalCount} folders`,
+    tone: "danger",
+  });
   if (!ok) return;
 
   const btn = document.getElementById("dh-cleanup-run");
@@ -8110,7 +8622,7 @@ async function _shareDownloadReport(id) {
 }
 
 async function _shareDeleteReport(id) {
-  if (!confirm("Delete this received report?")) return;
+  if (!(await confirmAction({ title: "Delete this received report?", confirmLabel: "Delete report", tone: "danger" }))) return;
   await fetch("/api/peer/inbox/" + encodeURIComponent(id), { method: "DELETE" });
   _shareInbox.key = null;  // force the next tick to re-render
   _shareInboxTick();
@@ -8126,6 +8638,7 @@ async function _shareDeleteReport(id) {
 
 var _sc3InstallPoll = null;   // polling interval handle
 var _sc3Installing = false;   // true while an install is in flight (modal locked)
+var _sc3Reinstall = false;    // true when the run in flight is a clean reinstall
 
 function _sc3ModalEl() {
   var el = document.getElementById("sc3-modal");
@@ -8147,6 +8660,59 @@ function closeSc3Modal() {
   var el = document.getElementById("sc3-modal");
   if (el) el.classList.remove("open");
   if (_sc3InstallPoll) { clearInterval(_sc3InstallPoll); _sc3InstallPoll = null; }
+}
+
+// Entry point for the clean reinstall. Same modal and progress poll as the
+// install; the confirm step says what gets deleted and what survives.
+function reinstallSc3() {
+  var el = _sc3ModalEl();
+  el.innerHTML = `
+    <div class="sc3-modal-box">
+      <div class="sc3-modal-header">
+        <span class="sc3-modal-title">${svgIcon("refresh", 16)} Reinstall ScoreConnect III</span>
+        <button class="sc3-modal-close" onclick="closeSc3Modal()" title="Close" aria-label="Close">${svgIcon("x", 16)}</button>
+      </div>
+      <div class="sc3-modal-body">
+        <div class="sc3-warn-box">
+          <div class="font-semibold" style="margin-bottom:0.3rem">${svgIcon("alert", 14)} This deletes ScoreConnect's program folder</div>
+          <div>Pulse stops the ScoreConnect III service, deletes the entire
+          <span class="font-mono">Sportzcast LLC</span> folder under Program Files, and installs a fresh copy.
+          The scoreboard feed and any live score are down until it finishes.</div>
+          <div style="margin-top:0.5rem">Saved settings and logs in
+          <span class="font-mono">C:\\ProgramData\\Sportzcast LLC</span> are kept. If the scoreboard setup
+          is missing afterwards, re-enter it in ScoreConnect III.</div>
+        </div>
+        <div class="text-pulse-muted" style="font-size:var(--fs-small);line-height:1.5;margin-top:0.75rem">
+          Pulse downloads the installer first, so a failed download leaves the current install alone.
+          One Windows administrator prompt appears on the VPU desktop; approve it to continue.
+          Takes about 3&ndash;4 minutes. Don't do this during a live game.
+        </div>
+        <div class="sc3-modal-actions">
+          <button class="btn-outline" onclick="closeSc3Modal()">Cancel</button>
+          <button class="btn-outline btn-ol-red" onclick="_sc3StartInstall(true)">${svgIcon("refresh", 14)} Delete and Reinstall</button>
+        </div>
+      </div>
+    </div>
+  `;
+  el.classList.add("open");
+}
+
+// Card for the ScoreConnect page: the way out when SC III is installed but
+// broken or not answering.
+function _sc3ReinstallCardHtml() {
+  return `
+    <div class="card mt-4">
+      <div class="font-semibold" style="margin-bottom:0.25rem">Reinstall ScoreConnect III</div>
+      <div class="text-pulse-muted" style="font-size:var(--fs-small);line-height:1.5">
+        If ScoreConnect III won't start or keeps failing, delete its program folder and install it fresh.
+        Saved settings are kept.
+      </div>
+      <div style="margin-top:0.75rem">
+        <button class="btn-outline btn-ol-red" id="btn-reinstall-sc3" onclick="reinstallSc3()">
+          ${svgIcon("refresh", 14)} Reinstall ScoreConnect III
+        </button>
+      </div>
+    </div>`;
 }
 
 // Entry point — the Upgrade card button. Opens the confirm step.
@@ -8194,14 +8760,14 @@ function installSc3() {
           </div>
           ${anyMissing ? `<div class="sc3-cfg-warn">Pulse could not read every setting from ${esc(legacyName)} — open the ScoreConnect app and note the missing ones before continuing.</div>` : ""}
         </div>
-        <div class="text-pulse-muted" style="font-size:0.8rem;line-height:1.5;margin-top:0.75rem">
+        <div class="text-pulse-muted" style="font-size:var(--fs-small);line-height:1.5;margin-top:0.75rem">
           The install runs in the background and progress shows here — no installer window
           opens. One Windows administrator prompt appears on the VPU desktop; approve it to continue.
           Takes about 2–3 minutes.
         </div>
         <div class="sc3-modal-actions">
           <button class="btn-outline" onclick="closeSc3Modal()">Cancel</button>
-          <button class="btn-outline btn-ol-blue" onclick="_sc3StartInstall()">${svgIcon("download", 14)} Start Install</button>
+          <button class="btn-outline btn-ol-blue" onclick="_sc3StartInstall(false)">${svgIcon("download", 14)} Start Install</button>
         </div>
       </div>
     </div>
@@ -8209,12 +8775,15 @@ function installSc3() {
   el.classList.add("open");
 }
 
-async function _sc3StartInstall() {
+async function _sc3StartInstall(reinstall) {
+  // The Retry button calls this with no argument, so it repeats the same kind
+  // of run the tech started.
+  if (reinstall !== undefined) _sc3Reinstall = !!reinstall;
   _sc3Installing = true;
-  _renderSc3Progress({ stage: "starting", percent: 5, message: "Approve the Windows administrator prompt to begin installing ScoreConnect III." });
+  _renderSc3Progress({ stage: "starting", percent: 5, message: "Approve the Windows administrator prompt to begin " + (_sc3Reinstall ? "reinstalling" : "installing") + " ScoreConnect III." });
 
   // Kick off the install — backend returns immediately
-  var result = await apiPost("/api/scoreconnect/install-sc3");
+  var result = await apiPost(_sc3Reinstall ? "/api/scoreconnect/reinstall-sc3" : "/api/scoreconnect/install-sc3");
   if (!result || !result.ok) {
     _sc3Installing = false;
     _renderSc3Progress({
@@ -8256,9 +8825,14 @@ async function _sc3StartInstall() {
         dataCache.scoreconnect = null;
         if (window.location.hash === "#scoreconnect") renderScoreConnect();
       }, 3000);
-    } else if (s.stage === "failed" || s.stale) {
+    } else if (s.stage === "failed") {
       clearInterval(_sc3InstallPoll); _sc3InstallPoll = null;
       _sc3Installing = false;
+    } else {
+      // A stall is not the end: an installer that goes quiet can still write
+      // "complete" later. Keep polling so the modal can turn green, but unlock
+      // it so the tech can Retry or Close while it is quiet.
+      _sc3Installing = !s.stale;
     }
     _renderSc3Progress(s);
   }, 1500);
@@ -8272,7 +8846,15 @@ var _SC3_STEPS = [
   { key: "verifying",   label: "Verify it's running" }
 ];
 
+function _sc3Steps() {
+  if (!_sc3Reinstall) return _SC3_STEPS;
+  var steps = _SC3_STEPS.slice();
+  steps.splice(2, 0, { key: "removing", label: "Remove the old install" });
+  return steps;
+}
+
 function _renderSc3Progress(status) {
+  var steps = _sc3Steps();
   var stage = status.stage || "unknown";
   var pct = Math.max(0, Math.min(100, status.percent || 0));
   var msg = status.message || "";
@@ -8286,10 +8868,10 @@ function _renderSc3Progress(status) {
     : "var(--c-accent-blue)";
 
   // Index of the active step; complete = past the end.
-  var activeIdx = complete ? _SC3_STEPS.length
-    : Math.max(0, _SC3_STEPS.findIndex(function(st) { return st.key === stage; }));
+  var activeIdx = complete ? steps.length
+    : Math.max(0, steps.findIndex(function(st) { return st.key === stage; }));
 
-  var stepsHtml = _SC3_STEPS.map(function(st, i) {
+  var stepsHtml = steps.map(function(st, i) {
     var state = complete || i < activeIdx ? "done"
       : i === activeIdx ? (failed ? "failed" : "active")
       : "pending";
@@ -8306,11 +8888,17 @@ function _renderSc3Progress(status) {
     `;
   }).join("");
 
+  // Every poll rebuilds the modal, so carry the log's open state and scroll
+  // position across the redraw or it snaps shut a second after it is opened.
   var el = _sc3ModalEl();
+  var oldLog = el.querySelector("details.sc3-log");
+  var logOpen = failed || (oldLog ? oldLog.open : false);
+  var oldPre = oldLog ? oldLog.querySelector("pre") : null;
+  var logScroll = oldPre ? oldPre.scrollTop : 0;
   el.innerHTML = `
     <div class="sc3-modal-box">
       <div class="sc3-modal-header">
-        <span class="sc3-modal-title">${svgIcon("download", 16)} Installing ScoreConnect III</span>
+        <span class="sc3-modal-title">${svgIcon(_sc3Reinstall ? "refresh" : "download", 16)} ${_sc3Reinstall ? "Reinstalling" : "Installing"} ScoreConnect III</span>
         ${_sc3Installing ? "" : `<button class="sc3-modal-close" onclick="closeSc3Modal()" title="Close" aria-label="Close">${svgIcon("x", 16)}</button>`}
       </div>
       <div class="sc3-modal-body">
@@ -8318,22 +8906,24 @@ function _renderSc3Progress(status) {
         <div class="sc3-bar-track">
           <div class="sc3-bar-fill" style="width:${pct}%;background:${barColor}"></div>
         </div>
-        ${complete ? `<div class="status-pass" style="display:flex;align-items:center;gap:0.4rem;font-size:0.85rem;margin-top:0.75rem">${svgIcon("check", 14)} <span>${esc(msg || "ScoreConnect III is installed and running.")}</span></div>` : ""}
-        ${err ? `<div class="status-fail" style="font-size:0.8rem;margin-top:0.75rem">${esc(err)}</div>` : ""}
-        ${stale && !err ? `<div class="status-fail" style="font-size:0.8rem;margin-top:0.75rem">The install appears stalled — no update from the installer in over 30 seconds.</div>` : ""}
+        ${complete ? `<div class="status-pass" style="display:flex;align-items:center;gap:0.4rem;font-size:var(--fs-body);margin-top:0.75rem">${svgIcon("check", 14)} <span>${esc(msg || "ScoreConnect III is installed and running.")}</span></div>` : ""}
+        ${err ? `<div class="status-fail" style="font-size:var(--fs-small);margin-top:0.75rem">${esc(err)}</div>` : ""}
+        ${stale && !err ? `<div class="status-fail" style="font-size:var(--fs-small);margin-top:0.75rem">The install appears stalled — no update from the installer in over 30 seconds. Pulse is still watching and will update this if it finishes.</div>` : ""}
         ${status.logTail ? `
-        <details class="sc3-log" ${failed ? "open" : ""}>
+        <details class="sc3-log" ${logOpen ? "open" : ""}>
           <summary>Install log</summary>
           <pre>${esc(status.logTail)}</pre>
         </details>` : ""}
         ${failed || complete ? `
         <div class="sc3-modal-actions">
-          ${failed ? `<button class="btn-outline btn-ol-blue" onclick="_sc3StartInstall()">${svgIcon("refresh", 14)} Retry Install</button>` : ""}
+          ${failed ? `<button class="btn-outline btn-ol-blue" onclick="_sc3StartInstall()">${svgIcon("refresh", 14)} Retry ${_sc3Reinstall ? "Reinstall" : "Install"}</button>` : ""}
           <button class="btn-outline" onclick="closeSc3Modal(); dataCache.scoreconnect = null; if (window.location.hash === '#scoreconnect') renderScoreConnect();">Close</button>
         </div>` : ""}
       </div>
     </div>
   `;
+  var newPre = el.querySelector("details.sc3-log pre");
+  if (newPre && logScroll) newPre.scrollTop = logScroll;
   el.classList.add("open");
 }
 
@@ -8669,9 +9259,6 @@ function _scNoServiceText(data) {
     return "No ScoreConnect service on this VPU. That's expected: the OCR camera"
       + (src.ocrPort ? " on " + src.ocrPort : "") + " reads the score.";
   }
-  if (src.source === "ocr") {
-    return "No ScoreConnect service on this VPU, and the OCR camera that reads the score isn't connected. Check Camera Connectivity.";
-  }
   if (data.error) return typeof data.error === "string" ? data.error : "No ScoreConnect service detected";
   return "No ScoreConnect service detected";
 }
@@ -8695,6 +9282,7 @@ function renderScoreConnect() {
     $page().innerHTML = '<div id="scc-findings-wrap">' + _sccFindingsTopHtml(data) + '</div>'
       + '<div class="scc-stage-wrap"><div class="scc-stage is-solo">' + scChainHtml(data) + '</div></div>'
       + errorBox(data.message || (typeof data.error === "string" ? data.error : null))
+      + _sc3ReinstallCardHtml()
       + '<div id="sc-config-history-wrap">' + (_scHistCache ? _scConfigHistoryHtml(_scHistCache, null) : "") + "</div>";
     _scLoadConfigHistory(null);
     return;
@@ -8784,7 +9372,7 @@ function renderScoreConnect() {
           <div class="sc-period-label" id="sc3-period">${esc(_sc3PeriodText(rtdShown, config.sport))}</div>
           <div class="sc-cap sc-cap-gap">Time</div>
           <div class="sc-clock" id="sc3-clock">${rtdShown && rtdShown.clock ? esc(rtdShown.clock) : "--:--"}</div>
-          <div id="sc3-live-badge" style="margin-top:0.4rem;font-size:0.62rem;letter-spacing:0.1em;color:${dataReceiving ? "var(--c-board-ok)" : "var(--c-board-bad)"};display:flex;align-items:center;justify-content:center;gap:0.3rem">
+          <div id="sc3-live-badge" style="margin-top:0.4rem;font-size:var(--fs-micro);letter-spacing:0.1em;color:${dataReceiving ? "var(--c-board-ok)" : "var(--c-board-bad)"};display:flex;align-items:center;justify-content:center;gap:0.3rem">
             ${_sc3StageBadge(dataReceiving ? "live" : "disconnected", 0)}
           </div>
         </div>
@@ -8828,7 +9416,7 @@ function renderScoreConnect() {
         <div style="margin-top:2px;color:var(--c-accent-blue)">${svgIcon("refresh", 18)}</div>
         <div style="flex:1">
           <div class="font-semibold" style="margin-bottom:0.25rem">Upgrade to ScoreConnect III</div>
-          <div class="text-pulse-muted" style="font-size:0.8rem;line-height:1.5">
+          <div class="text-pulse-muted" style="font-size:var(--fs-small);line-height:1.5">
             ScoreConnect III is the preferred version. It provides live scoreboard data, parsed
             scores, and live status, without interfering with the data stream.
           </div>
@@ -8837,7 +9425,7 @@ function renderScoreConnect() {
               ${svgIcon("download", 14)} Install ScoreConnect III
             </button>
           </div>
-          <div class="text-pulse-muted" style="font-size:0.72rem;margin-top:0.5rem">
+          <div class="text-pulse-muted" style="font-size:var(--fs-meta);margin-top:0.5rem">
             The official installer runs in the background with progress shown here in Pulse.
             One Windows administrator prompt appears on the VPU desktop.
           </div>
@@ -8859,7 +9447,7 @@ function renderScoreConnect() {
         ${kvRow("UID", sc2.uid)}
         ${sc2.botNumber ? kvRow("Bot Number", sc2.botNumber) : ""}
         ${sc2.vendor ? (sc2.vendorIsCode
-          ? kvRowHtml("Vendor", `${esc(String(sc2.vendor))} <span class="text-pulse-muted" style="font-size:0.75rem">(code)</span>`)
+          ? kvRowHtml("Vendor", `${esc(String(sc2.vendor))} <span class="text-pulse-muted" style="font-size:var(--fs-meta)">(code)</span>`)
           : kvRow("Vendor", sc2.vendor)) : ""}
         ${sc2.sport ? kvRow("Sport Code", sc2.sport) : ""}
         ${sc2.license ? kvRow("License Expires", sc2.license) : ""}
@@ -8870,7 +9458,7 @@ function renderScoreConnect() {
       </div>
       ${sc2.networkIfaces && sc2.networkIfaces.length ? `
       <div style="margin-top:0.75rem;padding-top:0.75rem;border-top:1px solid var(--c-border)">
-        <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--c-muted);margin-bottom:0.5rem">Network Interfaces</div>
+        <div style="font-size:var(--fs-micro);text-transform:uppercase;letter-spacing:0.05em;color:var(--c-muted);margin-bottom:0.5rem">Network Interfaces</div>
         <div class="kv-grid">
           ${sc2.networkIfaces.map(n => kvRow(n.name, n.address)).join("")}
         </div>
@@ -8906,7 +9494,8 @@ function renderScoreConnect() {
         <summary>Previous setups on this VPU <span class="scd-count" id="sc-config-history-count">${_scHistCache && _scHistCache.length ? _scHistCache.length : ""}</span></summary>
         <div id="sc-config-history-wrap">${_scHistCache ? _scConfigHistoryHtml(_scHistCache, data, true) : ""}</div>
       </details>
-    </div>` : `
+    </div>
+    ${_sc3ReinstallCardHtml()}` : `
     <div id="sc-config-history-wrap">${_scHistCache ? _scConfigHistoryHtml(_scHistCache, data) : ""}</div>`}
   `;
   _scLoadConfigHistory(data);
@@ -9650,7 +10239,7 @@ async function sccSetupRestore() {
   var s = _scc.setup;
   var prev = s.previous && s.previous.setup;
   if (!prev) return;
-  if (!window.confirm("Put back " + (prev.vendorName || "") + " " + (prev.vendorSportName || "") + "? The score stops for about 15 seconds while ScoreConnect reconnects.")) return;
+  if (!(await confirmAction({ title: "Put back " + (prev.vendorName || "") + " " + (prev.vendorSportName || "") + "?", body: "The score stops for about 15 seconds while ScoreConnect reconnects.", confirmLabel: "Put back this setup" }))) return;
   s.phase = "saving";
   s.message = "Putting back the earlier setup…";
   _sccRender(true);
@@ -9769,7 +10358,7 @@ async function sccFindCodeFromSetup(btn) {
   }
   var cd = cached("scoreconnect");
   var reading = r.console === "reading" || (r.console == null && !!cd && _sccSignals(cd).flow === "live");
-  if (reading && !window.confirm(_SCC_SCAN_READING_WARNING)) { restore(); return; }
+  if (reading && !(await confirmAction(_SCC_SCAN_READING_CONFIRM))) { restore(); return; }
   var keys = plan.sports.map(function(x) { return x.key; });
   var cur = plan.currentSportKey, count = function(k) { return (plan.sports.filter(function(x) { return x.key === k; })[0] || {}).count || 0; };
   var sport = keys.indexOf(cur) !== -1 && count(cur) ? cur : null;
@@ -9788,9 +10377,12 @@ function sccScanSport(k) {
 // What the tech is told before codes are tried on a console ScoreConnect
 // already reads. Each code saved interrupts the score for several seconds, and
 // the scan keeps the first code that reads, which may not be today's.
-var _SCC_SCAN_READING_WARNING = "ScoreConnect is already reading the console, so the score is working.\n\n" +
-  "Find the code tries other codes one at a time. Each one interrupts the score for a few seconds, and Pulse keeps the first one that reads, which may not be the setup you have now. Change setup can put the current one back.\n\n" +
-  "Try other codes anyway?";
+var _SCC_SCAN_READING_CONFIRM = {
+  title: "Try other codes anyway?",
+  body: "ScoreConnect is already reading the console, so the score is working.\n\n" +
+    "Find the code tries other codes one at a time. Each one interrupts the score for a few seconds, and Pulse keeps the first one that reads, which may not be the setup you have now. Change setup can put the current one back.",
+  confirmLabel: "Try other codes",
+};
 
 async function sccScanStart(sport, force) {
   var st = _scc.scan;
@@ -9802,7 +10394,7 @@ async function sccScanStart(sport, force) {
   var r = await apiPost("/api/scoreconnect/sc3/scan", { confirm: true, sport: st.sport, force: force === true });
   // The console began reading between the form and the click: ask, then retry.
   if (r && r.alreadyReading && force !== true) {
-    if (window.confirm(_SCC_SCAN_READING_WARNING)) return sccScanStart(st.sport, true);
+    if (await confirmAction(_SCC_SCAN_READING_CONFIRM)) return sccScanStart(st.sport, true);
     st.phase = "form"; st.scan = null; _sccRender(true);
     return;
   }
@@ -10585,7 +11177,7 @@ function _scConfigHistoryHtml(entries, current, bare) {
   if (bare) return note + items;
   return '<div class="card mt-4">' +
     sectionTitle("clock", "Previous Configurations") +
-    '<div class="text-pulse-muted" style="font-size:0.75rem;margin:-0.25rem 0 0.6rem;line-height:1.5">' +
+    '<div class="text-pulse-muted" style="font-size:var(--fs-meta);margin:-0.25rem 0 0.6rem;line-height:1.5">' +
       "Recorded automatically each time the scoreboard configuration changes while data is confirmed flowing. " +
       "Bot numbers are best-effort. ScoreConnect III can report a stale number until its service restarts." +
     "</div>" + items + "</div>";
@@ -10646,7 +11238,7 @@ function _fiHistoryHtml(runs) {
       return "<tr><td><strong>" + esc(h.phase || "") + "</strong></td>" +
         '<td class="font-mono">' + esc(h.speed || "") + "</td>" +
         '<td><span class="' + sc + '">' + esc(h.severity || "") + "</span></td>" +
-        '<td class="text-pulse-muted" style="font-size:0.78rem">' + esc(h.verdict || "") + "</td></tr>";
+        '<td class="text-pulse-muted" style="font-size:var(--fs-small)">' + esc(h.verdict || "") + "</td></tr>";
     }).join("");
     return '<details class="fi-hist-run">' +
       '<summary class="fi-hist-summary">' +
@@ -10749,12 +11341,12 @@ function renderFaultIsolator() {
     var rows = _fi.history.map(function(h) {
       var sc = h.severity === "Pass" ? "status-pass" : h.severity === "Fail" ? "status-fail" : "status-info";
       return "<tr>" +
-        '<td class="font-mono" style="font-size:0.7rem;color:var(--c-dim)">' + esc(h.ts) + "</td>" +
+        '<td class="font-mono" style="font-size:var(--fs-micro);color:var(--c-dim)">' + esc(h.ts) + "</td>" +
         '<td><span class="' + sc + '">' + esc(h.severity) + "</span></td>" +
         "<td><strong>" + esc(h.phase) + "</strong></td>" +
-        '<td class="text-pulse-muted" style="font-size:0.78rem">' + esc(h.config) + "</td>" +
-        '<td class="font-mono" style="font-size:0.78rem">' + esc(h.speed) + "</td>" +
-        '<td class="text-pulse-muted" style="font-size:0.78rem">' + esc(h.verdict) + "</td>" +
+        '<td class="text-pulse-muted" style="font-size:var(--fs-small)">' + esc(h.config) + "</td>" +
+        '<td class="font-mono" style="font-size:var(--fs-small)">' + esc(h.speed) + "</td>" +
+        '<td class="text-pulse-muted" style="font-size:var(--fs-small)">' + esc(h.verdict) + "</td>" +
         "</tr>";
     }).join("");
     return '<div class="mt-4">' +
@@ -11567,6 +12159,124 @@ function _audioDeviceRow(d) {
 
 // ── Settings ─────────────────────────────────────────────────
 
+// ── Fleet monitoring card (Settings) ──
+// Opts this unit in to the fleet monitor, which then reports to Pulse Vitals
+// (fleet_enroll.py). Shown on the dev channel only. Every state the backend
+// can report looks different: a task that stopped ticking is "Not working",
+// never "On".
+function _fleetAgo(sec) {
+  return sec ? _scAgoLabel(new Date(sec * 1000).toISOString()) : null;
+}
+
+async function _loadFleetCard() {
+  const el = document.getElementById("set-fleet");
+  if (!el) return;
+  const st = await api("/api/fleet-monitor");
+  if (!document.body.contains(el)) return;
+  if (st && st.error) {
+    // Only a dev build has the endpoint; anything else that fails says so.
+    el.style.display = "";
+    el.innerHTML = sectionTitle("activity", "Fleet Monitoring") +
+      '<p class="text-sm text-pulse-muted">Couldn’t read the monitor’s status: ' + esc(st.message || "no response") + '</p>';
+    return;
+  }
+  if (!st || !st.available) { el.style.display = "none"; el.innerHTML = ""; return; }
+  el.style.display = "";
+  _renderFleetCard(el, st);
+}
+
+function _renderFleetCard(el, st) {
+  const WORDS = {
+    on: ["On", "pass"], paused: ["Paused from Vitals", "warn"], broken: ["Not working", "fail"],
+    elsewhere: ["Old install", "warn"], off: ["Off", "muted"],
+  };
+  const w = WORDS[st.state] || ["Unknown", "muted"];
+  const about = "Every 5 minutes this VPU checks whether it’s ready to stream and reports to Pulse Vitals. " +
+    "A check takes under a second; a full readiness pass runs about every 20 minutes. Nothing runs while an event is live.";
+  const rows = [];
+  if (st.state === "on" || st.state === "paused" || st.state === "broken") {
+    const tick = _fleetAgo(st.lastTickAt);
+    const post = _fleetAgo(st.lastPostAt);
+    rows.push(kvRowHtml("Last check", tick ? esc(tick) : '<span class="text-pulse-muted">Not yet</span>'));
+    rows.push(kvRowHtml("Last report to Vitals", post ? esc(post) + (st.lastPostKind ? ' <span class="text-pulse-muted">(' + esc(st.lastPostKind) + ")</span>" : "")
+      : '<span class="text-pulse-muted">Not yet</span>'));
+    if (st.verdict) rows.push(kvRowHtml("Verdict it reported", statusBadge(st.verdict)));
+    rows.push(kvRowHtml("Monitor build", esc(st.version || "unknown") +
+      (st.current === false ? ' <span class="text-pulse-muted">(older than this Pulse; it updates on the next launch, or opt in again)</span>' : "") +
+      (st.runner && st.slotMatchesThisBuild === false ? ' <span class="text-pulse-muted">(not this Pulse build, ' + esc(st.thisBuild || "unknown") + ")</span>" : "")));
+  }
+  let note = "";
+  if (st.state === "broken") note = '<p class="text-sm mt-2"><strong>' + esc(st.problem || "The monitor isn’t running.") + "</strong> Opting in again reinstalls it.</p>";
+  else if (st.state === "paused") note = '<p class="text-sm mt-2">Fleet control in Vitals has switched the monitor off on this unit. It checks back hourly and resumes when it’s switched on.</p>';
+  else if (st.state === "elsewhere") note = '<p class="text-sm mt-2">The monitor runs from <code>' + esc((st.task && st.task.installDir) || "another folder") +
+    "</code>. A production launch can break it there. Opt in to move it to <code>" + esc(st.root) + "</code>.</p>";
+  if (!st.admin) note += '<p class="text-sm mt-2">Pulse isn’t running as administrator, so it can’t change the monitor. Restart Pulse and choose Yes when Windows asks.</p>';
+  if (!st.sourceHasMonitor && st.state !== "on") note += '<p class="text-sm mt-2">This Pulse build has no fleet monitor.</p>';
+
+  const enrolled = st.state === "on" || st.state === "paused" || st.state === "broken";
+  const canInstall = st.admin && st.sourceHasMonitor;
+  // On the agent runner layout a launch never changes the monitor's build
+  // (fleet control picks it), so a running monitor on other code offers this
+  // build by hand. Opting out and in would also do it, but purges its history.
+  const reinstall = st.runner && st.slotMatchesThisBuild === false && (st.state === "on" || st.state === "paused");
+  const primary = st.state === "off" ? "Opt in this unit" : st.state === "elsewhere" ? "Move and opt in" : st.state === "broken" ? "Reinstall"
+    : reinstall ? "Reinstall this build" : "Update monitor";
+  const showPrimary = st.state !== "on" || st.current === false || reinstall;
+  el.innerHTML = sectionTitle("activity", "Fleet Monitoring") +
+    '<div class="flex items-center gap-2 mb-2">' + badge(w[0], w[1]) + "</div>" +
+    '<p class="text-sm text-pulse-muted mb-3">' + esc(about) + "</p>" +
+    (rows.length ? '<div class="kv-grid mb-2">' + rows.join("") + "</div>" : "") + note +
+    '<div class="settings-actions mt-3">' +
+      (showPrimary ? '<button class="btn-outline btn-ol-green" id="set-fleet-in"' + (canInstall ? "" : " disabled") + ">" + svgIcon("activity", 14) + " " + esc(primary) + "</button>" : "") +
+      (st.unitUrl || st.vitalsUrl ? '<a class="btn-outline btn-ol-blue" href="' + esc(st.unitUrl || st.vitalsUrl) + '" target="_blank" rel="noopener">' + svgIcon("globe", 14) + " View in Vitals</a>" : "") +
+      (enrolled || st.state === "elsewhere" ? '<button class="btn-outline btn-ol-red" id="set-fleet-out"' + (st.admin ? "" : " disabled") + ">Opt out</button>" : "") +
+      '<span id="set-fleet-msg" class="text-sm text-pulse-muted"></span>' +
+    "</div>" +
+    '<ul id="set-fleet-steps" class="text-xs text-pulse-muted mt-2" style="display:none"></ul>';
+
+  const msg = document.getElementById("set-fleet-msg");
+  const steps = document.getElementById("set-fleet-steps");
+  const busy = (on) => el.querySelectorAll("button").forEach((b) => { b.disabled = on || (b.id === "set-fleet-in" ? !canInstall : !st.admin); });
+  const showSteps = (list) => {
+    if (!list || !list.length) { steps.style.display = "none"; return; }
+    steps.innerHTML = list.map((s) => "<li>" + esc(s) + "</li>").join("");
+    steps.style.display = "";
+  };
+  const run = async (path, working, done) => {
+    busy(true);
+    msg.textContent = working;
+    const r = await apiPost(path, {});
+    if (r && r.ok) {
+      const fresh = await api("/api/fleet-monitor");
+      if (fresh && !fresh.error) _renderFleetCard(el, fresh);
+      const m = document.getElementById("set-fleet-msg");
+      if (m) m.textContent = done;
+      const s2 = document.getElementById("set-fleet-steps");
+      if (s2 && r.steps && r.steps.length) { s2.innerHTML = r.steps.map((s) => "<li>" + esc(s) + "</li>").join(""); s2.style.display = ""; }
+    } else {
+      busy(false);
+      msg.textContent = (r && (typeof r.error === "string" ? r.error : r.message)) || "It didn’t work, and Pulse got no reason back.";
+      showSteps(r && r.steps);
+    }
+  };
+  document.getElementById("set-fleet-in")?.addEventListener("click", async () => {
+    const body = reinstall
+      ? "Pulse puts this build (" + (st.thisBuild || "unknown") + ") in the monitor’s slot a, in place of " + (st.version || "the build it runs now") +
+        ", and runs it from there. The monitor keeps its history: its open findings and last reports.\n\n" +
+        "If fleet control in Vitals pins an agent build for this unit, the monitor goes back to that build within a few minutes."
+      : "Pulse copies this build to " + st.root + " and schedules the monitor there, as SYSTEM, every 5 minutes. " +
+        "A launch of another Pulse build doesn’t affect it.\n\nThe first check runs now, so the unit shows in Vitals within a few minutes.";
+    if (!(await confirmAction({ title: primary + "?", body, confirmLabel: primary }))) return;
+    run("/api/fleet-monitor/enroll", "Installing… the first copy takes up to a minute.", "Done. The first check is running now.");
+  });
+  document.getElementById("set-fleet-out")?.addEventListener("click", async () => {
+    if (!(await confirmAction({ title: "Opt this unit out?", tone: "danger",
+      body: "Pulse removes the monitor task and its files from " + st.root + ". The unit stops reporting, and Vitals shows it as silent after about an hour.",
+      confirmLabel: "Opt out" }))) return;
+    run("/api/fleet-monitor/unenroll", "Removing…", "Opted out. This unit no longer reports to Vitals.");
+  });
+}
+
 function renderSettings() {
   const data = cached("settings");
   if (!data) { $page().innerHTML = sectionLoading("Settings"); fetchSection("settings"); return; }
@@ -11589,6 +12299,9 @@ function renderSettings() {
       </div>
       <div id="set-update-notes" class="update-notes" style="display:none"></div>
     </div>
+
+    <!-- Fleet monitoring (dev channel only; filled by _renderFleetCard) -->
+    <div class="card mt-4" id="set-fleet" style="display:none"></div>
 
     <!-- Restart Pulse app -->
     <div class="card mt-4">
@@ -11651,7 +12364,7 @@ function renderSettings() {
   });
 
   upApplyBtn?.addEventListener("click", async () => {
-    if (!confirm(`Download and install ${upLatest}?\n\nPulse will restart and this page will reload automatically.`)) return;
+    if (!(await confirmAction({ title: `Download and install ${upLatest}?`, body: "Pulse will restart and this page will reload automatically.", confirmLabel: "Download and install" }))) return;
     upApplyBtn.disabled = true;
     upCheckBtn.disabled = true;
     upMsg.textContent = "Starting update…";
@@ -11672,6 +12385,9 @@ function renderSettings() {
     }
   });
 
+  // ── Fleet monitoring ──
+  _loadFleetCard();
+
   // ── Restart Pulse app / Reboot VPU ──
   const restartBtn = document.getElementById("set-restart-app");
   const rebootBtn = document.getElementById("set-reboot-vpu");
@@ -11679,7 +12395,7 @@ function renderSettings() {
   const rebootMsg = document.getElementById("set-reboot-msg");
 
   restartBtn?.addEventListener("click", async () => {
-    if (!confirm("Restart the Pulse app?\n\nPulse closes and relaunches the same build. This page reloads once it's back, usually within a few seconds. The VPU and any recording keep running.")) return;
+    if (!(await confirmAction({ title: "Restart the Pulse app?", body: "Pulse closes and relaunches the same build. This page reloads once it's back, usually within a few seconds. The VPU and any recording keep running.", confirmLabel: "Restart Pulse" }))) return;
     restartBtn.disabled = true;
     rebootBtn.disabled = true;
     restartMsg.textContent = "Restarting…";
@@ -11701,7 +12417,7 @@ function renderSettings() {
   });
 
   rebootBtn?.addEventListener("click", async () => {
-    if (!confirm("Reboot the whole VPU?\n\nThis restarts Windows. Any active recording is interrupted, and the unit is offline for a few minutes. Pulse won't come back on its own. Reopen it from the desktop shortcut once Windows is back.")) return;
+    if (!(await confirmAction({ title: "Reboot the whole VPU?", body: "This restarts Windows. Any active recording is interrupted, and the unit is offline for a few minutes. Pulse won't come back on its own. Reopen it from the desktop shortcut once Windows is back.", confirmLabel: "Reboot the VPU", tone: "danger" }))) return;
     restartBtn.disabled = true;
     rebootBtn.disabled = true;
     rebootMsg.textContent = "Sending reboot…";
@@ -11845,6 +12561,7 @@ function renderAbout() {
         <p class="about-tagline">Pixellot Unified Live System Evaluator</p>
         <div class="about-version" id="about-version">${ver ? esc(ver) + " · Web Edition" : "… · Web Edition"}</div>
         <p class="about-desc">A lightweight, self-contained diagnostic tool for Pixellot VPU systems. Collects system identity, hardware, performance metrics, network configuration, camera connectivity, service status, disk health, and event logs.</p>
+        <div id="about-checkin-notice"></div>
         <div class="about-info">
           <div class="kv-grid kv-grid-center">
             ${kvRow("Hostname", id.hostname || "—")}
@@ -11852,6 +12569,7 @@ function renderAbout() {
             ${kvRow("Backend", "Python + FastAPI + Uvicorn")}
             ${kvRow("Frontend", "Vanilla HTML/JS + Tailwind CSS")}
             ${kvRow("Data Collection", "PowerShell + WMI/CIM")}
+            ${kvRowHtml("Fleet Check-in", '<span id="about-checkin">Checking…</span>')}
           </div>
         </div>
         <div class="about-links">
@@ -11871,6 +12589,39 @@ function renderAbout() {
       if (el && d?.version) el.textContent = d.version + " · Web Edition";
     }).catch(() => {});
   }
+  api("/api/checkin-status").then(renderCheckinStatus).catch(() => {
+    const el = document.getElementById("about-checkin");
+    if (el) el.textContent = "Couldn't read check-in status";
+  });
+}
+
+// The launch check-in is for the Pulse team's fleet list, not this VPU's
+// health, so a failure is an informational notice here and nowhere else.
+function renderCheckinStatus(s) {
+  const el = document.getElementById("about-checkin");
+  if (!el || !s) return;
+  const plural = (n) => n + " check-in" + (n === 1 ? "" : "s");
+  const labels = {
+    sent: "Sent " + formatTime(s.lastSentAt),
+    queued: plural(s.queued) + " waiting, retrying next launch",
+    never: "Not sent yet",
+    "not-configured": "Not set up in this build",
+    demo: "Off in demo mode",
+  };
+  el.textContent = labels[s.status] || "—";
+  if (s.status === "queued" && s.lastError) el.title = "Last attempt: " + s.lastError;
+
+  const slot = document.getElementById("about-checkin-notice");
+  if (!slot || !s.notice) return;
+  const reason = s.lastError ? ` (${esc(s.lastError)})` : "";
+  slot.innerHTML = `
+    <div class="dash-info-banner about-notice">
+      <span class="dash-banner-icon">${svgIcon("info", 20)}</span>
+      <div>
+        <div class="font-semibold text-sm">Fleet check-in hasn't gone through</div>
+        <div class="text-xs text-pulse-muted mt-1">Pulse couldn't reach its check-in service${reason}, so the Pulse team's fleet list is missing this VPU's launches since ${esc(formatTime(s.oldestQueued))}. ${esc(plural(s.queued))} saved here will send on a later launch. Nothing on this VPU is affected, and there's nothing to do.</div>
+      </div>
+    </div>`;
 }
 
 // Hidden UBR modal: typing the sequence anywhere on the About tab opens it.

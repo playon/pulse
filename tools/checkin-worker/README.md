@@ -1,0 +1,295 @@
+# Pulse check-in Worker
+
+Where Pulse's launch check-in lands. It replaced the Google Apps Script sheet
+after a lapsed personal subscription silently dropped four days of check-ins.
+
+Two Workers, one D1 database (`pulse-checkins`, id `30ea63a8-dbec-494c-827b-ddb48e6dbaac`),
+on the ian.moore@playonsports.com Cloudflare account:
+
+| Worker | Who calls it | What it does |
+|---|---|---|
+| `pulse-checkin` — https://pulse-checkin.pulse-checkin-worker.workers.dev | VPUs (public) | `POST /checkin` stores check-ins; `GET /health`; daily cron posts to Slack when too few arrived |
+| `pulse-checkin-admin` — https://pulse-checkin-admin.pulse-checkin-worker.workers.dev | People, behind Cloudflare Access | `/` unit table, `/units.csv`, `/checkins.csv?days=30`, and the one write, `POST /agent-target` (Pulse Vitals sets the agent build, below) |
+
+They are separate Workers because Cloudflare Access on a `workers.dev`
+hostname covers the whole hostname, and VPUs have to POST without logging in.
+
+### Sheet relay (older builds only)
+
+Builds before the one that dropped the sheet fallback still do this: when a VPU
+can't reach this Worker (usually a school filter blocking `workers.dev`), Pulse
+posts the check-in to the old Apps Script sheet instead.
+That script (in Ian's Google account, not in this repo) writes its row, then
+forwards the check-in here with the sheet's key removed and the header
+`X-Pulse-Relay: sheet`. Those rows get `source = 'sheet-relay'` and an empty
+`country`, because the request comes from Google, not from the school. The VPU
+keeps the check-in queued and retries later; that copy lands as a duplicate,
+because the checkinId matches. The header is only a label and grants nothing.
+Current builds no longer post to the sheet, so this path dries up as units
+update; the Worker keeps accepting the header until none is left.
+
+## Ingest contract
+
+```json
+POST /checkin
+{
+  "checkins": [
+    { "checkinId": "uuid", "sentAt": "2026-09-23T14:00:00Z",
+      "venueId": "...", "vpuName": "...",
+      "model": "...", "pulseVersion": "...", "channel": "...",
+      "readiness": { "status": "PASS", "policyVersion": "1", "blockers": [], "risks": [] } }
+  ]
+}
+```
+
+The response is `{"ok": true, "results": [{"checkinId": "...", "status": "inserted" | "duplicate" | "invalid"}]}`.
+A client should drop an entry from its queue on any of those three statuses and
+keep it on anything else: a non-200 response, `ok` not true, or a network error.
+Limits are 50 check-ins or 64 KB per request, and 30 requests per minute per IP.
+
+Check-ins from the fleet monitor (`Pulse.Web/app/monitor_once.py`) add optional
+fields, stored by migration `0002_monitor.sql`:
+
+```json
+{ "reason": "periodic" | "state-change",   // "startup" from an interactive launch
+  "osBuild": "17763", "ubr": 253,
+  "delta": { "status": "FAIL", "prevStatus": "PASS",
+             "opened":   [{ "code": "...", "class": "blocker", "title": "...", "since": "..." }],
+             "resolved": [] },
+  "monitor": { "pass": "full" | "partial", "seconds": 41.5, "psRuns": 9, "eventLive": false } }
+```
+
+The `transitions` view gives one row per finding opened or resolved, which is
+what the pilot is measured on. The monitor sends 3 check-ins per request, so a
+replayed queue stays under the 64 KB cap.
+
+Times are stored in UTC. Every view also has an Eastern-time copy of each
+timestamp, named with `_et` (`last_seen_et`, `status_since_et`, and so on),
+reading like `2026-10-14 10:33:34 EDT`. The `checkins_et` view is the raw table
+with `received_at_et` and `sent_at_et` added. The admin page shows Eastern time.
+
+There is no write key. Pulse ships from a public repo, so a key in it was
+readable by anyone and only looked like protection. The protection is the
+per-IP rate limit, the size caps and field-by-field validation, and the ingest
+Worker can't read anything back. Older builds still send a `secret` field; it
+is ignored and never stored. Real per-unit auth comes with the Unity transport.
+
+## Fleet control: switching the monitor off
+
+Every reply to a check-in carries `control`, read from the `monitor_control`
+table (migration 0011). The scheduled monitor obeys it within one tick (5 min)
+of its next post:
+
+- `mode = 'off'`: no checks at all. The unit sends only one identity-only
+  check-in an hour with `reason = 'paused'`, which is how it hears it's back on.
+- `skip`: a JSON list of collector scripts that never start; their part of the
+  report comes back null (unknown).
+
+The `fleet` row applies to every unit. A row whose `scope` is a venue id (or a
+VPU name, for a unit with none) decides that unit's mode, and the skip lists
+add up. If the lookup fails, the reply leaves `control` out and units keep the
+last instruction they had. Interactive Pulse launches ignore it.
+
+```bash
+# stop the monitor on every unit
+npx wrangler d1 execute pulse-checkins --remote --command "UPDATE monitor_control SET mode='off', note='why', updated_at=datetime('now') WHERE scope='fleet'"
+# stop one collector everywhere
+npx wrangler d1 execute pulse-checkins --remote --command "UPDATE monitor_control SET skip='[\"Get-S1Cameras.ps1\"]', updated_at=datetime('now') WHERE scope='fleet'"
+# stop the monitor on one unit (an upsert, so its skip list is kept)
+npx wrangler d1 execute pulse-checkins --remote --command "INSERT INTO monitor_control (scope, mode, note, updated_at) VALUES ('<venue id>', 'off', 'why', datetime('now')) ON CONFLICT (scope) DO UPDATE SET mode=excluded.mode, note=excluded.note, updated_at=excluded.updated_at"
+# back on
+npx wrangler d1 execute pulse-checkins --remote --command "UPDATE monitor_control SET mode='on', skip='[]', updated_at=datetime('now') WHERE scope='fleet'"
+```
+
+## Fleet control: which agent build a unit runs
+
+The reply's `control` also names the fleet agent build a unit should run
+(PV-49), as `agent: { version, sha256 }`. It comes from the `agent_target`
+table (migration 0020): a unit's own row wins (a canary, or a unit held back),
+otherwise the `fleet` row's applies. With no row, `agent` is left out and units
+stay on what they run. A unit row that is malformed gives no target, never the
+fleet's, so a held-back unit isn't moved by a typo.
+
+Pins are kept apart from `monitor_control` on purpose: a unit's row there
+decides its mode, so a pin stored there turned a unit's monitor back on while
+the fleet was off. A pin never creates, changes or removes a `monitor_control`
+row. (`monitor_control.agent_version` / `agent_sha256` from migration 0017 are
+retired: 0020 moves any pin found there into `agent_target` and empties them,
+and nothing reads them.)
+
+The agent builds the download URL itself (`playon/pulse` release
+`agent-v<version>`) and refuses a zip whose SHA-256 differs, so this table can
+only choose among published releases. The columns refuse anything but
+`N.N.N` and 64 lowercase hex characters.
+
+### Setting it: `POST /agent-target` (PV-85)
+
+Pulse Vitals sets and clears the target through the **admin** Worker, never by
+writing the database (Vitals is read-only against `pulse-checkins`). It calls
+over a service binding to `pulse-checkin-admin` and forwards its viewer's
+`Cf-Access-Jwt-Assertion`, so the change is made, and recorded, as that person.
+
+```http
+POST /agent-target
+Content-Type: application/json
+Cf-Access-Jwt-Assertion: <the viewer's Access token>
+
+{ "scope": "fleet", "target": { "version": "0.2.0", "sha256": "<64 hex>" }, "note": "why" }
+{ "scope": "<venue id, else VPU name>", "target": null, "note": "back with the fleet" }
+```
+
+`200` returns `{ ok: true, scope, target, previous, setBy, setAt, note }`.
+Every failure is `{ ok: false, error, message }` and writes nothing:
+
+| Status | `error` | When |
+|---|---|---|
+| 400 | `bad-request` | not exactly `{scope, target, note?}`: unknown fields (a `url` included), a malformed version or hash, a scope with spaces at the ends or control characters |
+| 403 | `forbidden` | no valid Access token for this team, wrong audience, Access not configured |
+| 403 | `not-an-editor` | the token's email isn't in `FLEET_CONTROL_EDITORS` (unset: nobody) |
+| 404 | `unknown-scope` | no unit has checked in with that venue id (or VPU name, for a unit with no venue id) |
+| 405 / 413 / 415 | `method-not-allowed` / `too-large` / `unsupported-media-type` | not POST, a body over 4 KB, not `application/json` |
+| 422 | `release-not-found` | no published (non-draft) `agent-v<version>` with an uploaded `pulse-agent-<version>.zip` |
+| 422 | `hash-mismatch` | the release's SHA-256 isn't the one sent |
+| 422 | `release-has-no-hash` | the release publishes no SHA-256 to check against |
+| 502 | `release-check-failed` | GitHub couldn't be asked (down, rate limited): try again |
+| 500 | `not-configured` | setting a target, and the Worker has no `GITHUB_TOKEN` secret (clearing still works) |
+| 500 | `storage` | the D1 write failed |
+
+Before saving a target the Worker asks GitHub for that release. It compares
+the zip asset's `digest` (GitHub's own SHA-256) and the release's
+`pulse-agent-<version>.zip.sha256` file. Both must match when present, and at
+least one must be. Both URLs are built from the version. Clearing needs no
+check. A good check is remembered for an hour (agent-v* releases are never
+replaced), so pinning 100 units one request at a time asks GitHub once.
+Setting writes the scope's `agent_target` row; clearing deletes it, so a unit
+follows the fleet's pin again and a cleared fleet moves nobody. Clearing a
+scope with no pin is a `200` that writes nothing (`previous: null`,
+`setAt: null`) and logs nothing. Neither touches `monitor_control`.
+
+Each pin records who set it and when (`set_by`, `set_at`, `note`), and every
+change is appended to `agent_target_log` with the target it replaced
+(migration 0020).
+
+### Choosing a build: `GET /agent-releases` (PV-85)
+
+So an editor never finds or pastes a SHA-256, Vitals' target dialog asks the
+admin Worker, over the same service binding and with the viewer's token:
+
+- `GET /agent-releases` returns `{ ok: true, releases: [{ version, publishedAt }] }`:
+  the 10 newest published (non-draft) `agent-v<version>` releases that have an
+  uploaded `pulse-agent-<version>.zip`, as GitHub lists them. Releases for
+  anything else (`web-v*`) are left out.
+- `GET /agent-releases/<version>` returns `{ ok: true, version, sha256 }`, read
+  the same way the check above reads it: GitHub's digest of the zip and the
+  `.sha256` file, which must agree when both exist, and at least one must. No
+  hash, a digest and a file that disagree, or a release GitHub can't be asked
+  about is an error (`release-has-no-hash`, `hash-mismatch`,
+  `release-not-found`, `release-check-failed`), never a guess or an empty list.
+
+Both are read-only and need what `POST /agent-target` needs: a valid Access
+token from the admin or Vitals app, an email in `FLEET_CONTROL_EDITORS`, and
+the `GITHUB_TOKEN` secret. `POST /agent-target` still receives and re-checks
+`{ version, sha256 }`, so what the editor was shown is what gets saved, and a
+release that changed in between is refused with `hash-mismatch`.
+
+**A unit that refused a target** (bad hash, damaged zip, rolled back after
+its new build failed, or five failed downloads) doesn't try it again until its
+target changes. To make it retry, clear the target or set another one, let the
+unit check in, then set the target again. A download that fails for another
+reason (the network, a full disk, a slot in use) is retried on its own after
+about 1 h, 2 h, 4 h and 8 h (each up to half again, at random). The fifth
+failed try gives up, with `agent_update_error` starting "gave up after 5
+failed tries". A unit fetches a new target after a random wait of up to an
+hour, so a fleet pin reaches every unit within about an hour, not at once.
+
+Setup for the endpoint, all on `pulse-checkin-admin`:
+
+- `ACCESS_AUD`: the admin app's AUD tag **and** Pulse Vitals' Access app AUD tag,
+  comma separated. Tokens of any other audience are refused.
+- Secret `FLEET_CONTROL_EDITORS` (`npx wrangler secret put FLEET_CONTROL_EDITORS --env admin`):
+  comma-separated emails that may change the target. A secret, not a variable in
+  `wrangler.toml`, because this repo is public and a deploy overwrites a plain
+  variable of the same name.
+- Secret `GITHUB_TOKEN` (`npx wrangler secret put GITHUB_TOKEN --env admin`;
+  a fine-grained token with read-only access to public repositories is
+  enough). Required to set a target: without it the endpoint answers
+  `500 not-configured`, because Workers share egress IPs and GitHub allows 60
+  anonymous calls an hour per IP.
+- In Vitals' `wrangler.toml`: `[[services]] binding = "CHECKIN_ADMIN"`,
+  `service = "pulse-checkin-admin"`.
+
+Break-glass, by hand (no release check, no log row; prefer the endpoint):
+
+```bash
+# move the fleet to 0.2.0 (sha256 of that release's zip); for one unit first,
+# or one unit held back, use its venue id (else VPU name) as the scope
+npx wrangler d1 execute pulse-checkins --remote --command "INSERT INTO agent_target (scope, version, sha256, note, set_at) VALUES ('fleet', '0.2.0', '<64 hex>', 'why', datetime('now')) ON CONFLICT (scope) DO UPDATE SET version=excluded.version, sha256=excluded.sha256, note=excluded.note, set_by=NULL, set_at=excluded.set_at"
+# stop moving anyone (a rollback is setting the old version back)
+npx wrangler d1 execute pulse-checkins --remote --command "DELETE FROM agent_target WHERE scope='fleet'"
+```
+
+What each unit runs and how its last update went are in `unit_latest`
+(`agent_version`, `agent_update_status`, `agent_update_version`,
+`agent_update_error`). Apply migration 0017 before deploying this Worker: it
+writes those columns. Apply 0020 before deploying either Worker from PV-85
+on: the ingest reads pins from `agent_target` and the admin Worker writes it.
+
+This is the lesson from Canopy Leaf's rollout: its memory leak took four months
+of hand-edited cron jobs to find (#leaf-deploy-coordination). Each monitor
+report also carries `monitor.memoryPeakMb`, stored as `monitor_memory_peak_mb`,
+so a heavier pass shows up in the data before it shows up on a VPU.
+
+## One-time setup
+
+Run everything from this folder.
+
+1. **Log in:** `npx wrangler login`. Use the ian.moore@playonsports.com Cloudflare account.
+2. **Create the database:** `npx wrangler d1 create pulse-checkins`. Paste the
+   `database_id` it prints into **both** `database_id` lines in `wrangler.toml`.
+3. **Apply the schema:** `npm run migrate:remote`
+4. **Set the Slack webhook.** Create an app at api.slack.com/apps, then Incoming
+   Webhooks, then add one to the target channel. Then run
+   `npx wrangler secret put SLACK_WEBHOOK_URL`.
+5. **Deploy:** `npm run deploy`. This deploys both Workers.
+7. **Put Access in front of the admin Worker.** In the dashboard, open Workers &
+   Pages, then `pulse-checkin-admin`, Settings, Domains & Routes, and turn on
+   Cloudflare Access for the workers.dev route. In Zero Trust, open Access,
+   Applications, then that app, and add a policy: *Allow* where *Emails
+   ending in* is `@playonsports.com`. Copy the team domain and the
+   Application Audience (AUD) tag into `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD`
+   under `[env.admin.vars]`, then run `npx wrangler deploy --env admin` again.
+   Until both are set, the admin Worker answers 403 to everyone.
+8. **Add a second admin:** Manage Account, then Members. This keeps the sink
+   from depending on one person.
+
+Don't turn on Access for `pulse-checkin`. That would lock out every VPU.
+
+## Checking it
+
+```bash
+curl -s https://pulse-checkin.pulse-checkin-worker.workers.dev/health
+```
+
+The alert runs daily at 13:00 UTC. `ALERT_WINDOW_HOURS` (default 24) and
+`ALERT_MIN_CHECKINS` (default 1) in `wrangler.toml` tune it. Past runs are
+under the Worker's Cron Triggers tab in the dashboard.
+
+## Local development
+
+```bash
+npm install
+printf 'DEV_ALLOW_UNAUTHENTICATED=true\n' > .dev.vars.admin   # local only, never in the dashboard
+npm run migrate:local
+npm run dev          # ingest on :8787
+npm run dev:admin    # admin on :8788, sharing the same local database
+npm test             # node:test against the real migrations via node:sqlite
+```
+
+To fire the cron by hand, run `npx wrangler dev --local --test-scheduled`, then
+`curl "localhost:8787/__scheduled?cron=0+13+*+*+*"`.
+
+## Backups
+
+D1 Time Travel restores to any point in the last 7 days on the free plan
+(`npx wrangler d1 time-travel restore pulse-checkins --timestamp=...`).
+For a copy you hold yourself, run `npx wrangler d1 export pulse-checkins --remote --output=backup.sql`.

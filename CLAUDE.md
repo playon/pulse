@@ -93,6 +93,7 @@ Code flows `dev` → `main`. Each branch has CI builds; tags create releases on 
 | App | Dev tag | Production tag |
 |-----|---------|----------------|
 | Pulse.Web | `web-dev-v*` | `web-v*` |
+| Fleet agent | (none) | `agent-v*` (`agent-release.yml`; never deleted, never latest) |
 
 Dev tags create pre-releases. Production tags create full releases.
 
@@ -119,6 +120,12 @@ Pulse.Web uses semver (`MAJOR.MINOR.PATCH`) with a two-channel pipeline. Dev sta
 
 **Version source of truth:** `Pulse.Web/VERSION`.
 
+**The fleet agent versions on its own** (PV-49): `Pulse.Web/app/pulse_agent/VERSION`, with its own `pulse_agent/CHANGELOG.md`. The agent is the scheduled monitor, its check-in and its telemetry. Every post it makes carries `agentVersion`. A change to what the agent collects, decides or posts goes in the agent changelog, and that includes engine changes in `main.py` (findings, readiness, collectors).
+
+**How a unit runs and updates the agent** (PV-49): enrolling from Settings installs `C:\PulseFleetMonitor\agent_runner.py` (a copy of `pulse_agent/runner.py`), a shared Python runtime and two slots. The scheduled task runs the runner; the runner runs the active slot's `monitor_once.py` with the root as its data folder, and moves the unit to whatever build fleet control pins (download from the fixed `agent-v*` URL, SHA-256 check, probation, automatic rollback). The runner is the one part an update can't replace or undo, so keep it stdlib only and small, bump its `RUNNER_VERSION` with any change (posts report it as `telemetry.runnerVersion`, so Vitals shows which units need enrolling again), and test any change to it with `tests/test_agent_runner.py`, which runs real ticks from real zips, plus the manual checks in `docs/AGENT_RUNNER_VPU_CHECKLIST.md` on a real VPU.
+
+**Releasing the agent:** bump `pulse_agent/VERSION`, rename the changelog's `[Unreleased]` to that version, merge, then push `agent-v<version>` on that commit. `.github/workflows/agent-release.yml` runs the tests, builds `pulse-agent-<version>.zip` with `tools/agent-release/build_agent_zip.py` (reproducible: rebuild from the tag to check the hash) and publishes it with its SHA-256 and the SQL to pin it. Publishing moves no unit. Units move only when fleet control pins the version and hash. Pulse Vitals sets that pin through the admin Worker's `POST /agent-target`, which checks it against the published release first (`tools/checkin-worker/README.md`). Vitals never writes the table itself. A released version is never replaced: the workflow refuses an existing tag. The runner builds the download URL from the tag pattern and asset name, so don't change either without changing the agent's runner (`pulse_agent/runner.py`, PV-49 slice 4).
+
 #### Promotion workflow
 
 1. **Validate on dev.** The dev launcher tracks the branch tip, so exercise the change on a real VPU from `dev` before promoting. This is the step the beta cycle used to be.
@@ -140,6 +147,7 @@ Pulse.Web uses semver (`MAJOR.MINOR.PATCH`) with a two-channel pipeline. Dev sta
 
 - `.github/workflows/web-build.yml` — Zips `Pulse.Web/`, triggers on web tags
 - `.github/workflows/web-auto-tag.yml` — auto-tags `dev` pushes
+- `.github/workflows/ci-gate.yml` — the one check that always runs on a PR (`CI gate`). The other guards are path-filtered, so they cannot be required directly; `CI gate` waits for whichever started and mirrors their result. Require **only** `CI gate` in the repo ruleset. Never add a path filter to it. If a guard fails and you re-run it, re-run `CI gate` too. Logic and self-test: `tools/ci-gate/ci_gate.py`.
 
 They publish releases directly to `playon/pulse` using the workflow's built-in `GITHUB_TOKEN` — no separate PAT or mirror step required. (The old `wpf-pilot-build.yml` was removed with the WPF deprecation.)
 
@@ -149,6 +157,27 @@ They publish releases directly to `playon/pulse` using the workflow's built-in `
 - `Pulse.Web/scripts/` — PowerShell data-collection + action scripts (WMI/CIM)
 - `Pulse.Web/app/` — FastAPI backend (`main.py`, `powershell.py`) + SPA frontend (`static/`)
 - `Pulse.WPF/` — deprecated gen-2 desktop app, kept for reference only (not built/shipped)
+
+## Check-in contract (Pulse Vitals depends on it)
+
+The fleet dashboard Pulse Vitals (`playon/pulse-vitals`, private) is built on what the files below produce. A change here can break Vitals without failing anything in this repo.
+
+| What | Where |
+|---|---|
+| Check-in envelope and client queue | `Pulse.Web/app/pulse_agent/checkin.py` (`_build_checkin_entry`, `_flush_checkin_queue`) |
+| Telemetry document `pulse.telemetry/v1` | `_build_telemetry` in `Pulse.Web/app/pulse_agent/telemetry.py` |
+| When the monitor posts | `Pulse.Web/app/pulse_agent/monitor.py` (`plan_tick`, `plan_post`) |
+| The findings and readiness verdict the agent reports | `Pulse.Web/app/main.py` (the engine, shared with Diagnostics) |
+| Ingest validation and storage | `tools/checkin-worker/src/ingest.js` |
+| The agent-target write Vitals calls (`POST /agent-target`, PV-85) | `tools/checkin-worker/src/agent-target.js` |
+| Schema and the views Vitals reads | `tools/checkin-worker/migrations/` |
+
+When you change any of them:
+
+1. **Update the contract in the same piece of work.** The contract is `docs/contract.md` in `playon/pulse-vitals`. Open that PR alongside this one and link the two.
+2. **Additive only within v1.** Only new optional fields. Put a new field inside `telemetry`, because the Worker doesn't store unknown envelope fields. A rename, a removal or a change of meaning needs `pulse.telemetry/v2`.
+3. **Migrations keep the views' existing columns.** Vitals reads `units`, `unit_status` and `transitions`. It also keeps a copy of the migrations, and its CI fails daily until that copy is synced (`npm run sync-schema` in pulse-vitals).
+4. **Track it in Jira project PV** (Pulse - Vitals), linked to the PULSEDEV ticket if there is one.
 
 ## MCP Tools
 
