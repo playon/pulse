@@ -1,0 +1,209 @@
+# _GpuDriverCommon.ps1 - dot-sourced by Get-GpuDriverState.ps1 and
+# Repair-GpuDriver.ps1. Not a collector: it prints nothing on its own.
+#
+# ASCII ONLY (Windows PowerShell 5.1 reads a BOM-less .ps1 as CP-1252).
+#
+# Why this is not Win32_VideoController: a card with no driver is either absent
+# from that class or shows up as "Microsoft Basic Display Adapter" with a
+# Microsoft vendor, so it cannot tell "no card" from "card, no driver". The PnP
+# tree can: every NVIDIA (PCI vendor 10DE) display-class device is listed there
+# whether or not a driver is bound, with Device Manager's own error code.
+
+function Test-IsAdmin {
+    try {
+        $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $pr = New-Object Security.Principal.WindowsPrincipal($id)
+        return [bool]$pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch {
+        return $false
+    }
+}
+
+function Get-ProblemText([int]$code) {
+    switch ($code) {
+        0  { return $null }
+        10 { return 'The device could not start.' }
+        12 { return 'The device cannot find enough free resources to use.' }
+        14 { return 'The device needs a restart before it will work.' }
+        22 { return 'The device is disabled in Device Manager.' }
+        28 { return 'No driver is installed for the device.' }
+        31 { return 'Windows could not load the driver, so the device is not working properly.' }
+        39 { return 'Windows could not load the driver (it may be missing or corrupt).' }
+        43 { return 'Windows stopped the device because it reported problems.' }
+        52 { return 'Windows cannot verify the digital signature of the driver.' }
+        default { return "Device Manager error code $code." }
+    }
+}
+
+# Returns a [pscustomobject]:
+#   state   ok | no-driver | driver-error | disabled | reboot-needed | not-detected
+#   reason  one plain sentence for the state
+#   devices one row per NVIDIA display device the PnP tree lists
+# Throws if the PnP query or the driver lookup fails, or if the PnP tree comes
+# back with no devices at all: the caller reports that as "could not check",
+# never as "no card" or "healthy".
+function Get-GpuDriverState {
+    $all = @(Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop)
+    if ($all.Count -eq 0) { throw 'Windows returned an empty device list, so the graphics card could not be checked.' }
+    $pnp = @($all | Where-Object { $_.PNPDeviceID -like 'PCI\VEN_10DE&*' })
+
+    $rows = New-Object System.Collections.ArrayList
+    foreach ($d in $pnp) {
+        # Display class is 03xx; a device with no driver has no PNPClass yet,
+        # so read the class code from its hardware IDs.
+        $hwIds = @($d.HardwareID)
+        $isDisplay = ($d.PNPClass -eq 'Display') -or (@($hwIds | Where-Object { $_ -match 'CC_03' }).Count -gt 0)
+        if (-not $isDisplay) { continue }
+
+        $code = 0
+        if ($null -ne $d.ConfigManagerErrorCode) { $code = [int]$d.ConfigManagerErrorCode }
+
+        $provider = $null
+        $version  = $null
+        $escaped = $d.PNPDeviceID.Replace('\', '\\')
+        $drv = Get-CimInstance -ClassName Win32_PnPSignedDriver -Filter "DeviceID='$escaped'" -ErrorAction Stop |
+            Select-Object -First 1
+        if ($drv) {
+            $provider = $drv.DriverProviderName
+            $version  = $drv.DriverVersion
+        }
+
+        # Healthy only if no Device Manager error AND NVIDIA's own driver is
+        # bound. Windows quietly binds its Basic Display driver to a card with
+        # no NVIDIA driver; that reports error code 0 but is not a working card.
+        $nvidiaDriver = ($provider -match 'NVIDIA') -or ((-not $provider) -and ($d.Name -match 'NVIDIA'))
+        $state = 'ok'
+        if     ($code -eq 14) { $state = 'reboot-needed' }
+        elseif ($code -eq 22) { $state = 'disabled' }
+        elseif ($code -eq 28) { $state = 'no-driver' }
+        elseif ($code -ne 0)  { $state = 'driver-error' }
+        elseif (-not $nvidiaDriver) { $state = 'no-driver' }
+
+        [void]$rows.Add([pscustomobject]@{
+            name           = [string]$d.Name
+            deviceId       = [string]$d.PNPDeviceID
+            state          = $state
+            errorCode      = $code
+            problem        = (Get-ProblemText $code)
+            driverProvider = $provider
+            driverVersion  = $version
+        })
+    }
+
+    $devices = $rows.ToArray()
+    if ($devices.Count -eq 0) {
+        return [pscustomobject]@{
+            state   = 'not-detected'
+            reason  = 'Windows does not list any NVIDIA graphics card on the PCI bus.'
+            devices = $devices
+        }
+    }
+
+    # Worst device wins; the order only decides which sentence the tech reads.
+    $state = 'ok'
+    foreach ($candidate in @('driver-error', 'no-driver', 'disabled', 'reboot-needed')) {
+        if (@($devices | Where-Object { $_.state -eq $candidate }).Count -gt 0) { $state = $candidate; break }
+    }
+    $worst = @($devices | Where-Object { $_.state -eq $state })[0]
+    $reason = switch ($state) {
+        'ok'            { 'The NVIDIA graphics card has its NVIDIA driver and Windows reports no error.' }
+        'no-driver'     { "Windows sees the NVIDIA card ($($worst.name)) but it has no NVIDIA graphics driver." }
+        'driver-error'  { "The NVIDIA card ($($worst.name)) shows an error in Device Manager: $($worst.problem) (code $($worst.errorCode))." }
+        'disabled'      { "The NVIDIA card ($($worst.name)) is turned off in Device Manager." }
+        'reboot-needed' { "The NVIDIA card ($($worst.name)) is waiting for a restart before it will work." }
+    }
+    return [pscustomobject]@{ state = $state; reason = $reason; devices = $devices }
+}
+
+# "Scan for hardware changes", the Device Manager button, as a direct call to
+# the Configuration Manager API. Used instead of `pnputil /scan-devices`,
+# whose newer switches may be missing on the Win10 1809 fleet image (not
+# verified either way). The C# is
+# C#5-compatible (Add-Type on 5.1 compiles with the old CodeDom compiler).
+# Returns the CONFIGRET code so a failed rescan is reported as failed.
+function Invoke-HardwareRescan {
+    if (-not ('Pulse.PnpRescan' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace Pulse {
+    public static class PnpRescan {
+        [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+        static extern int CM_Locate_DevNodeW(out uint devInst, IntPtr deviceId, uint flags);
+        [DllImport("cfgmgr32.dll")]
+        static extern int CM_Reenumerate_DevNode(uint devInst, uint flags);
+        // CR_SUCCESS is 0. A null device ID locates the root of the device tree;
+        // flag 1 is CM_REENUMERATE_SYNCHRONOUS.
+        public static int Run() {
+            uint root;
+            int cr = CM_Locate_DevNodeW(out root, IntPtr.Zero, 0);
+            if (cr != 0) { return cr; }
+            return CM_Reenumerate_DevNode(root, 1);
+        }
+    }
+}
+'@
+    }
+    $cr = [Pulse.PnpRescan]::Run()
+    return [pscustomobject]@{ ok = ($cr -eq 0); code = $cr }
+}
+
+# Pixellot's approved driver per card, keyed by NVIDIA PCI ID as Windows reports
+# it with no driver installed. Only cards in this table get an install: any
+# other card FAILS CLOSED (Repair-GpuDriver.ps1 refuses) rather than guessing.
+#
+# An entry matches 'DEV_xxxx' (any subsystem) or 'DEV_xxxx&SUBSYS_yyyyyyyy'.
+# A row needs TWO things: Pixellot's approval of that driver for that card
+# (from the fleet owner), and the package's own INF listing the card. An INF
+# match alone proves the driver CAN install, not that Pixellot wants it there;
+# and an installer run with -s does nothing, silently, if the package has no
+# section for the card. Checked against the INF files on 2026-10-27:
+#   536.67 (nsd): DEV_1F82, DEV_1F0A, DEV_2188 with no subsystem, so any
+#                 GTX 1650 of those IDs matches. It also lists
+#                 DEV_1FB0&SUBSYS_12DB103C (nvwusig.inf).
+#   576.28:       has NO DEV_1FB0&SUBSYS_12DB103C and no generic DEV_1FB0
+#                 (only subsystems 12DB1028, 12DB10DE, 148510DE). A real
+#                 install of it on an HP T1000 (1FB0/12DB103C) changed nothing.
+#
+# T1000: only the HP subsystem below is listed. Evidence, 2026-10-27: a VPU
+# that is working today has an "NVIDIA T1000" bound to driver 31.0.15.3667
+# (536.67), hardware ID PCI\VEN_10DE&DEV_1FB0&SUBSYS_12DB103C&REV_A1, the
+# same ID as a unit where the 576.28 installer did nothing. So that exact
+# subsystem is 536.67. The fleet owner has also seen T1000s on 576.28 and is
+# unsure which version is "right", so this row claims no more than "works on
+# that hardware": every OTHER T1000 subsystem is refused (fail closed) until a
+# working unit's bound INF/version, or an explicit approval, says otherwise.
+#
+# GTX 1650 -> 536.67 is the fleet owner's mapping. The three 1650 IDs are from
+# the public PCI ID database, not seen in the fleet. 1650 SUPER (2187), mobile
+# parts and the T1000 8GB (1FF0) are deliberately not listed.
+$script:DriverBaseUrl = 'https://software.pixellot.tv/apps/Drivers/'
+$script:ApprovedDrivers = @(
+    [pscustomobject]@{ ids = @('DEV_1F82', 'DEV_1F0A', 'DEV_2188'); card = 'GeForce GTX 1650'; version = '536.67'
+                       file = '536.67-desktop-win10-win11-64bit-international-nsd-dch-whql.exe' },
+    [pscustomobject]@{ ids = @('DEV_1FB0&SUBSYS_12DB103C'); card = 'T1000 (HP, subsystem 12DB103C)'; version = '536.67'
+                       file = '536.67-desktop-win10-win11-64bit-international-nsd-dch-whql.exe' }
+)
+
+# Returns $null if the ID has no NVIDIA DEV_xxxx; otherwise an object with
+# known = $false when the card is not in the table. pciId is 'xxxx' or
+# 'xxxx/yyyyyyyy' (device/subsystem) for messages.
+function Get-ApprovedDriver([string]$deviceId) {
+    if ($deviceId -notmatch 'VEN_10DE&DEV_([0-9A-Fa-f]{4})(?:&SUBSYS_([0-9A-Fa-f]{8}))?') { return $null }
+    $dev = $Matches[1].ToUpper()
+    $sub = $null
+    if ($Matches[2]) { $sub = $Matches[2].ToUpper() }
+    $keys = @("DEV_$dev")
+    if ($sub) { $keys += "DEV_$dev&SUBSYS_$sub" }
+    $label = $dev
+    if ($sub) { $label = "$dev/$sub" }
+    foreach ($e in $script:ApprovedDrivers) {
+        foreach ($k in $keys) {
+            if ($e.ids -contains $k) {
+                return [pscustomobject]@{ known = $true; pciId = $label; card = $e.card; version = $e.version
+                                          file = $e.file; url = ($script:DriverBaseUrl + $e.file) }
+            }
+        }
+    }
+    return [pscustomobject]@{ known = $false; pciId = $label; card = $null; version = $null; file = $null; url = $null }
+}

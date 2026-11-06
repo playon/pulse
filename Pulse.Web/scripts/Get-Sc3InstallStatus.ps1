@@ -18,7 +18,7 @@
       idle           - no install has been started
 
     The 'stale' flag is true when the status file hasn't been updated in
-    >30s - useful for detecting hung installs.
+    >30s (>90s while downloading) - useful for detecting hung installs.
 #>
 [CmdletBinding()]
 param()
@@ -53,7 +53,11 @@ try {
                 [Globalization.DateTimeStyles]::RoundtripKind)
             $ageSec = ((Get-Date) - $updated).TotalSeconds
             $terminal = $status.stage -in @('complete', 'failed', 'idle')
-            if (-not $terminal -and $ageSec -gt 30) { $stale = $true }
+            # The download is one blocking call with a 60s cap and cannot
+            # heartbeat, so give it room before calling it a stall.
+            $limitSec = 30
+            if ($status.stage -eq 'downloading') { $limitSec = 90 }
+            if (-not $terminal -and $ageSec -gt $limitSec) { $stale = $true }
         } catch {}
     }
 

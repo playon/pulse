@@ -272,6 +272,10 @@ try {
     `$ok = `$false
     `$verifyStart = Get-Date
     while (((Get-Date) - `$verifyStart).TotalSeconds -lt 60) {
+        # Heartbeat every pass: SC III can take most of this minute to start,
+        # and a status file left untouched for 30s reads as a stalled install.
+        `$waited = [int]((Get-Date) - `$verifyStart).TotalSeconds
+        Write-Status -Stage 'verifying' -Percent 85 -Message "Waiting for ScoreConnect III to start (`$waited s)."
         try {
             `$r = Invoke-WebRequest -Uri 'http://127.0.0.1:5000/api/configuration/get-status' -UseBasicParsing -TimeoutSec 3
             if (`$r.StatusCode -eq 200) { `$ok = `$true; break }

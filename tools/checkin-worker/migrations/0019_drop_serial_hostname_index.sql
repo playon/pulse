@@ -1,0 +1,11 @@
+-- PV-28: idx_checkins_unit (serial_number, hostname) keys a unit the way it
+-- was keyed before 2026-10-13, when Pulse still sent both. Nothing reads by
+-- it now (the views and Vitals key on COALESCE(venue_id, vpu_name, hostname,
+-- serial_number)), and it costs a write on every check-in. Dropped.
+--
+-- Not added: the ticket suggested (venue_id, sent_at) and (received_at).
+-- checkins_unit (0015, on the unit-key expression plus received_at) already
+-- serves every per-unit read, and a plain (venue_id, sent_at) index would not
+-- be chosen: those queries filter on the COALESCE expression, not the column.
+-- idx_checkins_received (0001) already serves retention and the admin export.
+DROP INDEX IF EXISTS idx_checkins_unit;
