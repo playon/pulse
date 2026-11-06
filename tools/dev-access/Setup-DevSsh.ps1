@@ -4,7 +4,7 @@
 
   What it does:
     1. Installs Tailscale (winget, or tells you where to get the MSI)
-    2. Installs Windows OpenSSH Server
+    2. Installs OpenSSH Server (Win32-OpenSSH MSI; Windows capability as fallback)
     3. Installs your public key (admin accounts use administrators_authorized_keys)
     4. Hardens sshd_config: pubkey-only, no passwords, single allowed user
     5. Sets PowerShell as the SSH default shell
@@ -49,15 +49,42 @@ if (-not (Get-Command tailscale -ErrorAction SilentlyContinue)) {
 }
 
 # --- 2. OpenSSH Server ----------------------------------------------------
-$cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
-if ($cap.State -ne 'Installed') {
-    Write-Host '[2/6] Installing OpenSSH Server...'
-    Add-WindowsCapability -Online -Name $cap.Name | Out-Null
-} else {
+# Primary path is Microsoft's Win32-OpenSSH MSI from GitHub, hash-pinned.
+# The Windows capability (Add-WindowsCapability) downloads through Windows
+# Update, which the fleet image's GPO breaks: it fails with 0x80072ee6, or
+# crawls for many minutes. It stays as a fallback for when GitHub is blocked.
+$msiUrl    = 'https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.0.0.0p2-Preview/OpenSSH-Win64-v10.0.0.0.msi'
+$msiSha256 = 'DDEC9C53864280759CF9F74791CEFD387100E3946AA849A1C138A4ED1B96B7D9'
+
+if (Get-Service sshd -ErrorAction SilentlyContinue) {
     Write-Host '[2/6] OpenSSH Server already installed.'
+} else {
+    Write-Host '[2/6] Installing OpenSSH Server (Win32-OpenSSH MSI)...'
+    $msi = Join-Path $env:TEMP 'OpenSSH-Win64.msi'
+    $msiOk = $false
+    try {
+        # PS 5.1 / .NET Framework defaults to TLS 1.0; GitHub needs 1.2.
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $ProgressPreference = 'SilentlyContinue'   # the 5.1 progress bar slows downloads badly
+        Invoke-WebRequest -Uri $msiUrl -OutFile $msi -UseBasicParsing
+        $hash = (Get-FileHash -Path $msi -Algorithm SHA256).Hash
+        if ($hash -ne $msiSha256) { throw "MSI hash mismatch: got $hash" }
+        $p = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn ADDLOCAL=Server" -Wait -PassThru
+        if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "msiexec exited $($p.ExitCode)" }
+        $msiOk = $true
+    } catch {
+        Write-Warning "MSI install failed ($($_.Exception.Message)). Falling back to the Windows capability..."
+    }
+    if (-not $msiOk) {
+        $cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
+        $null = Add-WindowsCapability -Online -Name $cap.Name
+    }
 }
 Set-Service sshd -StartupType Automatic
 Start-Service sshd -ErrorAction SilentlyContinue   # first start generates default config/host keys
+
+# The MSI installs under Program Files, the capability under System32.
+$sshdExe = ((Get-CimInstance Win32_Service -Filter "Name='sshd'").PathName).Trim('"')
 
 # --- 3. Authorized key ----------------------------------------------------
 # Members of the Administrators group authenticate against this shared file,
@@ -85,7 +112,7 @@ $header = $directives.GetEnumerator() | ForEach-Object { "$($_.Key) $($_.Value)"
 Set-Content -Path $confFile -Value (@($header) + @('') + @($conf)) -Encoding ascii
 
 # Validate before restarting so a bad config can't lock us out of the service.
-& "$env:SystemRoot\System32\OpenSSH\sshd.exe" -t
+& $sshdExe -t
 if ($LASTEXITCODE -ne 0) { throw 'sshd_config failed validation; not restarting sshd.' }
 
 # --- 5. Default shell = PowerShell -----------------------------------------
@@ -96,8 +123,13 @@ Set-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name 'DefaultShell' `
 
 # --- 6. Firewall: tailnet only ---------------------------------------------
 Write-Host '[6/6] Scoping firewall to the tailnet (removing any-address rules)...'
-Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-Get-NetFirewallRule -DisplayName 'Pulse dev SSH (tailnet only)' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+# Remove every inbound allow on TCP 22, whatever named it (the capability
+# and the MSI each add their own any-address rule), then add ours.
+Get-NetFirewallPortFilter -Protocol TCP -ErrorAction SilentlyContinue |
+    Where-Object { $_.LocalPort -eq '22' } |
+    Get-NetFirewallRule -ErrorAction SilentlyContinue |
+    Where-Object { $_.Direction -eq 'Inbound' -and $_.Action -eq 'Allow' } |
+    Remove-NetFirewallRule
 New-NetFirewallRule -DisplayName 'Pulse dev SSH (tailnet only)' -Direction Inbound `
     -Protocol TCP -LocalPort 22 -RemoteAddress '100.64.0.0/10' -Action Allow | Out-Null
 

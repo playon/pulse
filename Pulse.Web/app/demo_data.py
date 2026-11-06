@@ -399,6 +399,152 @@ def _demo_scoreconnect():
 # through _CAMERA_MODELS, so role / expected-speed resolution — and the
 # Port 2 "degraded" finding (gigabit main camera negotiated to 100 Mbps) —
 # stay intact.
+# Graphics driver state. Healthy by default. PULSE_DEMO_GPU plays a card that
+# needs a fix: no-driver | driver-error | disabled | not-detected, all on a
+# GTX 1650 (a card Pulse has an approved driver for), or unknown-card, a
+# no-driver T1000 with the Dell subsystem 12DB1028, which is NOT on the list.
+# (The HP T1000, 12DB103C, is approved, so it must not be used here.) A demo "repair" of the first
+# three flips the state to ok (module state, like the SC III install demo),
+# so the card can be clicked through end to end.
+_gpu_demo_fixed = {"done": False}
+_GPU_DEMO_INSTALLER = "536.67-desktop-win10-win11-64bit-international-nsd-dch-whql.exe"
+
+
+def _demo_gpu_driver_state():
+    import os
+    want = os.environ.get("PULSE_DEMO_GPU", "").strip().lower()
+    scenario = want if want in ("no-driver", "driver-error", "disabled", "not-detected", "unknown-card") else "ok"
+    state = "no-driver" if scenario == "unknown-card" else scenario
+    if _gpu_demo_fixed["done"] and state in ("no-driver", "driver-error", "disabled") and scenario != "unknown-card":
+        state = "ok"
+    if scenario == "unknown-card":
+        name, dev_id, pci_id = "Microsoft Basic Display Adapter", "PCI\\VEN_10DE&DEV_1FB0&SUBSYS_12DB1028&REV_A1\\4&E951959&0&0008", "1FB0/12DB1028"
+        approved, approved_card = None, None
+    else:
+        name, dev_id, pci_id = "NVIDIA GeForce GTX 1650", "PCI\\VEN_10DE&DEV_1F82&SUBSYS_A548174B&REV_A1\\4&1234&0&0008", "1F82/A548174B"
+        approved, approved_card = "536.67", "GeForce GTX 1650"
+    row = {"name": name, "deviceId": dev_id, "state": state, "errorCode": 0, "problem": None,
+           "driverProvider": "NVIDIA", "driverVersion": "31.0.15.3667"}
+    reasons = {
+        "ok": "The NVIDIA graphics card has its NVIDIA driver and Windows reports no error.",
+        "no-driver": f"Windows sees the NVIDIA card ({name}) but it has no NVIDIA graphics driver.",
+        "driver-error": f"The NVIDIA card ({name}) shows an error in Device Manager: "
+                        "Windows stopped the device because it reported problems. (code 43).",
+        "disabled": f"The NVIDIA card ({name}) is turned off in Device Manager.",
+        "not-detected": "Windows does not list any NVIDIA graphics card on the PCI bus.",
+    }
+    if state == "no-driver":
+        row.update(errorCode=28, problem="No driver is installed for the device.",
+                   driverProvider=None, driverVersion=None)
+    elif state == "driver-error":
+        row.update(errorCode=43, problem="Windows stopped the device because it reported problems.")
+    elif state == "disabled":
+        row.update(errorCode=22, problem="The device is disabled in Device Manager.")
+    devices = [] if state == "not-detected" else [row]
+    gone = state == "not-detected"
+    return {"state": state, "reason": reasons[state], "devices": devices, "isAdmin": True,
+            "pciId": None if gone else pci_id,
+            "approvedDriver": None if gone else approved,
+            "approvedCard": None if gone else approved_card,
+            "osBuild": 17763, "checkedAt": datetime.now().isoformat()}
+
+
+def _demo_gpu_driver_repair(reinstall=False):
+    before = _demo_gpu_driver_state()
+    steps = [{"step": "check card", "ok": True, "detail": before["reason"]}]
+    if before["state"] == "disabled" and not reinstall:
+        _gpu_demo_fixed["done"] = True
+        steps += [{"step": "turn the card on", "ok": True, "detail": "NVIDIA GeForce GTX 1650"},
+                  {"step": "check card again", "ok": True, "detail": _demo_gpu_driver_state()["reason"]}]
+        return {"status": "enabled", "stateBefore": "disabled", "stateAfter": "ok", "exitCode": None,
+                "message": "The graphics card was turned off and is now on, with its driver. Nothing was "
+                           "downloaded. Restart the VPU before the next event.",
+                "installer": None, "steps": steps, "durationSec": 6}
+    if before["state"] == "ok" and not reinstall:
+        return {"status": "not-needed", "stateBefore": "ok", "stateAfter": "ok", "exitCode": None,
+                "message": "The graphics card already has its driver and shows no error, so nothing was changed.",
+                "installer": None, "steps": steps, "durationSec": 0}
+    if before["state"] == "ok":
+        steps += [{"step": "reinstall requested", "ok": True,
+                   "detail": "the card works; reinstalling the approved driver because the technician asked"},
+                  {"step": "choose driver", "ok": True, "detail": "GeForce GTX 1650: driver 536.67 (PCI ID 10DE:1F82/A548174B)"},
+                  {"step": "download driver", "ok": True, "detail": "645 MB"},
+                  {"step": "verify signature", "ok": True, "detail": "CN=NVIDIA Corporation, O=NVIDIA Corporation"},
+                  {"step": "run installer", "ok": True, "detail": "exit code 0"},
+                  {"step": "check card after install", "ok": True, "detail": _demo_gpu_driver_state()["reason"]}]
+        return {"status": "installed", "stateBefore": "ok", "stateAfter": "ok", "exitCode": 0,
+                "message": "The NVIDIA driver is installed and the card shows no error. Restart the VPU "
+                           "before the next event so Pixellot starts cleanly with it.",
+                "installer": _GPU_DEMO_INSTALLER, "steps": steps, "durationSec": 405}
+    if before["state"] == "not-detected":
+        steps += [{"step": "rescan for hardware", "ok": True, "detail": "Windows hardware rescan returned code 0 (0 = success)"},
+                  {"step": "check card again", "ok": True, "detail": before["reason"]}]
+        return {"status": "not-detected", "stateBefore": "not-detected", "stateAfter": "not-detected",
+                "exitCode": None,
+                "message": "Windows still does not see an NVIDIA graphics card, so a driver cannot fix this. "
+                           "Nothing was downloaded. Check that the card is seated and its power cable is "
+                           "connected, then check the BIOS shows it. If it is, the card or its slot may be faulty.",
+                "installer": None, "steps": steps, "durationSec": 9}
+    if before["approvedDriver"] is None:
+        idText = "PCI ID 10DE:" + before["pciId"]
+        steps += [{"step": "choose driver", "ok": False, "detail": f"no approved driver for this card ({idText})"}]
+        return {"status": "unknown-card", "stateBefore": before["state"], "stateAfter": before["state"],
+                "exitCode": None,
+                "message": f"Pulse has no approved driver for this graphics card ({idText}), so it installed "
+                           "nothing. Install the driver Pixellot support approves for this card by hand, and "
+                           "ask Pixellot to add this card to Pulse.",
+                "installer": None, "steps": steps, "durationSec": 1}
+    if before["state"] == "disabled":
+        # Reinstall requested on a turned-off card: the script turns it on first.
+        steps += [{"step": "turn the card on", "ok": True, "detail": "NVIDIA GeForce GTX 1650"},
+                  {"step": "check card again", "ok": True, "detail": "NVIDIA driver installed; Windows reports no error."}]
+    _gpu_demo_fixed["done"] = True
+    steps += [{"step": "choose driver", "ok": True, "detail": "GeForce GTX 1650: driver 536.67 (PCI ID 10DE:1F82/A548174B)"},
+              {"step": "check disk space", "ok": True, "detail": "212.4 GB free on C:\\"},
+              {"step": "download driver", "ok": True, "detail": "645 MB"},
+              {"step": "verify signature", "ok": True, "detail": "CN=NVIDIA Corporation, O=NVIDIA Corporation"},
+              {"step": "run installer", "ok": True, "detail": "exit code 0"},
+              {"step": "check card after install", "ok": True, "detail": _demo_gpu_driver_state()["reason"]}]
+    return {"status": "installed", "stateBefore": before["state"], "stateAfter": "ok", "exitCode": 0,
+            "message": "The NVIDIA driver is installed and the card shows no error. Restart the VPU "
+                       "before the next event so Pixellot starts cleanly with it.",
+            "installer": _GPU_DEMO_INSTALLER, "steps": steps, "durationSec": 412}
+
+
+def _demo_binaries():
+    import os
+
+    def ts(dt):  # the collector's yyyy-MM-ddTHH:mm:ss+hh:mm
+        z = dt.astimezone().strftime("%z")
+        return dt.strftime("%Y-%m-%dT%H:%M:%S") + z[:3] + ":" + z[3:]
+    now = datetime.now()
+    out = {
+        "now": ts(now),
+        "exes": [
+            {"name": "VPU.exe", "present": True, "readable": True, "scanned": 53, "missing": []},
+            {"name": "Agent.exe", "present": True, "readable": True, "scanned": 1, "missing": []},
+            {"name": "Coordinator.exe", "present": True, "readable": True, "scanned": 1, "missing": []},
+        ],
+        "truncated": False, "popupsRead": True, "popupDays": 7, "popups": [],
+        "vpuProcesses": [], "binHasLibcef": True,
+        "cefPackages": ["cef-127.3.5", "cef-78.3.9"],
+    }
+    if os.environ.get("PULSE_DEMO_BINARIES", "").strip().lower() == "libcef":
+        out["exes"][0]["missing"] = [{"dll": "libcef.dll", "neededBy": "VPU.exe"}]
+        out["exes"][0]["scanned"] = 51
+        out["popups"] = [{
+            "exe": "VPU.exe", "title": "System Error", "dll": "libcef.dll", "count": 66,
+            "text": "The code execution cannot proceed because libcef.dll was not found. "
+                    "Reinstalling the program may fix this problem.",
+            "first": ts(now - timedelta(days=6, hours=18)), "last": ts(now - timedelta(minutes=4)),
+        }]
+        out["vpuProcesses"] = [{"pid": 11744, "created": ts(now - timedelta(minutes=4)),
+                                "workingSetMB": 2.8, "stuckOnLoaderError": True}]
+        out["binHasLibcef"] = False
+        out["cefPackages"] = ["cef-78.3.9"]
+    return out
+
+
 def _demo_cam(ip, mac, serial, *, ocr=False, gateway=None):
     if ocr:
         return {
@@ -600,7 +746,7 @@ def _demo_poe_power():
         "supported": True,
         "available": True,
         "nicModel": "I210",
-        "cardLabel": "ADLINK GIE74P (Intel I210 x4)",
+        "cardLabel": "ADLINK GIE74-series (Intel I210 x4)",
         "reason": "",
         "dllPath": r"C:\Program Files\ADLINK\GIE Series\Library\Dll\x64\SmartPoE.dll",
         "budget": {
@@ -722,7 +868,9 @@ def _demo_stream_log():
 DEMO = {
     "Get-SystemIdentity.ps1": lambda **kw: {
         "computerSystem": {"name": _VENUE["hostname"], "manufacturer": "HP", "model": "HP Z2 Tower G9 Workstation Desktop PC"},
-        "bios": {"serialNumber": _VENUE["serial"]},
+        # releaseDate as the collector prints it: local time (UTC midnight, ET).
+        "bios": {"serialNumber": _VENUE["serial"], "smbiosVersion": "U50 Ver. 01.02.03",
+                 "releaseDate": "2023-04-11T20:00:00.0000000-04:00"},
         "uptime": {"formatted": _fmt_uptime(_uptime_secs()), "totalSeconds": _uptime_secs()},
         # LTSC 2019 (1809, build 17763) — EOS Jan 2029, well clear of the EOL
         # warning window so the demo dashboard stays clean. (Older LTSC build
@@ -828,11 +976,11 @@ DEMO = {
             # compat check passes — Ampere has no version cap. (Was GTX 1070
             # = Pascal, capped at 5.2.x, which conflicted with the 5.13.x
             # swVersion the demo venues use and produced a CRITICAL finding.)
-            {"name": "NVIDIA GeForce RTX 3060", "adapterRAMMB": 12288, "driverVersion": "31.0.15.5212",
+            {"name": "NVIDIA GeForce RTX 3060", "adapterRAMMB": 12288, "vramMB": 12288, "driverVersion": "31.0.15.5212",
              "adapterCompatibility": "NVIDIA", "vendor": "NVIDIA", "isDedicated": True},
         ],
         "diskDrives": [
-            {"model": "Samsung SSD 870 EVO 500GB", "sizeGB": 500, "interfaceType": "SATA", "serialNumber": "S3Z8NB0K901234A"}
+            {"index": 0, "model": "Samsung SSD 870 EVO 500GB", "sizeGB": 500, "interfaceType": "SATA", "mediaType": "SSD", "serialNumber": "S3Z8NB0K901234A"}
         ],
     },
     "Get-UsersAndDomains.ps1": lambda **kw: {
@@ -880,6 +1028,32 @@ DEMO = {
             # default demo so the dashboard stays narrative-clean.
         ],
     },
+    # Healthy: today's daily test ran and closed cleanly, and VPU.exe has been
+    # up since. To DEMO the crash loop (Tecumseh MI, 2026-09-28, driver
+    # 446.14), add 4+ sessions a minute or two apart, each with firstFrame
+    # True, goodbye False, ended True and fatal set to a line containing
+    # "cudaErrorInvalidPtx".
+    "Get-VpuRestarts.ps1": lambda **kw: {
+        "logsFound": True,
+        "logDir": "C:\\Pixellot\\Data\\Log",
+        "filesScanned": 1,
+        "windowMinutes": 120,
+        "vpuRunning": True,
+        "vpuStartedMinutesAgo": 47.2,
+        "sessionsInWindow": 2,
+        "sessions": [
+            {"start": (datetime.now() - timedelta(minutes=95)).strftime("%Y-%m-%dT%H:%M:%S"),
+             "startedMinutesAgo": 95.0, "version": "5.37.2", "driver": "552.12",
+             "firstFrame": True, "goodbye": True, "ended": True, "fatal": None,
+             "fatalCount": 0, "closeReason": "Watchdog - As not in event, close App", "tags": []},
+            {"start": (datetime.now() - timedelta(minutes=47)).strftime("%Y-%m-%dT%H:%M:%S"),
+             "startedMinutesAgo": 47.2, "version": "5.37.2", "driver": "552.12",
+             "firstFrame": True, "goodbye": False, "ended": False, "fatal": None,
+             "fatalCount": 0, "closeReason": None, "tags": []},
+        ],
+    },
+
+
     "Get-NetworkConfig.ps1": lambda **kw: {
         # Healthy wiring: internet on the motherboard port (onboard I219-LM on
         # PCI bus 0), cameras on the dedicated 4-port NIC card (I210 on PCI buses
@@ -1171,6 +1345,24 @@ DEMO = {
             {"timeCreated": (datetime.now() - timedelta(hours=24)).isoformat(), "level": "Error", "source": "PixellotEncoder", "eventId": 2001, "message": "Hardware encoder init failed, falling back to software encoding"},
         ]
     },
+    # PV-57: what the fleet monitor reads for telemetry.calibration. Times
+    # carry the offset, as the collector writes them.
+    "Get-CalibrationStatus.ps1": lambda **kw: {
+        "configRootReadable": True,
+        "multisport": {
+            "exists": True, "readable": True, "primary": "Football",
+            "sports": [
+                {"name": "Football", "at": (datetime.now().astimezone() - timedelta(days=57)).replace(microsecond=0).isoformat()},
+                {"name": "Soccer", "at": (datetime.now().astimezone() - timedelta(days=40)).replace(microsecond=0).isoformat()},
+                {"name": "Basketball", "at": (datetime.now().astimezone() - timedelta(days=12)).replace(microsecond=0).isoformat()},
+            ],
+        },
+        "pip": {
+            "exists": True, "readable": True, "hasEnhancedPip": True, "hasInnerObjects": True,
+            "at": (datetime.now().astimezone() - timedelta(days=57, hours=-1)).replace(microsecond=0).isoformat(),
+        },
+    },
+    # Times carry the offset, as the collector's ToString('o') writes them.
     "Get-RebootHistory.ps1": lambda **kw: {
         "pending": {
             "isPending": True,
@@ -1182,22 +1374,22 @@ DEMO = {
             "options": ["Power Off", "Power On", "Previous State"],
             "manufacturer": "HP", "model": "HP EliteDesk 800 G4 WKS TWR", "message": None,
         },
-        "lastBoot": (datetime.now() - timedelta(minutes=25)).isoformat(),
+        "lastBoot": (datetime.now().astimezone() - timedelta(minutes=25)).isoformat(),
         "uptime": "0d 0h 25m",
         # The PnP task that reboots after a driver install flags reboot-required
         # — fired ~28 min ago, the "unprovoked restart shortly after logon".
-        "deviceInstallRebootTaskLastRun": (datetime.now() - timedelta(minutes=28)).isoformat(),
+        "deviceInstallRebootTaskLastRun": (datetime.now().astimezone() - timedelta(minutes=28)).isoformat(),
         "count": 4,
         "history": [
             # External planned restart — empty comment proves it was NOT Pulse.
-            {"time": (datetime.now() - timedelta(minutes=28)).isoformat(), "eventId": 1074,
+            {"time": (datetime.now().astimezone() - timedelta(minutes=28)).isoformat(), "eventId": 1074,
              "kind": "restart", "category": "planned",
              "process": "C:\\Windows\\system32\\shutdown.exe (VPU)", "user": "VPU\\Pixellot",
              "reasonCode": "0x800000ff", "reasonText": "Reason not recorded by Windows",
              "comment": "", "byPulse": False, "source": "Planned - external",
              "message": "The process C:\\Windows\\system32\\shutdown.exe (VPU) has initiated the restart of computer VPU on behalf of user VPU\\Pixellot ... Reason Code: 0x800000ff  Shutdown Type: restart  Comment:"},
             # Pulse-initiated reboot — stamped comment, positively attributed.
-            {"time": (datetime.now() - timedelta(days=2)).isoformat(), "eventId": 1074,
+            {"time": (datetime.now().astimezone() - timedelta(days=2)).isoformat(), "eventId": 1074,
              "kind": "restart", "category": "planned",
              "process": "C:\\Windows\\system32\\shutdown.exe (VPU)", "user": "VPU\\Pixellot",
              "reasonCode": "0x80040002", "reasonText": "Other (Planned)",
@@ -1205,14 +1397,14 @@ DEMO = {
              "source": "Pulse (Reboot VPU)",
              "message": "The process C:\\Windows\\system32\\shutdown.exe (VPU) has initiated the restart ... Comment: Reboot requested from Pulse diagnostics"},
             # Windows Update restart.
-            {"time": (datetime.now() - timedelta(days=4)).isoformat(), "eventId": 1074,
+            {"time": (datetime.now().astimezone() - timedelta(days=4)).isoformat(), "eventId": 1074,
              "kind": "restart", "category": "planned",
              "process": "C:\\Windows\\system32\\MusNotification.exe", "user": "NT AUTHORITY\\SYSTEM",
              "reasonCode": "0x80020002", "reasonText": "Operating System: Recovery (Planned)",
              "comment": "", "byPulse": False, "source": "Windows Update",
              "message": "The process MusNotification.exe has initiated the restart ... Operating System: Recovery (Planned)"},
             # Unexpected loss (power blip / hard crash).
-            {"time": (datetime.now() - timedelta(days=6)).isoformat(), "eventId": 41,
+            {"time": (datetime.now().astimezone() - timedelta(days=6)).isoformat(), "eventId": 41,
              "kind": "unexpected", "category": "unexpected",
              "process": "", "user": "", "reasonCode": "", "reasonText": "",
              "comment": "", "byPulse": False,
@@ -1264,18 +1456,6 @@ DEMO = {
         {"connected": True, "port": "COM7", "model": "",
          "statusLabel": "ScoreLink device connected (COM7)"}),
     "Get-PixellotConfig.ps1": lambda **kw: {
-        # Camera firmware / tvMode / serial mirror the live CGI probe
-        # (_probe_camera_ip in main.py) — Admin:1234 param.cgi, same data the
-        # Canopy getFirmwareAndTvMode.ps1 pulled. ntsc_60 = US venue.
-        "cameras": [
-            {"section": "Camera1", "ip": "192.168.10.100", "mac": "00:0E:53:AA:01:01", "role": "Main",
-             "firmwareVersion": "1.9.13", "tvMode": "ntsc_60", "serialNumber": "MC1-7741A", "model": "Pixellot SuperBowl"},
-            {"section": "Camera2", "ip": "192.168.11.100", "mac": "00:0E:53:BB:02:01", "role": "Main",
-             "firmwareVersion": "1.9.13", "tvMode": "ntsc_60", "serialNumber": "MC4-9920A", "model": "Pixellot SuperBowl"},
-            {"section": "OCR", "ip": "192.168.12.50", "mac": "00:D0:89:1B:03:01", "role": "OCR",
-             "firmwareVersion": "DC-2.4.1", "tvMode": "ntsc_60", "serialNumber": "DYN-OCR-3318", "model": "Dynacolor MPC-IPC"},
-        ],
-        "cameraCfgExists": True,
         # Selected HKLM:\SOFTWARE\Pixellot values (the live script dumps ALL).
         "registryConfig": {
             "version": _VENUE["swVersion"],
@@ -1305,7 +1485,7 @@ DEMO = {
         },
     },
     # Expected main-camera count from the Coordinator log. Demo box is an
-    # S2 (2 main cameras + 1 OCR), matching the Get-PixellotConfig demo.
+    # S2 (2 main cameras + 1 OCR), matching the demo NIC ports.
     # vpuRunning False → idle box, so frame capture is allowed in demo.
     "Get-CameraExpectations.ps1": lambda **kw: {
         "expectedMainCameras": 2,
@@ -1526,6 +1706,12 @@ DEMO = {
         "findings": [],
         "notes": "Port 9001 is always owned by PID 4 (HTTP.SYS); listener ownership is not a health signal.",
     },
+    "Get-GpuDriverState.ps1": lambda **kw: _demo_gpu_driver_state(),
+    "Repair-GpuDriver.ps1": lambda **kw: _demo_gpu_driver_repair(reinstall=int((kw or {}).get("Reinstall", 0)) != 0),
+    # Healthy by default (vpu-home's real shape). PULSE_DEMO_BINARIES=libcef
+    # plays Bear Grass NC, 2026-10-15: libcef.dll gone from Bin and VPU.exe
+    # stuck on the loader dialog.
+    "Test-PixellotBinaries.ps1": lambda **kw: _demo_binaries(),
     "Test-PixellotInstallState.ps1": lambda **kw: {
         "dirExists": True,
         "dir": "C:\\pixellot\\downloadedversion",

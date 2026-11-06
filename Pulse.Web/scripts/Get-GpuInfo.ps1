@@ -53,7 +53,8 @@ function _ArchFromName([string]$name) {
     if ($name -match 'RTX\s*50\d{2}')               { return @{ arch = 'Blackwell';  cap = '10.0' } }
     if ($name -match 'RTX\s*40\d{2}')               { return @{ arch = 'Ampere/Ada'; cap = '8.9'  } }
     if ($name -match 'RTX\s*30\d{2}|A\d{3,4}|A100') { return @{ arch = 'Ampere/Ada'; cap = '8.6'  } }
-    if ($name -match 'RTX\s*20\d{2}|GTX\s*16\d{2}|T4|Quadro RTX') { return @{ arch = 'Turing';  cap = '7.5' } }
+    # T1000 is a Turing (TU117) workstation card; the name has no RTX/GTX token.
+    if ($name -match 'RTX\s*20\d{2}|GTX\s*16\d{2}|T1000|T4|Quadro RTX') { return @{ arch = 'Turing';  cap = '7.5' } }
     if ($name -match 'Titan\s*V|V100|GV100')        { return @{ arch = 'Volta';   cap = '7.0' } }
     if ($name -match 'GTX\s*10\d{2}|P100|P40|P4|Quadro P\d{3,4}') { return @{ arch = 'Pascal';  cap = '6.1' } }
     if ($name -match 'GTX\s*9\d{2}|M40|M60|Quadro M\d{3,4}') { return @{ arch = 'Maxwell'; cap = '5.2' } }
