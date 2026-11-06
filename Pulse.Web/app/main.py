@@ -47,6 +47,8 @@ from powershell import (
 )
 import peer
 import cloud_api
+import software_review as _software_review
+from local_guard import LocalOnlyGuard
 
 _web_root = _os.path.dirname(_app_dir)
 SETTINGS_PATH = _os.path.join(_web_root, "pulse-settings.json")
@@ -251,6 +253,9 @@ _server_log = _logging.getLogger("pulse")
 _server_log.info(f"pulse-server.log opened — Pulse Web bootstrap")
 
 app = FastAPI(title="Pulse Web | VPU Diagnostics")
+# Refuse any request a web page on this VPU made on its own behalf (foreign
+# Host, Origin or Sec-Fetch-Site): see local_guard.py.
+app.add_middleware(LocalOnlyGuard)
 app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 PIXELLOT_OUIS = ["00:0E:53", "00:30:53", "70:B3:D5", "00:D0:89"]
@@ -543,7 +548,7 @@ def _cgi_probe_sync(ip: str, timeout: float = 2.0) -> Optional[dict]:
 
     Auth is the Pixellot/Dynacolor factory default (Admin / 1234). If a
     site has rotated camera credentials, probes will silently return None
-    and identification falls back to ARP/cameras.cfg only.
+    and identification falls back to ARP and the default-IP convention.
     """
     # Demo mode can't reach the synthetic camera IPs over HTTP — serve the
     # canned probe so camerasDetected carries the full probe on a Mac.
@@ -647,10 +652,9 @@ async def _probe_camera_ip(ip, is_ocr_ip):
     return None
 
 
-def _collect_camera_ips(ports, ocr_ips):
+def _collect_camera_ips(ports):
     """Collect all IPs worth probing: defaults + any Pixellot ARP entries."""
-    all_camera_ips = set(ocr_ips)
-    all_camera_ips.update(_DEFAULT_OCR_IPS)
+    all_camera_ips = set(_DEFAULT_OCR_IPS)
     all_camera_ips.update(_DEFAULT_MAIN_IPS)
     for port in ports:
         for arp in port.get("arpEntries", []):
@@ -678,7 +682,7 @@ def _cached_probes_by_mac() -> dict:
     return by_mac
 
 
-async def _probe_all_cameras(ports, ocr_ips, block: bool = True):
+async def _probe_all_cameras(ports, block: bool = True):
     """Probe all camera IPs found in ARP entries across all ports.
 
     block=True  — wait for probes (used for dashboard/WS preload).
@@ -689,7 +693,7 @@ async def _probe_all_cameras(ports, ocr_ips, block: bool = True):
 
     Returns a dict keyed by normalized MAC -> probe result.
     """
-    all_camera_ips = _collect_camera_ips(ports, ocr_ips)
+    all_camera_ips = _collect_camera_ips(ports)
 
     if not block:
         now = time.monotonic()
@@ -701,9 +705,7 @@ async def _probe_all_cameras(ports, ocr_ips, block: bool = True):
         if cold_ips:
             async def _warm_cache():
                 tasks = [
-                    _probe_camera_ip(
-                        ip, ip in ocr_ips or ip in _DEFAULT_OCR_IPS
-                    )
+                    _probe_camera_ip(ip, ip in _DEFAULT_OCR_IPS)
                     for ip in cold_ips
                 ]
                 await asyncio.gather(*tasks, return_exceptions=True)
@@ -712,7 +714,7 @@ async def _probe_all_cameras(ports, ocr_ips, block: bool = True):
 
     tasks = []
     for ip in all_camera_ips:
-        is_ocr = ip in ocr_ips or ip in _DEFAULT_OCR_IPS
+        is_ocr = ip in _DEFAULT_OCR_IPS
         tasks.append(_probe_camera_ip(ip, is_ocr))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -929,6 +931,33 @@ _ARCH_VERSION_CAPS = {
 }
 
 
+# Oldest NVIDIA driver a VPU is known to run on. 536.67 is the driver
+# Pixellot's own cloud repair bundle installs (gaas: Dependencies + 4.22.8 +
+# 536.67). Both older drivers seen in the field broke VPU.exe:
+#   446.14 - Tecumseh (MI) 2026-09-28, Pixellot 5.37.2: every VPU.exe start
+#            died on the first frame with cudaErrorInvalidPtx (218, "a PTX
+#            JIT compilation failed") - the driver is too old to compile
+#            Pixellot's CUDA kernels. Head Setup failed, frames still came in.
+#   516.94 - Madison Memorial (WI) 2026-09-10: HwDetector CUDA/NVENC failure
+#            + CameraDYNACOLOR.dll 126, cleared by the repair bundle.
+# Nothing between 516.94 and 536.67 has been observed, so the floor is the
+# version Pixellot ships rather than a proven minimum.
+_NVIDIA_DRIVER_MIN = (536, 67)
+
+
+def _nvidia_driver_release(wmi_version):
+    """NVIDIA release number from the Windows driver version, or None.
+
+    Windows reports NVIDIA drivers as e.g. "31.0.15.3667"; the release is
+    the last digit of the third group plus the fourth: 5|3667 -> 536.67.
+    "26.21.14.4614" -> (446, 14)."""
+    parts = _parse_version(wmi_version)
+    if len(parts) != 4:
+        return None
+    n = (parts[2] % 10) * 10000 + parts[3]
+    return (n // 100, n % 100)
+
+
 def _parse_version(v: str):
     """Return tuple of ints from a dotted version, ignoring suffixes.
     "5.13.6" → (5, 13, 6). "2.66.17" → (2, 66, 17). Empty/bad → ()."""
@@ -1089,7 +1118,7 @@ _CONCERNING_SOFTWARE = {
         "patterns": [
             "CrowdStrike", "SentinelOne", "Sophos", "Carbon Black", "Bitdefender",
             "McAfee", "Norton", "Symantec", "Trend Micro", "Kaspersky", "ESET",
-            "Webroot", "Cylance", "Cortex XDR",
+            "Webroot", "Cylance", "Cortex XDR", "Datto EDR",
         ],
     },
     "crypto_miner": {
@@ -1146,7 +1175,7 @@ _CONCERNING_SOFTWARE = {
         # VNC variants (TightVNC, RealVNC) are often standard on VPUs — left out
         # to avoid false positives.
         "patterns": [
-            "TeamViewer", "AnyDesk", "Splashtop", "GoToMyPC",
+            "TeamViewer", "AnyDesk", "Splashtop", "GoToMyPC", "Datto RMM",
             "ConnectWise Control", "ScreenConnect", "Chrome Remote Desktop",
         ],
     },
@@ -1177,6 +1206,15 @@ _CONCERNING_SOFTWARE = {
 }
 
 
+def _is_chrome_webapp(sw) -> bool:
+    """A Chrome web-app shortcut (Gmail, Docs, a "Google Drive" PWA...). Windows
+    lists these as installed programs with publisher `Google\\Chrome`. They are
+    a browser bookmark, not the product the name suggests, so the risk lists
+    must not match them (a Drive PWA is not the Drive sync client)."""
+    pub = (sw.get("publisher") or "").strip().lower().replace("/", "\\")
+    return pub == "google\\chrome"
+
+
 def _detect_concerning_software(installed_sw) -> dict:
     """Categorize installed software into concerning buckets.
     Returns {category_key: [{name, version, matched}, ...]}.
@@ -1188,7 +1226,7 @@ def _detect_concerning_software(installed_sw) -> dict:
     seen_names = set()  # dedupe — installers often appear under multiple keys
     for sw in installed_sw.get("software") or []:
         name = (sw.get("displayName") or "").strip()
-        if not name:
+        if not name or _is_chrome_webapp(sw):
             continue
         name_lc = name.lower()
         if name_lc in seen_names:
@@ -1217,7 +1255,7 @@ def _enrich_software_with_concerns(installed_sw):
         name_lc = (sw.get("displayName") or "").strip().lower()
         if not name_lc:
             continue
-        for cat_key, cat in _CONCERNING_SOFTWARE.items():
+        for cat_key, cat in ([] if _is_chrome_webapp(sw) else _CONCERNING_SOFTWARE.items()):
             for pattern in cat["patterns"]:
                 if pattern.lower() in name_lc:
                     sw["concern"] = {
@@ -1231,6 +1269,8 @@ def _enrich_software_with_concerns(installed_sw):
                     break
             if "concern" in sw:
                 break
+        # approved | risk | informational, by name only (software_review.py)
+        sw["review"] = _software_review.classify(sw.get("displayName"), sw.get("concern"))
     return installed_sw
 
 
@@ -1590,7 +1630,7 @@ def _uplink_findings(network_config, wifi) -> list:
                 "code": "wifi-uplink",
                 "severity": "warning",
                 "category": "Network",
-                "title": "VPU is using Wi-Fi for its internet connection. Switch to wired Ethernet",
+                "title": "VPU is using Wi-Fi for its internet connection",
                 "recommendation": (
                     (
                         "The VPU is reaching the internet over Wi-Fi, which adds lag and dropouts "
@@ -1689,7 +1729,7 @@ def _stream_findings(port_tests) -> list:
             "code": "stream-blocked",
             "severity": "critical",
             "category": "Network",
-            "title": "Streaming is blocked, so the VPU can't broadcast",
+            "title": "Streaming is blocked by the venue's network",
             "recommendation": (
                 "The venue's network is blocking all three connections the VPU uses to send "
                 "live video, so the game can't broadcast. Ask venue IT to open at least one."
@@ -1707,7 +1747,7 @@ def _stream_findings(port_tests) -> list:
             "code": "stream-degraded-rtmp",
             "severity": "critical",
             "category": "Network",
-            "title": "Streaming has dropped to its last-resort path, so games start about 4 minutes late",
+            "title": "Streaming is using its last-resort connection (1935 TCP)",
             "recommendation": (
                 "The venue's network blocks both normal streaming connections, so games use the "
                 "last-resort path: they start about 4 minutes late and have no protection "
@@ -1726,8 +1766,8 @@ def _stream_findings(port_tests) -> list:
             "severity": "warning",
             "category": "Network",
             "title": (
-                "Streaming is riding its backup connection"
-                if on_backup else "Streaming resiliency is reduced"
+                "Streaming is using its backup connection (443 UDP)"
+                if on_backup else "Streaming backup connection is blocked"
             ),
             "recommendation": (
                 "The main streaming connection is blocked, so the VPU is using its backup. "
@@ -1961,7 +2001,7 @@ def _tls_findings(tls_inspection, lmi_log=None) -> list:
                     "code": "tls-filtered",
                     "severity": "critical",
                     "category": "Network",
-                    "title": f"{who} is blocking {n} Pixellot service{'s' if n != 1 else ''}",
+                    "title": "The venue's web filter is blocking Pixellot services",
                     "recommendation": (
                         f"{who_lower} is blocking the services below by category, so the VPU "
                         f"can't reach them. Ask venue IT to add a category exception for them "
@@ -2028,7 +2068,7 @@ def _lmi_findings(lmi_log) -> list:
         "code": "lmi-ssl-blocked",
         "severity": "warning",
         "category": "Network",
-        "title": "Venue network is blocking LogMeIn, so remote support can't reach this VPU",
+        "title": "Venue network is blocking LogMeIn",
         "recommendation": (
             "The venue's firewall is cutting off LogMeIn, so our support team can't reach this "
             "VPU remotely. Ask venue IT to exempt LogMeIn from SSL inspection and from their "
@@ -2205,8 +2245,7 @@ def _binary_findings(binaries, graphics_delivery=None) -> list:
             "code": "pixellot-dll-missing",
             "severity": "critical",
             "category": "Pixellot",
-            "title": f"{exe} can't start because {shown} {'is' if len(dlls) == 1 else 'are'} "
-                     f"missing, so the VPU can't record or stream",
+            "title": f"{exe} can't start because {shown} {'is' if len(dlls) == 1 else 'are'} missing",
             "recommendation": (
                 f"{who} needs {noun} that {'is' if len(dlls) == 1 else 'are'} missing from the VPU "
                 f"({shown}), so it stops at launch and no game can record or stream. "
@@ -2258,7 +2297,7 @@ def _binary_findings(binaries, graphics_delivery=None) -> list:
             "code": "pixellot-start-error",
             "severity": "critical",
             "category": "Pixellot",
-            "title": f"{exe} is failing at startup, so the VPU can't record or stream",
+            "title": f"{exe} is failing at startup",
             "recommendation": (
                 f"{who} stops at startup with a Windows error (\"{text}\"), so no game can record "
                 f"or stream. Escalate to Pixellot support to repair the Pixellot software install."
@@ -2272,7 +2311,7 @@ def _binary_findings(binaries, graphics_delivery=None) -> list:
             "code": "pixellot-start-error-recent",
             "severity": "warning",
             "category": "Pixellot",
-            "title": f"{exe} failed to start in the last day, so the next game may not stream",
+            "title": f"{exe} failed to start in the last day",
             "recommendation": (
                 f"{who} last failed at startup at {when} with a Windows error (\"{text}\"), and "
                 f"Pulse can't tell whether it has started cleanly since. Check that the last "
@@ -2347,10 +2386,9 @@ def _graphics_findings(gd) -> list:
         latest_failed = judged[0]["status"] == "failed"
         n, m = len(failed), len(judged)
         title = (
-            f"Graphics didn't reach the broadcast on {n} of the last {m} event{'s' if m != 1 else ''}, "
-            "so those games streamed with no scorebug"
+            f"Graphics didn't reach the broadcast on {n} of the last {m} event{'s' if m != 1 else ''}"
             if latest_failed else
-            f"Graphics failed on {n} of the last {m} events, so some games streamed with no scorebug"
+            f"Graphics failed on {n} of the last {m} events"
         )
         received = [e.get("vpuReceived") for e in failed]
         out.append({
@@ -2401,7 +2439,7 @@ def _graphics_findings(gd) -> list:
             "code": "graphics-engine-none",
             "severity": "warning",
             "category": "Pixellot",
-            "title": "No scoreboard type is selected on this VPU, so it turns graphics off for every game",
+            "title": "No scoreboard type is selected on this VPU",
             "recommendation": (
                 "The VPU has no scoreboard type selected, so it switches graphics off when each "
                 "game starts and the stream goes out with no scorebug. Support: set the scoreboard "
@@ -2419,7 +2457,213 @@ def _graphics_findings(gd) -> list:
     return out
 
 
-def _compute_findings(identity, performance, services, nics, hardware=None, installed_sw=None, network_config=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None, binaries=None) -> list:
+# Lifetime uncorrected read+write errors at which a still-Healthy drive stops
+# being "Fix soon" and becomes critical. app.js (diskHealth) mirrors it.
+SMART_ERRORS_CRITICAL = 100
+
+
+# ── VPU.exe restart loop ─────────────────────────────────────
+# A crash-looping VPU.exe still reads "Running" in a process snapshot: the
+# agent starts a fresh copy every 15-60 s. Get-VpuRestarts reads the VPU log's
+# session markers; this decides whether they add up to a loop and why.
+#
+# Separate from event_watch.py's per-event "restart-loop" state: these are
+# readiness findings from VPU session logs, including outside an event. Loader
+# failures before logging remain pixellot-dll-missing / pixellot-start-error.
+#
+# Causes are the signatures found in the field log bundles (Aug-Sep 2026,
+# 16 Windows loop episodes across 9 venues). Every string here appears in a
+# Windows VPU.exe log; Linux (gen-3) VPUs log different ones and don't run
+# Pulse, so don't add theirs. First match in table order wins
+# a tie; otherwise the cause seen in the most crashed sessions.
+_VPU_RESTART_WINDOW_MIN = 60    # count crashes over the last hour
+_VPU_RESTART_LOOP_MIN = 3       # this many crashes in the window is a loop
+_VPU_RESTART_STABLE_MIN = 10    # current run this old with frames = recovered
+
+# Close reasons the agent logs when a person or the schedule stopped VPU.exe
+# on purpose. Those exits are not crashes.
+_VPU_DELIBERATE_CLOSE = (
+    "restart VPU button",           # agent GUI (spelled "AgnetGui" in the log)
+    "stop recorder",                # manual mode / remote calibration
+    "start recorder",
+    "stopStreaming event command",  # event ended
+    "As not in event",              # watchdog closing an idle VPU.exe
+)
+
+_VPU_RESTART_CAUSES = [
+    {
+        "cause": "driver-too-old",
+        "match": ("cudaErrorInvalidPtx",),
+        "label": "the NVIDIA graphics driver is too old for it",
+        "fix": ("Install NVIDIA driver %d.%02d or newer and restart the VPU." % _NVIDIA_DRIVER_MIN),
+        # Tecumseh (MI) 2026-09-28, driver 446.14.
+    },
+    {
+        "cause": "gpu-not-found",
+        "match": ("Unable to initialize NVML", "Failed to find an NVIDIA GPU"),
+        "label": "it can't find the NVIDIA graphics card",
+        "fix": ("Shut the VPU down fully and power it back on. If it keeps crashing, reinstall "
+                "the NVIDIA driver; if that doesn't clear it, escalate to Tier 3 to check the "
+                "graphics card."),
+        # Aurora Christian (IL) 08-27, 5fede100 08-26: NVML code 9 (driver not
+        # loaded). 5ff3348d 09-25: codes 6/15 (GPU not found / lost) with the
+        # card and driver 576.28 still listed in Windows - gpu-none can't see it.
+    },
+    {
+        "cause": "gpu-crashed",
+        "match": ("cudaErrorLaunchFailure",),
+        "label": "the graphics card stops responding while it runs",
+        "fix": ("Make sure the VPU's vents are clear and it isn't overheating, then restart it. "
+                "If it keeps crashing, escalate to Tier 3: the graphics card may be failing."),
+        # 6501c452 09-16: cudaErrorLaunchFailure mid-run on driver 536.67.
+    },
+    {
+        "cause": "out-of-memory",
+        "match": ("Insufficient memory", "Unable to allocate"),
+        "label": "it runs out of memory while starting",
+        "fix": "Restart the VPU to clear its memory. If it keeps crashing, escalate to Tier 3.",
+        # 5d36d4e0 08-26: 142 starts in 81 min, OpenCV "Insufficient memory"
+        # with 12 GB of RAM free - VPU.exe's virtual size was ~137 GB.
+    },
+    {
+        "cause": "camera-connect",
+        "match": ("Can't connect to camera", "Camera first connection problem"),
+        "label": "it can't connect to a camera when it starts",
+        "fix": "Check each camera's cable and power, starting with the Camera Connectivity tab.",
+        # 62ca8d65 09-11, VPU_vpu_20260507: agent closes it with "Attempt to
+        # initialize vpu has failed" and tries again.
+    },
+    {
+        "cause": "camera-stream",
+        "match": ("camera-datapath", "camera-reset"),
+        "label": "a camera's video keeps dropping out and it resets itself",
+        "fix": "Check the camera cables and speeds on the Camera Connectivity tab.",
+        # 5d88ce4e 09-08, 5dd3af46 09-14: "Found camera data path problem".
+    },
+    {
+        # A symptom, not a cause: the processing pipeline stopped getting
+        # frames. Alongside a camera data-path error it is the camera (matched
+        # above); alone it was either a camera or the GPU, so say both.
+        "cause": "pipeline-stall",
+        "match": ("debayer-stall",),
+        "label": "its video processing keeps stalling",
+        "fix": ("Check the Camera Connectivity tab for a camera dropping frames. If the cameras "
+                "look healthy, escalate to Tier 3: the graphics card may be failing."),
+        # 6501c452 09-16: "no new debayer thread entries ... doing dump" in 24
+        # of 40 sessions, 27 starts in 2 h.
+    },
+]
+_VPU_RESTART_UNKNOWN = {
+    "cause": "unknown",
+    "label": "of an error it didn't log",
+    "fix": ("Restart the VPU. If it keeps crashing, escalate to Tier 3 with the Pixellot "
+            "logs from C:\\Pixellot\\Data\\Log."),
+}
+
+
+def _vpu_session_crashed(s) -> bool:
+    """True when a VPU.exe session ended by crashing rather than on purpose."""
+    reason = s.get("closeReason") or ""
+    if s.get("fatal"):
+        return True
+    if "Attempt to initialize" in reason:
+        # Agent closing a VPU.exe that never became healthy.
+        return True
+    if any(k in reason for k in _VPU_DELIBERATE_CLOSE):
+        return False
+    return bool(s.get("ended")) and not s.get("goodbye")
+
+
+def _vpu_restart_cause(crashed) -> dict:
+    counts = {}
+    for s in crashed:
+        text = " ".join([s.get("fatal") or "", s.get("closeReason") or ""] + list(s.get("tags") or []))
+        for i, c in enumerate(_VPU_RESTART_CAUSES):
+            if any(m in text for m in c["match"]):
+                counts[i] = counts.get(i, 0) + 1
+                break
+    if not counts:
+        return _VPU_RESTART_UNKNOWN
+    best = max(counts, key=lambda i: (counts[i], -i))
+    return _VPU_RESTART_CAUSES[best]
+
+
+def _vpu_restart_findings(restarts) -> list:
+    if not restarts or restarts.get("error"):
+        return []
+    sessions = [s for s in (restarts.get("sessions") or [])
+                if (s.get("startedMinutesAgo") or 0) <= _VPU_RESTART_WINDOW_MIN]
+    crashed = [s for s in sessions if _vpu_session_crashed(s)]
+    if len(crashed) < _VPU_RESTART_LOOP_MIN:
+        return []
+
+    cause = _vpu_restart_cause(crashed)
+    n = len(crashed)
+    latest = sessions[-1]
+    fatal = next((s["fatal"] for s in reversed(crashed) if s.get("fatal")), None)
+    if fatal:
+        # "Fatal\t| <ts> |CUDA\t|file(line)\t|func\t|message" -> "CUDA: message"
+        parts = [p.strip() for p in fatal.split("|")]
+        fatal = f"{parts[2]}: {parts[-1]}" if len(parts) >= 4 else fatal
+    evidence = (
+        f"The Pixellot VPU log (C:\\Pixellot\\Data\\Log\\VPU_*.log) shows {len(sessions)} "
+        f"VPU.exe starts in the last {_VPU_RESTART_WINDOW_MIN} minutes; {n} ended in a crash"
+        " (a Fatal error, a failed start, or no clean shutdown)."
+        + (f" Most recent error: {fatal[:240]}" if fatal else "")
+    )
+    drivers = sorted({s.get("driver") for s in crashed if s.get("driver")})
+    if drivers:
+        evidence += f" NVIDIA driver reported by VPU.exe: {', '.join(drivers)}."
+
+    # Recovered: every run since the last crash shut down cleanly, and at
+    # least one of them proved the fix - it got camera frames and exited
+    # cleanly, or it is running now with frames and has lasted
+    # _VPU_RESTART_STABLE_MIN minutes (sooner if it started after a driver or
+    # Pixellot change - the fix a tech just made). A copy that is running but
+    # hasn't proved anything yet neither breaks nor makes the recovery. It
+    # stays a WARN until the crashes age out of the window: unconfirmed is not
+    # a pass.
+    after = sessions[sessions.index(crashed[-1]) + 1:]
+    running_now = bool(restarts.get("vpuRunning")) and not latest.get("ended")
+    changed = any(latest.get(k) and crashed[-1].get(k) and
+                  latest[k] != crashed[-1][k] for k in ("driver", "version"))
+    age = restarts.get("vpuStartedMinutesAgo") or latest.get("startedMinutesAgo") or 0
+    finished = [s for s in after if not (s is latest and running_now)]
+    proved = any(s.get("goodbye") and s.get("firstFrame") for s in finished) or (
+        after and running_now and latest.get("firstFrame") and
+        (changed or age >= _VPU_RESTART_STABLE_MIN))
+    recovered = all(s.get("goodbye") for s in finished) and proved
+
+    base = {
+        "category": "Pixellot",
+        "cause": cause["cause"],
+        "crashCount": n,
+        "evidence": evidence,
+    }
+    if recovered:
+        return [dict(base, **{
+            "code": "vpu-restarts-recent",
+            "severity": "warning",
+            "title": "The VPU software was crashing earlier this hour, and has stopped",
+            "recommendation": (
+                f"The Pixellot video software crashed {n} times in the last hour because "
+                f"{cause['label']}. It has run cleanly since. Re-check Pulse in "
+                f"{_VPU_RESTART_STABLE_MIN} minutes; if it crashes again: {cause['fix']}"
+            ),
+        })]
+    return [dict(base, **{
+        "code": "vpu-restart-loop",
+        "severity": "critical",
+        "title": "The VPU software keeps crashing, so games can't go on air",
+        "recommendation": (
+            f"The Pixellot video software has crashed {n} times in the last hour because "
+            f"{cause['label']}, so Head Setup won't load and games won't go on air. "
+            f"{cause['fix']}"
+        ),
+    })]
+
+
+def _compute_findings(identity, performance, services, nics, hardware=None, installed_sw=None, network_config=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, expectations=None, disk_health=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None, binaries=None, vpu_restarts=None) -> list:
     findings = []
 
     # None vs {} matters for probe_results: None means the caller never
@@ -2452,13 +2696,10 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                     "recommendation": (
                         f"The VPU is taking its time from {ntp_src} instead of an approved "
                         f"time server. If that server's clock drifts, the VPU can miss scheduled "
-                        f"events. A remote tech can switch it back to the approved servers."
+                        f"events. Escalate this to Pixellot remote support to switch it back to the approved servers."
                     ),
                     "details": [
                         f"Approved servers: {approved_list}",
-                        "Remote fix: run `w32tm /config /manualpeerlist:\"0.us.pool.ntp.org "
-                        "1.us.pool.ntp.org 2.us.pool.ntp.org 3.us.pool.ntp.org\" "
-                        "/syncfromflags:manual /update`, then restart the Windows Time service.",
                     ],
                 }
             )
@@ -2556,7 +2797,7 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                     "code": "tz-non-us",
                     "severity": "critical",
                     "category": "System",
-                    "title": "VPU clock is set to a non-US time zone, so games may go on or off air at the wrong time",
+                    "title": "VPU clock is set to a non-US time zone",
                     "recommendation": (
                         f"The VPU's clock is set to {shown}, not a US time zone, so it may go "
                         f"on air or off air at the wrong time. Open Date & Time settings and "
@@ -2655,7 +2896,7 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                 "code": "gpu-none",
                 "severity": "critical",
                 "category": "Hardware",
-                "title": "No NVIDIA graphics card detected, so this VPU can't encode video",
+                "title": "No NVIDIA graphics card detected",
                 "recommendation": (
                     "No NVIDIA graphics card was found, so this VPU can't encode video. If a card "
                     "is fitted, check that it's seated and its driver is installed."
@@ -2681,7 +2922,7 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
     # alone is wrong-hardware. Skipped if the compat check above already
     # raised a "no-gpu" critical (would be duplicate noise).
     if hardware and not hardware.get("error"):
-        compat_no_gpu = any(f["title"] == "No NVIDIA GPU detected" for f in findings)
+        compat_no_gpu = any(f.get("code") == "gpu-none" for f in findings)
         if not compat_no_gpu:
             gpus = hardware.get("gpus") or []
             dedicated = [g for g in gpus if g.get("isDedicated")]
@@ -2694,11 +2935,43 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                     "code": "gpu-igpu-only",
                     "severity": "warning",
                     "category": "Hardware",
-                    "title": "No dedicated graphics card, so this is the wrong hardware for a VPU",
+                    "title": "No dedicated graphics card",
                     "recommendation": (
                         f"This VPU only has built-in graphics ({vendor_str}), so it's missing "
                         f"the dedicated NVIDIA or AMD card a VPU needs to encode video. Check "
                         f"that the graphics card is seated, powered, and has a current driver."
+                    ),
+                })
+
+            # NVIDIA driver too old for Pixellot's CUDA code. The card, the
+            # cameras and the processes all look healthy, so without this the
+            # Dashboard reads Game-ready while VPU.exe restarts every minute.
+            floor = "%d.%02d" % _NVIDIA_DRIVER_MIN
+            for g in dedicated:
+                if g.get("vendor") != "NVIDIA":
+                    continue
+                release = _nvidia_driver_release(g.get("driverVersion"))
+                if release is None or release >= _NVIDIA_DRIVER_MIN:
+                    continue
+                installed = "%d.%02d" % release
+                findings.append({
+                    "code": "gpu-driver-old",
+                    "severity": "critical",
+                    "category": "Hardware",
+                    "title": "Graphics driver is too old, so the VPU software can't process video",
+                    "recommendation": (
+                        f"The NVIDIA graphics driver on this VPU ({installed}) is too old for "
+                        f"the Pixellot software, so it can't process camera video: Head Setup "
+                        f"won't load and games won't go on air, even though the cameras are "
+                        f"connected. Install NVIDIA driver {floor} or newer and restart the VPU."
+                    ),
+                    "evidence": (
+                        f"{g.get('name') or 'NVIDIA GPU'} reports Windows driver version "
+                        f"{g.get('driverVersion')} (NVIDIA {installed}). Pixellot's repair "
+                        f"bundle installs {floor}. Field reports with older drivers show the Pixellot VPU log "
+                        f"(C:\\Pixellot\\Data\\Log\\VPU_*.log) shows 'Installed NVIDIA driver: "
+                        f"an old release' followed by a Fatal cudaErrorInvalidPtx at the first frame, "
+                        f"and VPU.exe restarting about once a minute."
                     ),
                 })
 
@@ -2833,12 +3106,19 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
         # noise a tech could do nothing about; Storage Cleanup only offers
         # itself at 90%, so the alert and the remedy now arrive together.
 
-    # Drive SMART / reliability — the coarse Healthy/Unhealthy rollup plus the
+    # Drive SMART / reliability: the coarse Healthy/Unhealthy rollup plus the
     # SSD-fleet early-warning signals (wear %, uncorrectable errors, OS pre-fail
-    # flag) from Get-DiskHealth. Pre-fail takes precedence over high wear, and we
-    # emit at most one of each so a multi-disk box doesn't spam the findings list.
+    # flag) from Get-DiskHealth. The OS pre-fail flag or an Unhealthy drive is
+    # critical. A handful of lifetime uncorrected errors on a drive that still
+    # reads Healthy is "Fix soon" (a warning, not an outage): old spinning
+    # disks collect a few and run for years. A count of SMART_ERRORS_CRITICAL
+    # or more escalates. Pulse keeps no history, so it can't tell a static 8
+    # from a climbing one; the recommendation tells the tech to re-check.
+    # (app.js diskHealth renders the same tiers; keep the constant in step.)
+    # At most one finding of each kind, so a multi-disk box doesn't spam.
     if disk_health and not disk_health.get("error"):
         prefail_drive = "A drive" if disk_health.get("predictFailure") else None
+        errors_drive = None  # (name, uncorrected)
         wear_drive = None  # (name, wearPercent)
         for d in (disk_health.get("physicalDisks") or []):
             name = d.get("friendlyName") or "A drive"
@@ -2846,8 +3126,10 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
             uncorrected = (smart.get("readErrorsUncorrected") or 0) + (smart.get("writeErrorsUncorrected") or 0)
             health = (d.get("healthStatus") or "").strip().lower()
             wear = smart.get("wearPercent")
-            if prefail_drive is None and (uncorrected > 0 or (health and health != "healthy")):
+            if prefail_drive is None and (uncorrected >= SMART_ERRORS_CRITICAL or (health and health != "healthy")):
                 prefail_drive = name
+            elif 0 < uncorrected < SMART_ERRORS_CRITICAL and (errors_drive is None or uncorrected > errors_drive[1]):
+                errors_drive = (name, uncorrected)
             if wear is not None and wear >= 80 and (wear_drive is None or wear > wear_drive[1]):
                 wear_drive = (name, wear)
         if prefail_drive:
@@ -2859,11 +3141,26 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                     "title": f"{prefail_drive} is predicting failure (SMART)",
                     "recommendation": (
                         "Back up recordings and plan to replace this drive. Its built-in "
-                        "self-check (SMART) is reporting uncorrectable errors or a pre-failure status."
+                        "self-check (SMART) is reporting a failing status or many uncorrectable errors."
                     ),
                 }
             )
-        elif wear_drive:
+        elif errors_drive:
+            n = errors_drive[1]
+            findings.append(
+                {
+                    "code": "disk-smart-errors",
+                    "severity": "warning",
+                    "category": "Storage",
+                    "title": f"{errors_drive[0]} has {n} uncorrected read/write error{'' if n == 1 else 's'}",
+                    "recommendation": (
+                        "The drive still reports Healthy, so this is not an outage. Back up "
+                        "recordings and plan a replacement. Check this page again on the next "
+                        "visit: if the count has gone up, replace the drive soon."
+                    ),
+                }
+            )
+        if not prefail_drive and wear_drive:
             findings.append(
                 {
                     "code": "disk-smart-wear",
@@ -2896,7 +3193,7 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                             "code": "watchdog-down",
                             "severity": "warning",
                             "category": "Services",
-                            "title": "Pixellot watchdog (KeepAgentUp) not running",
+                            "title": "KeepAgentUp is not running",
                             "recommendation": (
                                 "The watchdog that restarts Pixellot's software after a crash "
                                 "isn't running, so a crash would stay down until someone "
@@ -2942,6 +3239,17 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
         # falls back to the ARP-only behavior.
         probe_results = probe_results or {}
         ocr_confirmed = any(r.get("is_ocr") for r in probe_results.values())
+        # The NIC collector picks adapters by chipset, and the onboard
+        # motherboard port often shares the camera card's chipset, so it is
+        # in `ports` too. Its speed is the venue uplink's business, not a
+        # camera link, so find it by PCI bus (the adapter role) and skip it.
+        # Without network_config nothing is excluded, as before.
+        _classify_network_adapters(network_config)
+        onboard_macs = {
+            _mac_to_int(a.get("macAddress"))
+            for a in ((network_config or {}).get("adapters") or [])
+            if a.get("role") == "motherboard"
+        } - {_mac_to_int(None)}
         for idx, port in enumerate(ordered_ports):
             label = f"Port {idx + 1}"
             is_up = port.get("status") == "Up"
@@ -2970,7 +3278,8 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
             # OCR's Dynacolor OUI (00:D0:89), so the OUI can't tell them apart
             # (and the raw ARP MAC is dash-formatted, so the old colon-prefix
             # check never matched anyway).
-            if is_up and speed and speed < 1000:
+            on_motherboard = _mac_to_int(port.get("mac")) in onboard_macs
+            if is_up and speed and speed < 1000 and not on_motherboard:
                 port_is_ocr = any(
                     (a.get("ip") or "").strip() in _DEFAULT_OCR_IPS
                     for a in pixellot_arps
@@ -3070,6 +3379,7 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
     findings.extend(_port_findings(port_tests))
     findings.extend(_tls_findings(tls_inspection, lmi_log))
     findings.extend(_lmi_findings(lmi_log))
+    findings.extend(_vpu_restart_findings(vpu_restarts))
 
     # ── Scorebug never reached the broadcast (on-box, not network) ──
     findings.extend(_graphics_findings(graphics_delivery))
@@ -3086,7 +3396,7 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
         # camera-less VPU.
         known = isinstance(expected_main, int) and expected_main > 0
         if known or not (identity or {}).get("isNonVpuHost"):
-            enriched_ports = _enrich_ports(nics, pixellot_config, None)
+            enriched_ports = _enrich_ports(nics, probe_results)
             _flag_uplink_ports(enriched_ports, network_config)
             findings.extend(_camera_count_findings(
                 enriched_ports, expected_main, probe_results, probes_attempted))
@@ -3116,6 +3426,9 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
 # readiness `info` (it never stops tonight's game); iGPU-only is `warning` but
 # readiness `blocker` (wrong hardware, can't encode). Don't reuse `severity`.
 READINESS_POLICY_VERSION = "v1"
+# A drive over this share full is a readiness finding (C: blocks, D: informs).
+# The C: title names it, so the title and the check cannot drift apart.
+READINESS_DISK_FULL_PCT = 90
 
 _READINESS_POLICY = {
     # ── BLOCKERS → FAIL (don't expect a clean broadcast tonight) ──
@@ -3142,6 +3455,9 @@ _READINESS_POLICY = {
                                          #     Was "risk" until Archer GA (PXLS2_15488).
     "gpu-none":              "blocker",  # F5  no NVIDIA GPU — encoder can't run
     "gpu-igpu-only":         "blocker",  # F11 Intel iGPU only — wrong hardware
+    "vpu-restart-loop":      "blocker",  # VPU.exe session logs confirm repeated crashes.
+    "gpu-driver-old":        "blocker",  # Driver <536.67; Tecumseh MI 446.14,
+                                         # cudaErrorInvalidPtx on the first frame.
     "port-dns-blocked":      "blocker",  # F23a DNS down → name resolution fails
     "ssl-inspection":        "blocker",  # F37 venue DPI substituting certs on
                                          #     Pixellot-critical HTTPS. Every port
@@ -3161,6 +3477,8 @@ _READINESS_POLICY = {
                                          #     is its own code. Field: Linewize,
                                          #     Ohio venue 2026-08-19, where this
                                          #     scored PASS.
+    "install-incomplete":    "blocker",  # F13 interrupted installer (Ian, 2026-10-15: was risk)
+    "ram-insufficient":      "blocker",  # F21 <32 GB host (Ian, 2026-10-15: was risk)
     # F15a C: disk >90% is computed below from disk-health (not the
     # `disk-critical` finding — see _compute_readiness).
 
@@ -3182,6 +3500,7 @@ _READINESS_POLICY = {
     "stream-resiliency-reduced": "risk", # F8  stream healthy on Zixi but part of the
                                          #     failover chain blocked (was stream-443-blocked)
     "watchdog-down":         "risk",     # F9  KeepAgentUp down — no self-heal
+    "vpu-restarts-recent":   "risk",     # Recent crashes, clean run since; re-check.
     "pixellot-over-cap":     "risk",     # F10 build newer than GPU/OS supports
     "gpu-anomaly":           "risk",     # F12 Volta / roster anomaly
     "uplink-on-camera-port": "risk",     # internet cable on the camera card. Had no
@@ -3189,10 +3508,8 @@ _READINESS_POLICY = {
                                          #     info and Copy for ticket pasted a critical
                                          #     wiring fault under "Worth knowing". Ian's
                                          #     call: risk.
-    "install-incomplete":    "risk",     # F13 interrupted installer, agent up
     # F16 (`disk-low`, a volume at 80–90%) removed — disk fill is critical-only now.
     "disk-smart-prefail":    "risk",     # F16b drive SMART pre-fail / uncorrectable errors
-    "ram-insufficient":      "risk",     # F21 <32 GB host
     "ntp-unapproved":        "risk",     # F22 drift can break signed-URL stream
     "wifi-uplink":           "risk",     # F24 Wi-Fi uplink — latency/loss
     "graphics-handoff-failed": "risk",   # F40 scorebug never reached VPU.exe on recent
@@ -3206,6 +3523,16 @@ _READINESS_POLICY = {
                                          #     scoreboard type is selected. Airs clean
                                          #     of graphics every game until fixed.
                                          #     Field: Merrol Hyde, 2026-08-17.
+    "disk-smart-wear":       "risk",     # SSD at 80%+ of rated write life (Ian, 2026-10-15: was info)
+    "sw-security":           "risk",     # F29 (blocking agent.exe would surface as F2) (Ian, 2026-10-15: was info)
+    "sw-crypto-miner":       "risk",     # F30 (Ian, 2026-10-15: was info)
+    "sw-torrent":            "risk",     # F31 (Ian, 2026-10-15: was info)
+    "sw-system-cleaner":     "risk",     # F32 (Ian, 2026-10-15: was info)
+    "sw-game-platform":      "risk",     # F34 (Ian, 2026-10-15: was info)
+    "sw-consumer-sync":      "risk",     # F35 (Ian, 2026-10-15: was info)
+    "ssl-inspection-support": "risk",    # F37b only support-plane hosts inspected (LogMeIn /
+                                         #      python.org); every broadcast host passed.
+                                         #      (Ian, 2026-10-15: was info)
     # F14 temp≥90, F15b D:>90, F17 CPU sustained, F19 mem sustained are computed
     # below (readiness-specific thresholds the dashboard findings don't surface).
 
@@ -3219,29 +3546,19 @@ _READINESS_POLICY = {
     # F15a/F15b report those drives at their own class. This entry is the
     # fallback for any OTHER volume >90%.
     "disk-critical":         "info",
-    "disk-smart-wear":       "info",     # SSD ≥80% rated life — heads-up, won't stop tonight's game
+    "disk-smart-errors":     "info",     # few uncorrected errors, drive still Healthy: "Fix soon"
     "temp-critical":         "info",     # 85°C snapshot — readiness gate is 90°C (F14)
     "os-eos-reached":        "info",     # F26
     "os-eos-imminent":       "info",     # F27
     "os-eos-approaching":    "info",     # F28
     "os-mainstream-eos":     "info",     # headline EOS passed, IoT servicing continues
-    "sw-security":           "info",     # F29 (if it's blocking agent.exe, that surfaces as F2)
-    "sw-crypto-miner":       "info",     # F30
-    "sw-torrent":            "info",     # F31
-    "sw-system-cleaner":     "info",     # F32
     "sw-alt-remote":         "info",     # F33
-    "sw-game-platform":      "info",     # F34
-    "sw-consumer-sync":      "info",     # F35
     "uptime-high":           "info",     # F36
     "pixellot-start-error-past": "info", # F43c same, 1-7 days ago, not since.
     "tls-filtered-support":  "info",     # F38b only support-plane hosts filtered
                                          #      (LogMeIn / python.org) - remote
                                          #      support and installer downloads
                                          #      suffer, tonight's game does not.
-    "ssl-inspection-support": "info",    # F37b only support-plane hosts inspected
-                                         #      (LogMeIn / python.org); every
-                                         #      broadcast host passed. Same
-                                         #      rationale as F38b.
     "lmi-ssl-blocked":       "info",     # F39 LogMeIn's own service log shows the
                                          #     venue killing its TLS handshakes
                                          #     (SSL error on client hello) with no
@@ -3383,14 +3700,14 @@ def _compute_readiness(findings, performance=None, disk_health=None,
     # (app.js ~6115) — so a tech working storage sees the urgency there,
     # where the fix is.
     c_pct, d_pct = _disk_used_by_letter(disk_health, performance)
-    if isinstance(c_pct, (int, float)) and c_pct > 90:
-        add("blocker", "disk-c-critical", "System drive (C:) almost full",
+    if isinstance(c_pct, (int, float)) and c_pct > READINESS_DISK_FULL_PCT:
+        add("blocker", "disk-c-critical", f"System drive (C:) is over {READINESS_DISK_FULL_PCT}% full",
             f"C: is {c_pct:g}% full. The live stream is processed on C:, so if it "
             f"fills the VPU can't broadcast. Free up space on C: now.",
             "Storage")
-    if isinstance(d_pct, (int, float)) and d_pct > 90:
+    if isinstance(d_pct, (int, float)) and d_pct > READINESS_DISK_FULL_PCT:
         add("info", "disk-d-critical",
-            "Recording drive (D:) almost full, so recordings may not save",
+            "Recording drive (D:) almost full",
             f"D: is {d_pct:g}% full. The game recording (VOD) is saved to D:, so if "
             f"it fills during the game the recording may not save. Free up space "
             f"on D:.", "Storage")
@@ -3405,50 +3722,6 @@ def _compute_readiness(findings, performance=None, disk_health=None,
         "risks": risks,
         "info": info,
     }
-
-
-def _build_camera_sets(pixellot_config=None):
-    """Return cameras.cfg-derived sets for OCR and Main camera identification.
-
-    Returns dict with keys:
-      ocr_ips, ocr_macs  — OCR cameras (role contains "OCR")
-      main_ips, main_macs — Main/Panoramic/Tactical cameras (other roles)
-    Always includes the hardcoded default OCR IPs.
-    """
-    ocr_ips = set(_DEFAULT_OCR_IPS)
-    ocr_macs = set()
-    main_ips = set()
-    main_macs = set()
-    cfg_cameras = []
-    if pixellot_config and not pixellot_config.get("error"):
-        cfg_cameras = pixellot_config.get("cameras", [])
-    for cam in cfg_cameras:
-        role = (cam.get("role") or cam.get("section") or "").strip()
-        ip = cam.get("ip", "").strip()
-        mac = cam.get("mac", "").strip().upper().replace("-", ":")
-        if role.upper() == "OCR":
-            if ip:
-                ocr_ips.add(ip)
-            if mac:
-                ocr_macs.add(mac)
-        elif role:
-            # Main, Panoramic, Tactical, etc — non-OCR Pixellot camera roles.
-            if ip:
-                main_ips.add(ip)
-            if mac:
-                main_macs.add(mac)
-    return {
-        "ocr_ips": ocr_ips,
-        "ocr_macs": ocr_macs,
-        "main_ips": main_ips,
-        "main_macs": main_macs,
-    }
-
-
-def _build_ocr_sets(pixellot_config=None):
-    """Backwards-compatible wrapper — returns (ocr_ips, ocr_macs)."""
-    s = _build_camera_sets(pixellot_config)
-    return s["ocr_ips"], s["ocr_macs"]
 
 
 def _mac_to_int(mac) -> int:
@@ -3509,35 +3782,25 @@ def _derive_down_reason(port: dict) -> str:
 
 def _enrich_ports(
     nics: dict,
-    pixellot_config: dict = None,
     probe_results=None,
     expected_main_cameras=None,
 ) -> list:
     """Enrich raw NIC port data with status flags and camera detection.
 
-    Identity resolution, highest authority first (CGI is the source of
-    truth; cameras.cfg is unreliable per field guidance):
+    Identity resolution, highest authority first (CGI is the source of truth):
       1. CGI model number → role + expected link speed (actual hardware)
       2. Pixellot default-IP convention (.50/.51 main, .52/.53/.60 OCR)
       3. CGI-confirmed Pixellot camera with unknown model → generic label
-      4. cameras.cfg role mapping (last resort — may be inaccurate)
-      5. Pixellot OUI only → vendor known, role unknown
+      4. Pixellot OUI only → vendor known, role unknown
+    Pixellot stopped using cameras.cfg around agent 2.3 (Logan, 2026-10-12),
+    so an old or missing file cannot establish which cameras are expected.
     Degraded = actual speed < expected speed for the camera model. When
     model is unknown, any sub-1 Gbps non-OCR port is treated as degraded.
 
     probe_results: dict keyed by normalized MAC -> {mac, ip, is_ocr, ...}
     from _probe_all_cameras(). Optional — when absent, falls back to
-    default-IP / cfg identification.
+    default-IP identification.
     """
-    cam_sets = _build_camera_sets(pixellot_config)
-    # cameras.cfg-derived sets ONLY (defaults handled separately below).
-    # Per field guidance the cameras.cfg role data is not always accurate,
-    # so it is used only as a last-resort identity hint — after CGI probe
-    # and the Pixellot default-IP convention.
-    cfg_ocr_ips = cam_sets["ocr_ips"] - _DEFAULT_OCR_IPS
-    cfg_ocr_macs = cam_sets["ocr_macs"]
-    cfg_main_ips = cam_sets["main_ips"]
-    cfg_main_macs = cam_sets["main_macs"]
     probe_results = probe_results or {}
 
     ports = []
@@ -3582,8 +3845,7 @@ def _enrich_ports(
                             cam_entry[pkey] = probe[pkey]
 
                 # ── Identity resolution, highest authority first ──
-                # CGI probe is the source of truth; cameras.cfg is a
-                # last-resort hint because its role data is unreliable.
+                # CGI probe is the source of truth.
                 model_role, model_speed = _lookup_camera_model(
                     cam_entry.get("modelNumber")
                 )
@@ -3606,20 +3868,11 @@ def _enrich_ports(
                     cam_entry["identitySource"] = "Default IP"
                 elif probe:
                     # 3. CGI-confirmed Pixellot camera, model not in our
-                    #    table — generic label beats a possibly-wrong
-                    #    cameras.cfg role.
+                    #    table — generic label.
                     cam_entry["role"] = "Pixellot Camera"
                     cam_entry["identitySource"] = "CGI probe"
-                elif arp_ip in cfg_ocr_ips or arp_mac in cfg_ocr_macs:
-                    # 4. cameras.cfg — last resort.
-                    cam_entry["role"] = "OCR / Scoreboard"
-                    cam_entry["identitySource"] = "cameras.cfg"
-                    is_ocr = True
-                elif arp_ip in cfg_main_ips or arp_mac in cfg_main_macs:
-                    cam_entry["role"] = "Main Camera"
-                    cam_entry["identitySource"] = "cameras.cfg"
                 else:
-                    # 5. Pixellot OUI only — vendor known, role unknown.
+                    # 4. Pixellot OUI only — vendor known, role unknown.
                     cam_entry["role"] = None
                     cam_entry["identitySource"] = "OUI vendor match"
 
@@ -3938,23 +4191,21 @@ def _main_camera_ports(ports) -> list:
     return out
 
 
-def _scoreboard_camera_state(ports, pixellot_config):
-    """For the Camera Connectivity reference panel: is a scoreboard (OCR)
-    camera configured, and is it connected? The OCR IP set always includes
-    Pixellot's default addresses, so "configured" comes from a cameras.cfg
-    entry whose role names OCR. None when neither is true: plenty of venues
-    have no scoreboard camera, and the panel shouldn't imply one is missing."""
-    cfg_cams = (pixellot_config or {}).get("cameras") or [] if isinstance(pixellot_config, dict) else []
-    configured = any("OCR" in str(c.get("role") or "").upper() for c in cfg_cams)
+def _scoreboard_camera_state(ports):
+    """Report a connected scoreboard (OCR) camera and its port, or None.
+
+    Detection only: no reliable configuration source says whether a venue
+    expects an OCR camera. An unplugged camera and a venue without one are
+    indistinguishable, so neither can be labelled "not connected".
+    """
     live = [p for p in ports or [] if p.get("isOcr") and p.get("isUp") and not p.get("hasInternetUplink")]
-    if not live and not configured:
+    if not live:
         return None
-    p = live[0] if live else None
+    p = live[0]
     return {
-        "configured": configured,
-        "connected": bool(p),
-        "port": p.get("portLabel") if p else None,
-        "speedMbps": p.get("linkSpeedMbps") if p else None,
+        "connected": True,
+        "port": p.get("portLabel"),
+        "speedMbps": p.get("linkSpeedMbps"),
     }
 
 
@@ -3998,7 +4249,7 @@ def _camera_count_findings(ports, expected_main, probe_results, probes_attempted
             "code": CAM_COUNT_PENDING,
             "severity": "warning",
             "category": "Camera",
-            "title": "Cameras not confirmed yet, so this verdict may change",
+            "title": "Cameras not confirmed yet",
             "recommendation": (
                 "Pulse just started and the cameras haven't answered yet. It checks again "
                 "in about a minute; nothing to do unless this stays."
@@ -4035,8 +4286,8 @@ def _camera_count_findings(ports, expected_main, probe_results, probes_attempted
             "code": "cam-none",
             "severity": "critical",
             "category": "Camera",
-            "title": (f"No main cameras detected (expected {expected_main}), so there's nothing to broadcast"
-                      if known else "No main cameras detected, so there's nothing to broadcast"),
+            "title": (f"No main cameras detected (expected {expected_main})"
+                      if known else "No main cameras detected"),
             "recommendation": (
                 (f"The VPU expects {expected_main} main camera{s_} but can't see any on the camera card, "
                  if known else "The VPU can't see any main cameras on the camera card, ")
@@ -4119,7 +4370,7 @@ def _compute_camera_findings(ports: list, poe=None) -> list:
         # settled is a real "camera went away" — UNLESS that camera's MAC
         # reappeared on another port (it moved, not dropped). This replaces
         # the old stale-ARP "camera last detected" alarm, which fired on
-        # ports that never had a confirmed camera. Needs no cameras.cfg.
+        # ports that never had a confirmed camera.
         if (port.get("_everHadCamera") and not cams and port.get("_settled")):
             last = port.get("_lastCam") or {}
             last_mac = str(last.get("mac") or "").upper().replace("-", ":")
@@ -4179,7 +4430,7 @@ def _compute_camera_findings(ports: list, poe=None) -> list:
 # ─── Data-building helpers (shared by per-page and preload) ──
 
 
-def _build_dashboard(identity, performance, services, nics, network_config=None, hardware=None, installed_sw=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, perf_sample=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None, binaries=None):
+def _build_dashboard(identity, performance, services, nics, network_config=None, hardware=None, installed_sw=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, expectations=None, disk_health=None, perf_sample=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None, binaries=None, vpu_restarts=None):
     # Tag adapter roles (motherboard / camera / wifi) so both the findings and
     # the embedded "Network config" the dashboard ships carry them.
     _classify_network_adapters(network_config)
@@ -4237,13 +4488,14 @@ def _build_dashboard(identity, performance, services, nics, network_config=None,
         "Port connectivity": port_tests,
         "Graphics delivery": graphics_delivery,
         "Pixellot program files": binaries,
+        "VPU software crash history": vpu_restarts,
     }
     source_errors = [
         name for name, data in _sources.items()
         if isinstance(data, dict) and data.get("error")
     ]
 
-    findings = _compute_findings(identity, performance, services, nics, hardware, installed_sw, network_config, install_state, port_tests, gpu_info, wifi, pixellot_config=pixellot_config, expectations=expectations, disk_health=disk_health, probe_results=probe_results, tls_inspection=tls_inspection, lmi_log=lmi_log, graphics_delivery=graphics_delivery, binaries=binaries)
+    findings = _compute_findings(identity, performance, services, nics, hardware, installed_sw, network_config, install_state, port_tests, gpu_info, wifi, expectations=expectations, disk_health=disk_health, probe_results=probe_results, tls_inspection=tls_inspection, lmi_log=lmi_log, graphics_delivery=graphics_delivery, binaries=binaries, vpu_restarts=vpu_restarts)
 
     return {
         "identity": flat_identity,
@@ -4415,9 +4667,9 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
     async def _skipped():
         return None
     (identity, performance, services, nics, net_config, hardware, installed_sw,
-     install_state, port_tests, gpu_info, wifi, pixellot_config, expectations,
+     install_state, port_tests, gpu_info, wifi, expectations,
      disk_health, perf_sample, tls_inspection, lmi_log, graphics_delivery,
-     binaries) = await asyncio.gather(
+     binaries, vpu_restarts) = await asyncio.gather(
         run_ps("Get-SystemIdentity.ps1"),
         run_ps("Get-Performance.ps1"),
         run_ps("Get-Services.ps1"),
@@ -4433,10 +4685,8 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
         _skipped() if skip_intrusive else run_ps("Test-NetworkPorts.ps1", timeout=30),
         run_ps("Get-GpuInfo.ps1", timeout=15),
         run_ps("Get-WifiAdapters.ps1", timeout=10),
-        # Pixellot config + expected camera count feed the dashboard's new
-        # "missing main cameras" finding (compared against what's detected on
-        # the camera NIC). Same scripts the Camera Connectivity tab uses.
-        run_ps("Get-PixellotConfig.ps1", timeout=15),
+        # Expected camera count feeds the dashboard's "missing main cameras"
+        # finding, using the same source as the Camera Connectivity tab.
         run_ps("Get-CameraExpectations.ps1", timeout=10),
         # Readiness inputs: D: volume (post-event VOD) for the C:/D: split, and
         # a short CPU/mem sample so a one-instant spike can't move the verdict.
@@ -4458,14 +4708,15 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
         # NC, 2026-10-15). ~2s on vpu-home; libcef.dll alone is 212 MB, so
         # it seeks the import table rather than reading files.
         run_ps("Test-PixellotBinaries.ps1", timeout=20),
+        # VPU.exe session history: a crash loop still reads Running in services.
+        run_ps("Get-VpuRestarts.ps1", timeout=20),
     )
     # CGI probe (cached 30s; usually already warm from preload) so the
     # slow-port finding identifies the OCR by its actual camera model, not a
     # transient ARP entry — keeping the dashboard consistent with the Camera
     # Connectivity tab and free of the OCR "running slow" flicker.
-    ocr_ips, _ = _build_ocr_sets(pixellot_config)
     raw_ports = nics.get("ports", []) if nics and not nics.get("error") else []
-    probe_results = await _probe_all_cameras(raw_ports, ocr_ips)
+    probe_results = await _probe_all_cameras(raw_ports)
 
     # CPU observer-effect guard. The snapshot and the 3s sample above both run
     # INSIDE the collector fan-out — several concurrent powershell.exe startups
@@ -4493,7 +4744,7 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
     if raw_out is not None:
         raw_out.update(
             identity=identity, port_tests=port_tests, nics=nics,
-            pixellot_config=pixellot_config, network_config=net_config,
+            network_config=net_config,
             probe_results=probe_results, gpu_info=gpu_info,
             expectations=expectations, disk_health=disk_health,
             hardware=hardware, services=services, installed_sw=installed_sw,
@@ -4502,11 +4753,12 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
     return _build_dashboard(
         identity, performance, services, nics, net_config, hardware,
         installed_sw, install_state, port_tests, gpu_info, wifi,
-        pixellot_config=pixellot_config, expectations=expectations,
+        expectations=expectations,
         disk_health=disk_health, perf_sample=perf_sample,
         probe_results=probe_results, tls_inspection=tls_inspection,
         lmi_log=lmi_log, graphics_delivery=graphics_delivery,
         binaries=binaries,
+        vpu_restarts=vpu_restarts,
     )
 
 
@@ -4581,10 +4833,10 @@ async def api_peripherals():
 @app.get("/api/pixellot-config")
 async def api_pixellot_config():
     r"""Local, on-host Pixellot configuration (NOT the Pixellot Cloud lane):
-    install/agent version + GPU-vs-version compatibility, cameras.cfg
-    (IP/MAC/role) enriched with live per-camera firmware/tvMode/serial via the
-    shared CGI probe, and calibration status (main multisport + OCR) read from
-    C:\Pixellot\Data\Configuration.
+    install/agent version + GPU-vs-version compatibility, the Pixellot
+    registry values, and calibration status (main multisport + OCR) read from
+    C:\Pixellot\Data\Configuration. Per-camera firmware and serials live on
+    /api/cameras, from the CGI probe.
     """
     cfg, identity, gpu_info = await asyncio.gather(
         run_ps("Get-PixellotConfig.ps1", timeout=20),
@@ -4597,23 +4849,6 @@ async def api_pixellot_config():
     # Reuse the System Overview version-compatibility banner data.
     cfg["compat"] = _check_pixellot_compatibility(identity, gpu_info)
 
-    # Enrich each camera with live firmware / tvMode / serial / model via the
-    # same cached CGI probe the Camera Connectivity lane uses (Admin:1234
-    # param.cgi). Skipped in demo mode — demo data already carries these.
-    cams = cfg.get("cameras") or []
-    if not DEMO_MODE and cams:
-        ocr_ips, _ = _build_ocr_sets(cfg)
-        targets = [c for c in cams if c.get("ip")]
-        probes = await asyncio.gather(
-            *[_probe_camera_ip(c["ip"], c["ip"] in ocr_ips) for c in targets]
-        )
-        for cam, probe in zip(targets, probes):
-            cam["reachable"] = bool(probe)
-            if not probe:
-                continue
-            for key in ("firmwareVersion", "tvMode", "serialNumber", "model"):
-                if probe.get(key):
-                    cam[key] = probe[key]
     return cfg
 
 
@@ -4641,7 +4876,7 @@ async def api_network():
     return _build_network(config, domains, ports, ntp, local, ntp_peers, dns_resolution, wifi, tls, lmi_log)
 
 
-@app.get("/api/network/local-ping")
+@app.post("/api/network/local-ping")
 async def api_local_ping(count: int = 4):
     count = max(1, min(count, 100))  # clamp 1-100
     timeout = max(20, count * 3)  # ~3s per ping round
@@ -4655,7 +4890,7 @@ async def api_network_health():
     return await run_ps("Get-NetworkHealth.ps1", timeout=10)
 
 
-@app.get("/api/network/capture")
+@app.post("/api/network/capture")
 async def api_network_capture(duration: int = 30):
     duration = max(10, min(duration, 60))
     timeout = duration + 30  # extra headroom for pktmon stop + analysis
@@ -4664,7 +4899,7 @@ async def api_network_capture(duration: int = 30):
     return result
 
 
-@app.get("/api/network/traceroute")
+@app.post("/api/network/traceroute")
 async def api_traceroute(target: str = "pixellot.tv", max_hops: int = 20):
     max_hops = max(5, min(max_hops, 30))
     timeout = max(30, max_hops * 3)  # generous — most finish well under this
@@ -4790,14 +5025,12 @@ async def api_cameras(refresh: bool = False):
     # a camera's draw is not a fast-changing value the way link state is.
     # In-flight dedup means the intervening page polls just reuse the cached
     # payload.
-    nics, pix_config, expectations, net_config, poe = await asyncio.gather(
+    nics, expectations, net_config, poe = await asyncio.gather(
         run_ps("Get-NicAdapters.ps1", cache_ttl=1.5),
-        run_ps("Get-PixellotConfig.ps1"),
         run_ps("Get-CameraExpectations.ps1", timeout=10),
         run_ps("Get-NetworkConfig.ps1", timeout=15),
         run_ps("Get-PoePower.ps1", timeout=20, cache_ttl=6),
     )
-    ocr_ips, _ = _build_ocr_sets(pix_config)
     # Expected main-camera count from the Coordinator log (S1=4/S2=2/S2S=1).
     # Authoritative — drives the main-camera cap and the system-type label.
     expected_main = None
@@ -4812,8 +5045,8 @@ async def api_cameras(refresh: bool = False):
     # Manual refresh blocks until probes complete so the user sees the
     # update immediately.
     raw_ports = nics.get("ports", []) if nics and not nics.get("error") else []
-    probe_results = await _probe_all_cameras(raw_ports, ocr_ips, block=refresh)
-    ports = _enrich_ports(nics, pix_config, probe_results, expected_main_cameras=expected_main)
+    probe_results = await _probe_all_cameras(raw_ports, block=refresh)
+    ports = _enrich_ports(nics, probe_results, expected_main_cameras=expected_main)
     _flag_uplink_ports(ports, net_config)
     # The camera tab renders `body`; the Dashboard's copy of this finding
     # uses `recommendation`. Same record either way.
@@ -4824,7 +5057,6 @@ async def api_cameras(refresh: bool = False):
     ]
     return {
         "ports": ports,
-        "pixellotConfig": pix_config,
         "findings": _tag_readiness(count_findings + _compute_camera_findings(ports, poe)),
         "systemType": system_type,
         "expectedMainCameras": expected_main,
@@ -4832,7 +5064,7 @@ async def api_cameras(refresh: bool = False):
         # panel ("0 of 2 main cameras connected").
         "detectedMainCameras": _count_main_cameras(ports, probe_results),
         "mainCameraPorts": _main_camera_ports(ports),
-        "scoreboardCamera": _scoreboard_camera_state(ports, pix_config),
+        "scoreboardCamera": _scoreboard_camera_state(ports),
         # Whole collector payload, not just the readings — the frontend needs
         # supported/available/reason to tell "this NIC family can't measure
         # power" apart from "the driver isn't installed" apart from "measured,
@@ -5014,14 +5246,10 @@ async def api_cameras_video_test(request: Request):
 
     sys_type = expectations.get("systemType") if isinstance(expectations, dict) else None
 
-    nics, pix_config = await asyncio.gather(
-        run_ps("Get-NicAdapters.ps1"),
-        run_ps("Get-PixellotConfig.ps1"),
-    )
-    ocr_ips, _ = _build_ocr_sets(pix_config)
+    nics = await run_ps("Get-NicAdapters.ps1")
     raw_ports = nics.get("ports", []) if nics and not nics.get("error") else []
-    probe_results = await _probe_all_cameras(raw_ports, ocr_ips, block=False)
-    ports = _enrich_ports(nics, pix_config, probe_results)
+    probe_results = await _probe_all_cameras(raw_ports, block=False)
+    ports = _enrich_ports(nics, probe_results)
 
     # Collect (ip, label) for every detected camera on an up port, plus a
     # per-IP link-health map so we can flag degraded streams on the frames:
@@ -5203,6 +5431,32 @@ async def api_windows_ubr():
     return await run_ps("Get-WindowsUbr.ps1", timeout=10)
 
 
+@app.get("/api/gpu-driver")
+async def api_gpu_driver():
+    """Whether the NVIDIA card is present, has its driver, and shows no Device
+    Manager error. Never cached: after a repair the page re-reads it, and a
+    25 s-old 'no-driver' would say the repair did nothing."""
+    return await run_ps("Get-GpuDriverState.ps1", timeout=30, use_cache=False)
+
+
+@app.post("/api/gpu-driver/repair")
+async def api_gpu_driver_repair(request: Request):
+    """Installs Pixellot's approved NVIDIA driver when the card has no driver
+    or shows an error (see Repair-GpuDriver.ps1). A healthy card is refused
+    unless the body is {"reinstall": true}, which the Hardware tab sends only
+    after the technician confirms a warning. The ~1 GB download plus a clean
+    install can run past 20 minutes, so the timeout is generous and the call
+    blocks, like the disk repair tools. Never cached: a second click must
+    start a real run."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    reinstall = isinstance(body, dict) and body.get("reinstall") is True
+    args = {"Reinstall": 1} if reinstall else None
+    return await run_ps("Repair-GpuDriver.ps1", args=args, timeout=2700, use_cache=False)
+
+
 @app.get("/api/disk-health")
 async def api_disk_health():
     return await run_ps("Get-DiskHealth.ps1")
@@ -5359,22 +5613,21 @@ def _scoreboard_source(sc, ocr) -> dict:
     from the scoreboard controller through ScoreConnect. Only the one in use
     matters (Ian, Armstrong IL 2026-09-28: Pulse warned "ScoreConnect not
     running" on a unit whose OCR camera was connected and doing the job):
-      - OCR configured or detected: fine while the camera is connected,
-        whatever ScoreConnect is doing; an issue when it isn't connected.
-      - no OCR: ScoreConnect (III, or legacy I/II) must be running.
+      - OCR camera connected: fine, whatever ScoreConnect is doing.
+      - no OCR camera seen: ScoreConnect (III, or legacy I/II) must be
+        running. Pulse cannot distinguish an unplugged OCR camera from a
+        venue without one (see _scoreboard_camera_state).
     `ocr` is _scoreboard_camera_state()'s answer; None means no OCR camera
-    is configured or seen. ocrKnown False means the camera read itself
+    is seen. ocrKnown False means the camera read itself
     failed, so the OCR half is unknown and ScoreConnect is judged alone."""
     sc = sc if isinstance(sc, dict) else {}
     sc_running = bool(not sc.get("error") and (
         sc.get("reachable") or (sc.get("sc2") or {}).get("reachable")))
     ocr_known = ocr != "unknown"
     ocr = ocr if isinstance(ocr, dict) else None
-    if ocr and (ocr.get("configured") or ocr.get("connected")):
-        connected = bool(ocr.get("connected"))
-        return {"source": "ocr", "ok": connected,
-                "issue": None if connected else "ocr-not-connected",
-                "ocrConnected": connected, "ocrPort": ocr.get("port"),
+    if ocr and ocr.get("connected"):
+        return {"source": "ocr", "ok": True, "issue": None,
+                "ocrConnected": True, "ocrPort": ocr.get("port"),
                 "scoreConnectRunning": sc_running, "ocrKnown": True}
     return {"source": "scoreconnect", "ok": sc_running,
             "issue": None if sc_running else "scoreconnect-down",
@@ -5386,22 +5639,20 @@ def _scoreboard_source(sc, ocr) -> dict:
 async def api_scoreconnect():
     url = sc3_base_url()
     # 15s timeout — SC III REST probes ~2-4s, SC II file-based probe < 2s.
-    # The camera reads ride along (both cached, and the CGI probe is usually
+    # The camera read rides along (cached, and the CGI probe is usually
     # warm from preload) so the page and the splash know whether an OCR
     # camera makes ScoreConnect optional on this unit.
-    result, nics, pix_config = await asyncio.gather(
+    result, nics = await asyncio.gather(
         _run_sc_status(url, timeout=15),
         run_ps("Get-NicAdapters.ps1"),
-        run_ps("Get-PixellotConfig.ps1"),
     )
     ocr = "unknown"
     try:
         if nics and not nics.get("error"):
-            ocr_ips, _ = _build_ocr_sets(pix_config)
-            # block=False: cached probes (warm from preload) or default-IP /
-            # cameras.cfg identity; never hold the page on a slow camera.
-            probes = await _probe_all_cameras(nics.get("ports", []), ocr_ips, block=False)
-            ocr = _scoreboard_camera_state(_enrich_ports(nics, pix_config, probes), pix_config)
+            # block=False: cached probes (warm from preload) or default-IP
+            # identity; never hold the page on a slow camera.
+            probes = await _probe_all_cameras(nics.get("ports", []), block=False)
+            ocr = _scoreboard_camera_state(_enrich_ports(nics, probes))
     except Exception as e:
         _server_log.warning("ScoreConnect OCR check failed: %s", e)
     if isinstance(result, dict):
@@ -7049,6 +7300,8 @@ async def build_report() -> dict:
         # is what gets sent to a district's IT team, so the raw cert detail
         # matters here even more than in the UI.
         ("tlsInspection",        run_ps("Test-TlsInspection.ps1", timeout=60)),
+        # VPU.exe session history - the only place a crash loop shows.
+        ("vpuRestarts",          run_ps("Get-VpuRestarts.ps1", timeout=20)),
     ]
 
     def _norm(r):
@@ -7061,17 +7314,15 @@ async def build_report() -> dict:
     sections = {k: _norm(r) for k, r in zip(keys, raw)}
 
     nics = sections.get("nicAdapters")
-    pix_cfg = sections.get("pixellotConfig")
 
     # Enriched camera connectivity: physical ports + detected cameras/OCR +
     # live CGI probe (firmware, model) — the Camera Connectivity lane's output,
     # which the raw nicAdapters dump alone doesn't capture.
     cam_probes = None  # None = probes never ran (findings keep ARP-only behavior)
     try:
-        ocr_ips, _ = _build_ocr_sets(pix_cfg)
         raw_ports = nics.get("ports", []) if isinstance(nics, dict) and not nics.get("error") else []
-        cam_probes = await _probe_all_cameras(raw_ports, ocr_ips)
-        sections["cameras"] = _enrich_ports(nics, pix_cfg, cam_probes)
+        cam_probes = await _probe_all_cameras(raw_ports)
+        sections["cameras"] = _enrich_ports(nics, cam_probes)
     except Exception as e:
         sections["cameras"] = {"error": f"camera enrichment failed: {type(e).__name__}: {e}"}
 
@@ -7083,11 +7334,12 @@ async def build_report() -> dict:
             nics, sections.get("hardware"), sections.get("installedSoftware"),
             sections.get("networkConfig"), sections.get("pixellotInstallState"),
             sections.get("networkPorts"), sections.get("gpuInfo"), sections.get("wifi"),
-            pixellot_config=pix_cfg, expectations=sections.get("cameraExpectations"),
+            expectations=sections.get("cameraExpectations"),
             disk_health=sections.get("diskHealth"),
             probe_results=cam_probes,
             tls_inspection=sections.get("tlsInspection"),
             binaries=sections.get("pixellotBinaries"),
+            vpu_restarts=sections.get("vpuRestarts"),
         )
     except Exception as e:
         sections["findings"] = {"error": f"findings computation failed: {type(e).__name__}: {e}"}
@@ -7300,33 +7552,16 @@ def _on_ws_disconnect(ws: WebSocket):
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     """Live-metrics WebSocket. After accept, streams periodic snapshots (CPU /
-    memory / temperature), tails new log-buffer lines, and refreshes Pixellot
-    config on the poll interval from settings (pollIntervalMs, floored at 1s)
-    until the client disconnects."""
+    memory / temperature), enriched camera ports, and new log-buffer lines on
+    the poll interval from settings (pollIntervalMs, floored at 1s) until the
+    client disconnects."""
     await ws.accept()
     _on_ws_connect(ws)
     try:
         settings = load_settings()
         interval = max(settings.get("pollIntervalMs", 3000), 1000) / 1000
         last_log_idx = len(LOG_BUFFER)
-        # Cache pixellot config but refresh periodically so config changes
-        # made during a long session pick up without forcing a reconnect.
-        pix_cfg = await run_ps("Get-PixellotConfig.ps1", timeout=10)
-        ws_ocr_ips, _ = _build_ocr_sets(pix_cfg)
-        pix_cfg_ttl_secs = 120  # refresh every ~2 minutes
-        last_pix_refresh = time.time()
-
         while True:
-            # Periodically refresh pixellot config (cheap — runs in parallel below).
-            if time.time() - last_pix_refresh > pix_cfg_ttl_secs:
-                try:
-                    pix_cfg = await run_ps("Get-PixellotConfig.ps1", timeout=10)
-                    ws_ocr_ips, _ = _build_ocr_sets(pix_cfg)
-                    last_pix_refresh = time.time()
-                except Exception as e:
-                    ps_log("ws-refresh", 0, "warn", f"pix_cfg refresh failed: {e}")
-                    _server_log.warning(f"pix_cfg refresh failed: {e}")
-
             perf, nics, net_health = await asyncio.gather(
                 run_ps("Get-Performance.ps1", timeout=10),
                 run_ps("Get-NicAdapters.ps1", timeout=10),
@@ -7334,7 +7569,7 @@ async def ws_endpoint(ws: WebSocket):
             )
             # CGI probes use 30s cache — no extra network cost on each tick
             ws_raw = nics.get("ports", []) if nics and not nics.get("error") else []
-            ws_probes = await _probe_all_cameras(ws_raw, ws_ocr_ips)
+            ws_probes = await _probe_all_cameras(ws_raw)
             all_logs = list(LOG_BUFFER)
             new_logs = all_logs[last_log_idx:]
             last_log_idx = len(all_logs)
@@ -7343,7 +7578,7 @@ async def ws_endpoint(ws: WebSocket):
                 {
                     "type": "metrics",
                     "performance": perf,
-                    "ports": _enrich_ports(nics, pix_cfg, ws_probes),
+                    "ports": _enrich_ports(nics, ws_probes),
                     "networkHealth": net_health,
                     "logs": new_logs,
                     # Seconds until the LMI auto-close fires, or None when no

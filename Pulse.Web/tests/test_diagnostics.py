@@ -192,6 +192,42 @@ class TestConcerningSoftware(unittest.TestCase):
         self.assertEqual(
             sum(len(v) for v in main._detect_concerning_software({"error": True}).values()), 0)
 
+    def test_crowdstrike_windows_sensor_is_critical_security(self):
+        # The name Windows lists it under (publisher "CrowdStrike, Inc.").
+        sw = {"software": [{"displayName": "CrowdStrike Windows Sensor",
+                            "publisher": "CrowdStrike, Inc.", "displayVersion": "7.40.21309.0"}]}
+        self.assertEqual(len(main._detect_concerning_software(sw)["security"]), 1)
+        concern = main._enrich_software_with_concerns(sw)["software"][0]["concern"]
+        self.assertEqual((concern["category"], concern["severity"]), ("security", "critical"))
+
+    def test_datto_edr_is_unsupported_security(self):
+        out = main._detect_concerning_software(self._sw("Datto EDR Agent"))
+        self.assertEqual(len(out["security"]), 1)
+        findings = main._compute_findings(
+            identity=None, performance=None, services=None, nics=None,
+            installed_sw=self._sw("Datto EDR Agent"))
+        sec = [f for f in findings if f["code"] == "sw-security"]
+        self.assertEqual([f["severity"] for f in sec], ["critical"])
+
+    def test_datto_rmm_is_alt_remote_warning(self):
+        out = main._detect_concerning_software(self._sw("Datto RMM"))
+        self.assertEqual(len(out["alt_remote"]), 1)
+        self.assertEqual(len(out["security"]), 0)
+        enriched = main._enrich_software_with_concerns(self._sw("Datto RMM"))
+        self.assertEqual(enriched["software"][0]["concern"]["severity"], "warning")
+
+    def test_chrome_webapp_shortcuts_are_not_risks(self):
+        sw = {"software": [
+            {"displayName": "Google Drive", "publisher": "Google\\Chrome"},
+            {"displayName": "Gmail", "publisher": "Google\\Chrome"}]}
+        self.assertEqual(sum(len(v) for v in main._detect_concerning_software(sw).values()), 0)
+        enriched = main._enrich_software_with_concerns(sw)
+        self.assertTrue(all("concern" not in s for s in enriched["software"]))
+
+    def test_real_google_drive_client_is_still_a_risk(self):
+        sw = {"software": [{"displayName": "Google Drive", "publisher": "Google LLC"}]}
+        self.assertEqual(len(main._detect_concerning_software(sw)["consumer_sync"]), 1)
+
 
 # ── _compute_findings integration (the high-churn function) ──
 class TestComputeFindings(unittest.TestCase):
@@ -236,7 +272,7 @@ class TestComputeFindings(unittest.TestCase):
                       "gpus": [{"vendor": "Intel", "isDedicated": False}]},
             gpu_info=_gpu("Turing"),
         )
-        self.assertIn("No dedicated graphics card, so this is the wrong hardware for a VPU", titles)
+        self.assertIn("No dedicated graphics card", titles)
 
     def test_findings_have_required_shape(self):
         # Every finding must carry severity + title so the dashboard can render it.
@@ -314,6 +350,85 @@ class TestComputeFindings(unittest.TestCase):
             nics=nics, probe_results=self._ocr_probe(),
         )
         self.assertTrue(any("running slow" in t for t in titles), titles)
+
+    def test_slow_onboard_port_is_not_flagged_but_a_slow_camera_port_is(self):
+        # The NIC collector matches adapters by chipset, so the onboard
+        # motherboard port (PCI bus 0) can sit in `ports` beside the camera
+        # card's ports. A slow onboard link is the venue uplink's business,
+        # not a camera fault; a slow camera-card port still flags.
+        nics = {"ports": [
+            {"name": "Ethernet 29", "status": "Up", "linkSpeedMbps": 100,
+             "mac": "00:30:64:5F:61:87",
+             "arpEntries": [{"ip": "169.254.16.50", "mac": "00:D0:89:18:CE:E8"}]},
+            {"name": "Ethernet 5", "status": "Up", "linkSpeedMbps": 100,
+             "mac": "C8:D9:D2:30:5E:4F", "arpEntries": []},
+        ]}
+        network_config = {"adapters": [
+            {"name": "Ethernet 5", "interfaceDescription": "Intel(R) Ethernet Connection (7) I219-LM",
+             "status": "Up", "physicalMediaType": "802.3", "macAddress": "C8-D9-D2-30-5E-4F", "pciBus": 0},
+            {"name": "Ethernet 29", "interfaceDescription": "Intel(R) 82574L Gigabit Network Connection #14",
+             "status": "Up", "physicalMediaType": "802.3", "macAddress": "00-30-64-5F-61-87", "pciBus": 5},
+        ]}
+        titles = self._titles(
+            identity=_identity("5.2.0"), performance={}, services={},
+            nics=nics, network_config=network_config,
+        )
+        slow = [t for t in titles if "running slow" in t]
+        self.assertEqual(len(slow), 1, slow)
+        self.assertIn("port 1", slow[0])          # the camera port, by MAC order
+
+    def test_slow_onboard_port_still_flagged_when_adapter_roles_unknown(self):
+        # No network_config means nothing can be told apart: behavior as before.
+        nics = {"ports": [
+            {"name": "Ethernet 5", "status": "Up", "linkSpeedMbps": 100,
+             "mac": "C8:D9:D2:30:5E:4F", "arpEntries": []},
+        ]}
+        titles = self._titles(
+            identity=_identity("5.2.0"), performance={}, services={}, nics=nics,
+        )
+        self.assertTrue(any("running slow" in t for t in titles), titles)
+
+
+# ── Streaming chain: the four outcomes and their titles (PV-50) ──
+class TestStreamFindingTitles(unittest.TestCase):
+    def _chain(self, main_ok, backup_ok, rtmp_ok):
+        def rung(purpose, ok, port, proto):
+            return {"purpose": purpose, "status": "pass" if ok else "fail",
+                    "host": "prod-echo.pixellot.tv", "port": port, "protocol": proto}
+        return {"results": [
+            rung("Zixi Streaming", main_ok, 2088, "udp"),
+            rung("Zixi Backup", backup_ok, 443, "udp"),
+            rung(main._RTMP_FALLBACK_PURPOSE, rtmp_ok, 1935, "tcp"),
+        ]}
+
+    def _one(self, **kw):
+        found = main._stream_findings(self._chain(**kw))
+        self.assertEqual(len(found), 1, found)
+        return found[0]
+
+    def test_every_connection_blocked(self):
+        f = self._one(main_ok=False, backup_ok=False, rtmp_ok=False)
+        self.assertEqual((f["code"], f["title"]),
+                         ("stream-blocked", "Streaming is blocked by the venue's network"))
+
+    def test_only_the_last_resort_is_open(self):
+        f = self._one(main_ok=False, backup_ok=False, rtmp_ok=True)
+        self.assertEqual((f["code"], f["title"]),
+                         ("stream-degraded-rtmp", "Streaming is using its last-resort connection (1935 TCP)"))
+
+    def test_on_the_backup_connection(self):
+        f = self._one(main_ok=False, backup_ok=True, rtmp_ok=True)
+        self.assertEqual((f["code"], f["title"]),
+                         ("stream-resiliency-reduced", "Streaming is using its backup connection (443 UDP)"))
+
+    def test_main_connection_fine_but_the_backup_is_blocked(self):
+        # Streaming on the main connection, so it is NOT "using the backup".
+        f = self._one(main_ok=True, backup_ok=False, rtmp_ok=True)
+        self.assertEqual((f["code"], f["title"]),
+                         ("stream-resiliency-reduced", "Streaming backup connection is blocked"))
+
+    def test_everything_open_raises_nothing(self):
+        self.assertEqual(main._stream_findings(self._chain(True, True, True)), [])
 
 
 # ── Missing-main-cameras finding: probe-aware + cold-start grace ──
@@ -563,6 +678,32 @@ class TestStorageFinding(unittest.TestCase):
 
 
 # ── run_ps stdout JSON recovery (the resilience fix) ─────────
+class TestSmartErrorTiers(TestStorageFinding):
+    """A few uncorrected errors on a Healthy drive is "Fix soon", not critical."""
+
+    def _smart(self, errors, health="Healthy", predict=False):
+        dh = {"logicalDisks": [], "predictFailure": predict, "physicalDisks": [
+            {"friendlyName": "TOSHIBA DT01ACA100", "healthStatus": health,
+             "smart": {"readErrorsUncorrected": errors, "writeErrorsUncorrected": 0}}]}
+        return {f["code"]: f for f in self._storage(dh) if f.get("code", "").startswith("disk-smart")}
+
+    def test_few_errors_is_fix_soon(self):
+        got = self._smart(8)
+        self.assertEqual(set(got), {"disk-smart-errors"})
+        self.assertEqual(got["disk-smart-errors"]["severity"], "warning")
+        self.assertEqual(main._readiness_class("disk-smart-errors"), "info")
+
+    def test_no_errors_is_quiet(self):
+        self.assertEqual(self._smart(0), {})
+
+    def test_many_errors_is_critical(self):
+        self.assertEqual(set(self._smart(main.SMART_ERRORS_CRITICAL)), {"disk-smart-prefail"})
+
+    def test_unhealthy_or_prefail_flag_is_critical(self):
+        self.assertEqual(set(self._smart(0, health="Unhealthy")), {"disk-smart-prefail"})
+        self.assertEqual(set(self._smart(8, predict=True)), {"disk-smart-prefail"})
+
+
 class TestExtractJson(unittest.TestCase):
     def test_clean_json(self):
         self.assertEqual(powershell._extract_json('{"a": 1}'), {"a": 1})
@@ -1063,6 +1204,40 @@ class TestReadinessPolicy(unittest.TestCase):
         )
         self.assertEqual(verdict["status"], "PASS")
 
+    def test_reclassified_findings_gate_readiness(self):
+        """Ian, 2026-10-15: an interrupted update or too little RAM fails the
+        unit; a worn SSD, concerning software and a SSL-inspected support
+        service warn. alt-remote and the other support-plane notes stay info."""
+        for code in ("install-incomplete", "ram-insufficient"):
+            self.assertEqual(main._readiness_class(code), "blocker", code)
+        for code in ("disk-smart-wear", "sw-security", "sw-crypto-miner", "sw-torrent",
+                     "sw-system-cleaner", "sw-game-platform", "sw-consumer-sync",
+                     "ssl-inspection-support"):
+            self.assertEqual(main._readiness_class(code), "risk", code)
+        for code in ("sw-alt-remote", "tls-filtered-support", "lmi-ssl-blocked"):
+            self.assertEqual(main._readiness_class(code), "info", code)
+
+        def verdict(code):
+            return main._compute_readiness(
+                [{"code": code, "severity": "warning", "category": "Hardware",
+                  "title": "t", "recommendation": "r"}])["status"]
+        self.assertEqual(verdict("ram-insufficient"), "FAIL")
+        self.assertEqual(verdict("install-incomplete"), "FAIL")
+        self.assertEqual(verdict("sw-torrent"), "WARN")
+        self.assertEqual(verdict("sw-alt-remote"), "PASS")
+
+    def test_system_drive_title_names_the_threshold(self):
+        # The title is built from the same constant as the check, so they
+        # cannot drift apart. "Over 90%" means more than 90.
+        pct = main.READINESS_DISK_FULL_PCT
+        full = main._compute_readiness(
+            [], disk_health={"logicalDisks": [{"deviceID": "C:", "usedPercent": pct + 2}]})
+        self.assertEqual([b["title"] for b in full["blockers"]],
+                         [f"System drive (C:) is over {pct}% full"])
+        edge = main._compute_readiness(
+            [], disk_health={"logicalDisks": [{"deviceID": "C:", "usedPercent": pct}]})
+        self.assertEqual(edge["blockers"], [])
+
     def test_every_critical_finding_code_is_classified(self):
         # `info` is the default for UNKNOWN codes, which is right for new or
         # unverifiable checks — but a code we ship as `critical` reaching that
@@ -1078,6 +1253,239 @@ class TestReadinessPolicy(unittest.TestCase):
             f"default to `info` and never gate readiness): {unclassified}",
         )
 
+
+
+# ── NVIDIA driver too old ─────────────────────────────────────────────
+class TestNvidiaDriverFloor(unittest.TestCase):
+    """Tecumseh (MI), 2026-09-28, Pixellot 5.37.2: driver 446.14 made VPU.exe
+    die on its first frame (cudaErrorInvalidPtx) every minute. Cameras,
+    processes and GPU all looked fine and Pulse read Game-ready."""
+
+    def _findings(self, driver, vendor="NVIDIA"):
+        return main._compute_findings(
+            identity=_identity("5.37.2"), performance={}, services={}, nics={},
+            hardware={"memory": [{"capacityGB": 16}, {"capacityGB": 16}],
+                      "gpus": [{"name": "Intel(R) UHD Graphics 630", "vendor": "Intel",
+                                "isDedicated": False, "driverVersion": "27.20.100.8190"},
+                               {"name": "NVIDIA GeForce GTX 1650", "vendor": vendor,
+                                "isDedicated": True, "driverVersion": driver}]},
+            gpu_info=_gpu("Turing"),
+        )
+
+    def _old(self, driver, vendor="NVIDIA"):
+        return [f for f in self._findings(driver, vendor) if f["code"] == "gpu-driver-old"]
+
+    def test_release_decoded_from_windows_version(self):
+        self.assertEqual(main._nvidia_driver_release("26.21.14.4614"), (446, 14))
+        self.assertEqual(main._nvidia_driver_release("31.0.15.1694"), (516, 94))
+        self.assertEqual(main._nvidia_driver_release("31.0.15.3667"), (536, 67))
+        self.assertEqual(main._nvidia_driver_release("32.0.15.6094"), (560, 94))
+        self.assertIsNone(main._nvidia_driver_release(None))
+        self.assertIsNone(main._nvidia_driver_release("536.67"))
+
+    def test_tecumseh_driver_flagged(self):
+        found = self._old("26.21.14.4614")
+        self.assertEqual(len(found), 1)
+        self.assertIn("446.14", found[0]["recommendation"])
+        self.assertIn("536.67", found[0]["recommendation"])
+
+    def test_madison_driver_flagged(self):
+        self.assertEqual(len(self._old("31.0.15.1694")), 1)
+
+    def test_repair_bundle_driver_and_newer_pass(self):
+        self.assertEqual(self._old("31.0.15.3667"), [])
+        self.assertEqual(self._old("32.0.15.6094"), [])
+
+    def test_unreadable_version_is_not_flagged(self):
+        self.assertEqual(self._old(None), [])
+        self.assertEqual(self._old(""), [])
+
+    def test_amd_card_not_checked(self):
+        self.assertEqual(self._old("26.21.14.4614", vendor="AMD"), [])
+
+    def test_old_driver_fails_readiness(self):
+        verdict = main._compute_readiness(self._old("26.21.14.4614"))
+        self.assertEqual(verdict["status"], "FAIL")
+
+    def test_missing_gpu_uses_code_not_display_title(self):
+        found = main._compute_findings(
+            _identity("5.37.2"), {}, {}, {}, gpu_info=_gpu("None"),
+            hardware={"gpus": [{"vendor": "Intel", "isDedicated": False}]})
+        codes = [f["code"] for f in found]
+        self.assertIn("gpu-none", codes)
+        self.assertNotIn("gpu-igpu-only", codes)
+
+
+# ── VPU.exe restart loop ──────────────────────────────────────────────
+def _sess(ago, fatal=None, goodbye=False, ended=True, first_frame=True,
+          reason=None, tags=(), driver="446.14", version="5.37.2"):
+    return {"start": "", "startedMinutesAgo": ago, "version": version, "driver": driver,
+            "firstFrame": first_frame, "goodbye": goodbye, "ended": ended,
+            "fatal": fatal, "fatalCount": 1 if fatal else 0,
+            "closeReason": reason, "tags": list(tags)}
+
+
+_PTX = ("Fatal\t| 2026-09-28 08:18:15.065 |CUDA\t|ColorConversions.cu(474)\t|yuvNV12ToBGR\t|"
+        "CUDA function call failed for 'cudaGetLastError()', Error details: {code: 218, "
+        "name: 'cudaErrorInvalidPtx', desc: 'a PTX JIT compilation failed'}")
+_NVML = ("Fatal\t| 2026-09-25 16:12:20.100 |Main\t|main.cpp(123)\t|main\t|Exception while "
+         "querying installed NVIDIA driver: Unable to initialize NVML: error code 6")
+_FAILED_INIT = "Attempt to initialize vpu has failed valid health not present, closing the application to try again"
+
+
+class TestVpuRestartLoop(unittest.TestCase):
+    """Patterns from the field log bundles (Aug-Sep 2026). Tecumseh (MI),
+    2026-09-28: VPU.exe died on every start and Pulse read Game-ready,
+    because a process snapshot always caught a fresh copy running."""
+
+    def _find(self, sessions, running=False, age=None):
+        return main._vpu_restart_findings(
+            {"sessions": sessions, "vpuRunning": running, "vpuStartedMinutesAgo": age})
+
+    def _tecumseh(self):
+        # Crash on first frame, then the agent's failed restart, repeating.
+        return [_sess(12, fatal=_PTX), _sess(11, first_frame=False, reason=_FAILED_INIT),
+                _sess(10, fatal=_PTX), _sess(9, first_frame=False, reason=_FAILED_INIT)]
+
+    def test_tecumseh_loop_is_a_blocker(self):
+        found = self._find(self._tecumseh())
+        self.assertEqual([f["code"] for f in found], ["vpu-restart-loop"])
+        self.assertEqual(found[0]["cause"], "driver-too-old")
+        self.assertIn("536.67", found[0]["recommendation"])
+        self.assertIn("cudaErrorInvalidPtx", found[0]["evidence"])
+        self.assertEqual(main._compute_readiness(found)["status"], "FAIL")
+
+    def test_fresh_driver_running_with_frames_is_recent_not_loop(self):
+        # 10:56, a minute after installing 536.67: running, frames, new driver.
+        sessions = self._tecumseh() + [_sess(1, ended=False, driver="536.67")]
+        found = self._find(sessions, running=True, age=1)
+        self.assertEqual([f["code"] for f in found], ["vpu-restarts-recent"])
+        self.assertEqual(main._compute_readiness(found)["status"], "WARN")
+
+    def test_same_driver_young_run_is_still_a_loop(self):
+        # Nothing changed and the new copy is 1 minute old: not proven.
+        sessions = self._tecumseh() + [_sess(1, ended=False)]
+        found = self._find(sessions, running=True, age=1)
+        self.assertEqual([f["code"] for f in found], ["vpu-restart-loop"])
+
+    def test_clean_run_after_crashes_is_recent(self):
+        sessions = self._tecumseh() + [_sess(5, goodbye=True, driver="536.67",
+                                             reason="AgentGui: stop recorder in manual mode was pressed")]
+        self.assertEqual([f["code"] for f in self._find(sessions)], ["vpu-restarts-recent"])
+
+    def test_manual_stop_without_frames_does_not_count_as_recovery(self):
+        # Tecumseh 10:50: a tech stopped it before the driver was fixed.
+        sessions = self._tecumseh() + [_sess(5, goodbye=True, first_frame=False,
+                                             reason="AgentGui: stop recorder in manual mode was pressed")]
+        self.assertEqual([f["code"] for f in self._find(sessions)], ["vpu-restart-loop"])
+
+    def test_gpu_not_found(self):
+        found = self._find([_sess(a, fatal=_NVML, first_frame=False, driver=None) for a in (5, 4, 3, 2)])
+        self.assertEqual(found[0]["cause"], "gpu-not-found")
+
+    def test_operator_restarts_are_not_crashes(self):
+        # 6385db60 08-21: restart-button clicks while troubleshooting.
+        sessions = [_sess(a, goodbye=True, reason="AgnetGui: restart VPU button was clicked")
+                    for a in (20, 15, 10, 5)]
+        sessions[1].update(goodbye=False)
+        self.assertEqual(self._find(sessions), [])
+
+    def test_idle_close_is_not_a_crash(self):
+        sessions = [_sess(a, reason="Watchdog - As not in event, close App") for a in (50, 30, 10)]
+        self.assertEqual(self._find(sessions), [])
+
+    def test_two_crashes_is_not_a_loop(self):
+        self.assertEqual(self._find(self._tecumseh()[:2]), [])
+
+    def test_old_crashes_age_out(self):
+        sessions = [_sess(a, fatal=_PTX) for a in (90, 80, 70)]
+        self.assertEqual(self._find(sessions), [])
+
+    def test_silent_kills_are_unknown(self):
+        found = self._find([_sess(a) for a in (20, 15, 10)])
+        self.assertEqual(found[0]["cause"], "unknown")
+
+    def test_camera_data_path_beats_pipeline_stall(self):
+        found = self._find([_sess(a, tags=("debayer-stall", "camera-datapath")) for a in (20, 15, 10)])
+        self.assertEqual(found[0]["cause"], "camera-stream")
+        found = self._find([_sess(a, tags=("debayer-stall",)) for a in (20, 15, 10)])
+        self.assertEqual(found[0]["cause"], "pipeline-stall")
+
+    def test_collector_error_is_silent(self):
+        self.assertEqual(main._vpu_restart_findings({"error": True, "message": "x"}), [])
+        self.assertEqual(main._vpu_restart_findings(None), [])
+
+    def test_demo_payload_is_healthy(self):
+        import demo_data
+        self.assertEqual(main._vpu_restart_findings(demo_data.DEMO["Get-VpuRestarts.ps1"]()), [])
+
+
+    def test_same_driver_stable_run_is_recent(self):
+        sessions = [_sess(a, fatal=_PTX) for a in (30, 25, 20)] + [_sess(10, ended=False)]
+        self.assertEqual(self._find(sessions, running=True, age=10)[0]["code"], "vpu-restarts-recent")
+
+    def test_running_session_with_fatal_is_not_recovered(self):
+        sessions = self._tecumseh() + [_sess(1, fatal=_PTX, ended=False, driver="536.67")]
+        self.assertEqual(self._find(sessions, running=True, age=1)[0]["code"], "vpu-restart-loop")
+
+    def test_missing_driver_metadata_is_not_proof_of_fix(self):
+        sessions = self._tecumseh() + [_sess(1, ended=False, driver=None)]
+        self.assertEqual(self._find(sessions, running=True, age=1)[0]["code"], "vpu-restart-loop")
+
+    def test_each_remaining_field_cause(self):
+        for fatal, cause in (("cudaErrorLaunchFailure", "gpu-crashed"),
+                             ("Insufficient memory", "out-of-memory"),
+                             ("Unable to allocate", "out-of-memory"),
+                             ("Can't connect to camera", "camera-connect")):
+            with self.subTest(cause=cause, fatal=fatal):
+                self.assertEqual(self._find([_sess(a, fatal=fatal) for a in (5, 4, 3)])[0]["cause"], cause)
+
+    def test_cause_counts_sessions_and_breaks_ties_in_table_order(self):
+        sessions = [_sess(5, fatal=_PTX), _sess(4, fatal=_NVML), _sess(3, fatal=_NVML)]
+        self.assertEqual(self._find(sessions)[0]["cause"], "gpu-not-found")
+        self.assertEqual(self._find(sessions + [_sess(2, fatal=_PTX)])[0]["cause"], "driver-too-old")
+
+    def test_dashboard_exposes_failed_history_collector(self):
+        dash = main._build_dashboard({}, {}, {}, {}, vpu_restarts={"error": True, "message": "timeout"})
+        self.assertIn("VPU software crash history", dash["sourceErrors"])
+        self.assertFalse([f for f in dash["findings"] if f["code"].startswith("vpu-restart")])
+
+
+class TestVpuRestartIntegration(unittest.IsolatedAsyncioTestCase):
+    async def test_dashboard_monitor_and_telemetry_share_the_finding(self):
+        from unittest.mock import AsyncMock, patch
+        from pulse_agent.engine import engine
+        from pulse_agent import monitor, telemetry
+
+        restarts = {"sessions": [_sess(a, fatal=_PTX) for a in (5, 4, 3)]}
+
+        async def collect(name, *args, **kwargs):
+            return restarts if name == "Get-VpuRestarts.ps1" else {}
+
+        with patch.object(main, "run_ps", side_effect=collect) as run, \
+                patch.object(main, "_probe_all_cameras", AsyncMock(return_value={})):
+            # The scheduled monitor calls this same engine entry point, even
+            # when intrusive port probes are skipped during a live game.
+            for skip in (False, True):
+                dash = await engine._collect_dashboard(skip_intrusive=skip, raw_out={})
+                self.assertIn("vpu-restart-loop", monitor.codes_from_verdict(dash["readiness"]))
+                details = telemetry._build_telemetry(dash, {})
+                self.assertIn("The VPU software keeps crashing", " ".join(details["blockers"]))
+            self.assertEqual(sum(c.args[0] == "Get-VpuRestarts.ps1" for c in run.call_args_list), 2)
+
+    async def test_report_contains_history_and_same_findings(self):
+        from unittest.mock import AsyncMock, patch
+        restarts = {"sessions": [_sess(a, fatal=_PTX) for a in (5, 4, 3)]}
+
+        async def collect(name, *args, **kwargs):
+            return restarts if name == "Get-VpuRestarts.ps1" else {}
+
+        with patch.object(main, "run_ps", side_effect=collect), \
+                patch.object(main, "_run_sc_status", AsyncMock(return_value={})), \
+                patch.object(main, "_probe_all_cameras", AsyncMock(return_value={})):
+            report = await main.build_report()
+        self.assertEqual(report["vpuRestarts"], restarts)
+        self.assertIn("vpu-restart-loop", [f["code"] for f in report["findings"]])
 
 
 # ── Zero cameras must never read PASS ─────────────────────────────────
@@ -1161,10 +1569,20 @@ class TestNoCamerasNeverPasses(unittest.TestCase):
 
     def test_camera_tab_carries_the_same_finding(self):
         nics, cfg = self._north_east()
-        ports = main._enrich_ports(nics, None, {})
+        ports = main._enrich_ports(nics, {})
         main._flag_uplink_ports(ports, cfg)
         f = main._camera_count_findings(ports, 2, {}, True)
         self.assertEqual([x["code"] for x in f], ["cam-none"])
+
+    def test_custom_address_ocr_is_not_counted_as_a_main_camera(self):
+        port = self._port("Camera NIC", "00:30:64:5F:61:86", True)
+        port["arpEntries"] = [{"ip": "192.168.5.20", "mac": "00-D0-89-1E-89-08"}]
+        probes = {"00:D0:89:1E:89:08": {"mac": "00:D0:89:1E:89:08",
+                  "ip": "192.168.5.20", "modelNumber": "E8NC-G", "is_ocr": False}}
+        findings = self._findings({"ports": [port]}, expected=1, probes=probes)
+        cameras = [f for f in findings if f["code"].startswith("cam-")]
+        self.assertEqual([f["code"] for f in cameras], ["cam-none"])
+        self.assertIn("scoreboard camera", " ".join(cameras[0]["details"]))
 
 
 class TestMainCameraCount(unittest.TestCase):
@@ -1204,13 +1622,14 @@ class TestMainCameraCount(unittest.TestCase):
             {"port": "Port 2", "speedMbps": 100, "cameras": 1, "slow": True},
         ])
 
-    def test_scoreboard_state_only_when_configured_or_present(self):
-        self.assertIsNone(main._scoreboard_camera_state([self._port([])], {"cameras": []}))
+    def test_scoreboard_state_only_when_detected_on_a_live_camera_port(self):
+        self.assertIsNone(main._scoreboard_camera_state([self._port([])]))
         live = {"isUp": True, "isOcr": True, "portLabel": "Port 3", "linkSpeedMbps": 100}
-        st = main._scoreboard_camera_state([live], None)
-        self.assertEqual((st["connected"], st["port"], st["speedMbps"]), (True, "Port 3", 100))
-        st = main._scoreboard_camera_state([], {"cameras": [{"role": "OCR"}]})
-        self.assertEqual((st["configured"], st["connected"]), (True, False))
+        self.assertEqual(main._scoreboard_camera_state([live]),
+                         {"connected": True, "port": "Port 3", "speedMbps": 100})
+        self.assertIsNone(main._scoreboard_camera_state([]))
+        self.assertIsNone(main._scoreboard_camera_state([dict(live, isUp=False)]))
+        self.assertIsNone(main._scoreboard_camera_state([dict(live, hasInternetUplink=True)]))
 
 # ── LogMeIn service-log evidence (Get-LmiGatewayLog) ─────────────────
 # Fixture numbers are the real field log (2026-08-28): a VPU dark in LMI all
@@ -1419,7 +1838,7 @@ class TestSupportOnlyTlsFindings(unittest.TestCase):
         codes = [f["code"] for f in self._findings(tls)]
         self.assertIn("ssl-inspection-support", codes)
         self.assertNotIn("ssl-inspection", codes)
-        self.assertEqual(main._readiness_class("ssl-inspection-support"), "info")
+        self.assertEqual(main._readiness_class("ssl-inspection-support"), "risk")
 
     def test_broadcast_interception_still_blocks(self):
         tls = self._tls([self._row("api.singular.live", "intercepted"),
@@ -1456,23 +1875,18 @@ class TestSupportOnlyTlsFindings(unittest.TestCase):
 class TestScoreboardSource(unittest.TestCase):
     SC_DOWN = {"reachable": False, "sc2": {"reachable": False}}
     SC_UP = {"reachable": True}
-    OCR_UP = {"configured": True, "connected": True, "port": "Port 3"}
-    OCR_DOWN = {"configured": True, "connected": False, "port": None}
+    OCR_UP = {"connected": True, "port": "Port 3"}
 
     def test_ocr_connected_makes_scoreconnect_optional(self):
         r = main._scoreboard_source(self.SC_DOWN, self.OCR_UP)
         self.assertEqual((r["source"], r["ok"], r["issue"]), ("ocr", True, None))
         self.assertEqual(r["ocrPort"], "Port 3")
 
-    def test_ocr_detected_without_config_counts(self):
-        r = main._scoreboard_source(self.SC_DOWN, {"configured": False, "connected": True, "port": "Port 2"})
-        self.assertTrue(r["ok"])
-
-    def test_ocr_configured_but_disconnected_is_an_issue(self):
-        # Even with ScoreConnect running: the unit is set up to read the
-        # score with the camera.
-        r = main._scoreboard_source(self.SC_UP, self.OCR_DOWN)
-        self.assertEqual((r["source"], r["ok"], r["issue"]), ("ocr", False, "ocr-not-connected"))
+    def test_no_detection_cannot_infer_a_disconnected_ocr_camera(self):
+        # With no reliable expectation, a missing OCR camera and a venue
+        # without one both fall back to ScoreConnect.
+        r = main._scoreboard_source(self.SC_UP, None)
+        self.assertEqual((r["source"], r["ok"], r["issue"]), ("scoreconnect", True, None))
 
     def test_no_ocr_needs_scoreconnect(self):
         r = main._scoreboard_source(self.SC_DOWN, None)
@@ -1648,6 +2062,7 @@ _CRITICAL_FINDING_CODES = {
     "disk-critical",
     "disk-smart-prefail",
     "gpu-anomaly",
+    "gpu-driver-old",
     "gpu-none",
     "mem-critical",
     "os-eos-imminent",
@@ -1664,6 +2079,7 @@ _CRITICAL_FINDING_CODES = {
     "graphics-handoff-failed",
     "pixellot-dll-missing",
     "pixellot-start-error",
+    "vpu-restart-loop",
     # port-dns-blocked / port-required-blocked share one emit site.
     "port-dns-blocked",
     "port-required-blocked",
