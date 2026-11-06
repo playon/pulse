@@ -22,6 +22,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Readiness now blocks NVIDIA drivers older than 536.67 (`gpu-driver-old`) and repeated VPU software crashes (`vpu-restart-loop`); a proven clean run after recent crashes stays a risk (`vpu-restarts-recent`). The monitor reads the same recent VPU log sessions as Diagnostics. No telemetry fields changed.
 - A launch check-in the Worker can't take is no longer also posted to the old Google Apps Script sheet. It stays queued on the unit and replays when the Worker is reachable (30 days, 200 entries). A unit whose network blocks `workers.dev` now shows in Vitals only once it can reach it. Nothing about the check-in's fields changed. The Worker still accepts the relay header from builds that have the sheet fallback.
 
+### Fixed
+- PV-84: CEFWorker DLL-init popups during a confirmed VPU shutdown no longer mark the unit as failing to start. The popups remain in support evidence; uncorrelated errors, a new launch, missing files and a stuck VPU still block readiness.
+
 ## [0.2.2] - 2026-10-21
 
 The first published agent: the zip fleet control can pin, with its SHA-256.

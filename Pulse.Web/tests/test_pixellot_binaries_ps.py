@@ -62,5 +62,40 @@ class UserPathDirs(unittest.TestCase):
         self.assertEqual(self.run_ps("", {}), [])
 
 
+@unittest.skipUnless(PWSH, "PowerShell isn't installed")
+class PopupOccurrences(unittest.TestCase):
+    def test_group_preserves_each_occurrence_and_title(self):
+        import tempfile
+        with open(SCRIPT, encoding="ascii") as fh:
+            source = fh.read()
+        block = source.split("    # -- Loader error dialogs", 1)[1].split("\n", 1)[1].split(
+            "    # -- Is the running VPU.exe", 1)[0]
+        # Run the real grouping block; only Windows' event source is replaced.
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ("CEFWorker.exe", "VPU.exe"):
+                open(os.path.join(tmp, name), "wb").close()
+            escaped = tmp.replace("'", "''")
+            code = f"$PIX_BIN = '{escaped}'; $DaysBack = 7\n" + (
+                "$TS = 'yyyy-MM-ddTHH:mm:sszzz'; $INV = [Globalization.CultureInfo]::InvariantCulture\n"
+                "function Get-WinEvent {\n"
+                "foreach ($second in @(4, 8)) { [pscustomobject]@{\n"
+                "Message = 'Application popup: CEFWorker.exe - Application Error: The application was unable to start correctly (0xc0000142).';\n"
+                "TimeCreated = (Get-Date).Date.AddHours(11).AddSeconds($second) } }\n"
+                "[pscustomobject]@{ Message = 'Application popup: VPU.exe - System Error: libcef.dll was not found'; TimeCreated = (Get-Date) }\n"
+                "}\n") + block + "\nConvertTo-Json -InputObject $popupsOut -Depth 5 -Compress\n"
+            run = subprocess.run([PWSH, "-NoProfile", "-NonInteractive", "-Command", code],
+                                 capture_output=True, text=True, timeout=60)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        popups = json.loads(run.stdout)
+        cef = next(p for p in popups if p["exe"] == "CEFWorker.exe")
+        self.assertEqual(cef["count"], 2)
+        self.assertEqual(len(cef["times"]), 2)
+        self.assertNotEqual(cef["times"][0], cef["times"][1])
+        self.assertEqual(cef["title"], "Application Error")
+        vpu = next(p for p in popups if p["exe"] == "VPU.exe")
+        self.assertEqual(vpu["title"], "System Error")
+        self.assertEqual(vpu["dll"], "libcef.dll")
+
+
 if __name__ == "__main__":
     unittest.main()
