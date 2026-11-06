@@ -92,24 +92,13 @@ class TestCheckinQueue(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.state_path = os.path.join(self._tmp.name, "pulse-checkin-queue.json")
         self._saved = (main.DEMO_MODE, agent_checkin._CHECKIN_STATE_PATH, agent_checkin._build_checkin_entry,
-                       agent_checkin._checkin_configured, agent_checkin._checkin_now, agent_checkin._post_fallback_sync,
-                       os.environ.get("PULSE_CHECKIN_URL"),
-                       os.environ.get("PULSE_CHECKIN_FALLBACK_URL"))
+                       agent_checkin._checkin_configured, agent_checkin._checkin_now,
+                       os.environ.get("PULSE_CHECKIN_URL"))
         main.DEMO_MODE = False
         agent_checkin._CHECKIN_STATE_PATH = self.state_path
         # The fake sink is plain http on loopback; production requires https.
         agent_checkin._checkin_configured = lambda url: True
         os.environ["PULSE_CHECKIN_URL"] = self.url
-        # Never reach the real sheet from a test: record what would be sent.
-        os.environ["PULSE_CHECKIN_FALLBACK_URL"] = "https://fallback.test/exec"
-        self.fallback_posts = []
-        self.fallback_mode = "ok"
-
-        def fake_fallback(url, body):
-            self.fallback_posts.append(body)
-            if self.fallback_mode != "ok":
-                raise RuntimeError("fallback did not acknowledge")
-        agent_checkin._post_fallback_sync = fake_fallback
         self.clock = "2026-09-20T12:00:00Z"
         agent_checkin._checkin_now = lambda: self.clock
         self.n = 0
@@ -124,14 +113,11 @@ class TestCheckinQueue(unittest.TestCase):
 
     def tearDown(self):
         (main.DEMO_MODE, agent_checkin._CHECKIN_STATE_PATH, agent_checkin._build_checkin_entry,
-         agent_checkin._checkin_configured, agent_checkin._checkin_now, agent_checkin._post_fallback_sync,
-         url, fallback) = self._saved
-        for key, val in (("PULSE_CHECKIN_URL", url),
-                         ("PULSE_CHECKIN_FALLBACK_URL", fallback)):
-            if val is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = val
+         agent_checkin._checkin_configured, agent_checkin._checkin_now, url) = self._saved
+        if url is None:
+            os.environ.pop("PULSE_CHECKIN_URL", None)
+        else:
+            os.environ["PULSE_CHECKIN_URL"] = url
         self._tmp.cleanup()
 
     def launch(self):
@@ -231,41 +217,6 @@ class TestCheckinQueue(unittest.TestCase):
         self.assertNotIn("ancient-0001", ids)
         self.assertEqual(ids[-1], "id-00000001")
 
-    def test_worker_up_never_touches_the_sheet(self):
-        self.launch()
-        self.assertEqual(self.fallback_posts, [])
-
-    def test_worker_down_sends_the_new_checkin_to_the_sheet_and_keeps_it_queued(self):
-        FakeSink.mode = "storage"
-        self.launch()
-        self.assertEqual(len(self.fallback_posts), 1)
-        sent = self.fallback_posts[0]
-        self.assertEqual(sent["checkinId"], "id-00000001")
-        self.assertIn("secret", sent)           # the sheet takes a flat check-in
-        self.assertNotIn("checkins", sent)
-        st = self.state()
-        self.assertEqual([e["checkinId"] for e in st["queue"]], ["id-00000001"])  # D1 still gets it
-        self.assertTrue(st.get("lastFallbackAt"))
-
-    def test_sheet_gets_only_the_newest_checkin_not_the_backlog(self):
-        FakeSink.mode = "storage"
-        for _ in range(3):
-            self.launch()
-        self.assertEqual([b["checkinId"] for b in self.fallback_posts],
-                         ["id-00000001", "id-00000002", "id-00000003"])
-        self.assertEqual(len(self.state()["queue"]), 3)
-
-    def test_failing_sheet_changes_nothing_else(self):
-        FakeSink.mode = "storage"
-        self.fallback_mode = "down"
-        self.launch()
-        st = self.state()
-        self.assertEqual(len(st["queue"]), 1)
-        self.assertTrue(st.get("lastFallbackError"))
-        FakeSink.mode = "ok"
-        self.launch()
-        self.assertEqual(self.state()["queue"], [])
-
     def test_fleet_control_in_the_reply_is_kept(self):
         FakeSink.mode = "control-off"
         self.launch()
@@ -277,21 +228,6 @@ class TestCheckinQueue(unittest.TestCase):
         FakeSink.mode = "ok"
         self.launch()
         self.assertEqual(self.state()["control"]["mode"], "off")
-
-    def test_monitor_posts_never_go_to_the_sheet(self):
-        # The sheet is one row per unit with a run count; a monitor post every
-        # few minutes there would flood it and inflate the count.
-        FakeSink.mode = "storage"
-        for reason in ("periodic", "state-change", "heartbeat"):
-            asyncio.run(agent_checkin._send_checkin(reason=reason))
-        self.assertEqual(self.fallback_posts, [])
-        self.assertEqual(len(self.state()["queue"]), 3)   # still queued for D1
-
-    def test_empty_fallback_url_turns_it_off(self):
-        os.environ["PULSE_CHECKIN_FALLBACK_URL"] = ""
-        FakeSink.mode = "storage"
-        self.launch()
-        self.assertEqual(self.fallback_posts, [])
 
     def test_corrupt_state_file_is_recovered(self):
         with open(self.state_path, "w", encoding="utf-8") as fh:
