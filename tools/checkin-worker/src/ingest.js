@@ -17,11 +17,16 @@ const MAX_EVENTS = 25;
 // has switched off (monitor_control below).
 // "event-start" / "event-update" / "event-end": the monitor's in-event reader
 // (event_watch.py), which reads Pixellot's own logs while VPU.exe runs.
+// "setup-start" / "setup-update" / "setup-end": the same reader on a VPU.exe
+// run with no event, such as head setup (PV-48). Its event document has kind
+// "setup" and no eventId, so it never reaches the events view.
 const REASONS = new Set(["startup", "periodic", "state-change", "heartbeat", "paused",
-                         "event-start", "event-update", "event-end"]);
+                         "event-start", "event-update", "event-end",
+                         "setup-start", "setup-update", "setup-end"]);
 const EVENT_SCHEMA = "pulse.event/v1";
 const MAX_EVENT_BYTES = 4 * 1024;
-const EVENT_STATES = new Set(["on-air", "connecting", "stream-failing", "restart-loop", "camera-link-down", "camera-degraded", "ended"]);
+const EVENT_STATES = new Set(["on-air", "connecting", "stream-failing", "restart-loop", "camera-link-down", "camera-degraded",
+                              "setup", "ended"]);
 const PASSES = new Set(["full", "partial"]);
 const STATUSES = new Set(["PASS", "WARN", "FAIL"]);
 const PATHS = new Set(["zixi-2088", "zixi-443", "rtmp-1935", "blocked"]);

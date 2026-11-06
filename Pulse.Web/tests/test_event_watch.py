@@ -229,6 +229,63 @@ class MidEventTest(RealLinesTest):
         self.assertEqual(ev["restarts"], 1)
 
 
+class HeadSetupTest(RealLinesTest):
+    """Lines from lab-workbench-z2's VPU log (VPU 5.21.8, 2026-05-14): a tech
+    pressed "start recorder in manual mode" for head setup. The session still
+    names the morning's daily test folder, from a stale metadata path."""
+
+    SETUP = (
+        "INFO | 2026-05-14 14:43:23 | START NEW LOG SESSION >>> VPU.exe - Version: 5.21.8 >>> Host: lab-workbench-z2\r\n"
+        "Info\t| 2026-05-14 14:43:23.096 |DEFAULT_MODULE\t|Utils.Configuration.cpp(909)\t|Utils::Configuration::getString\t|'METADATA':'METADATA_PATH_0'    changed default from  to d:\\recordedEvents\\2026-05-14_p_DAILYTEST20260514\\2026-05-14_p_DAILYTEST20260514_metadata.0330.10.i\r\n"
+        "Info\t| 2026-05-14 14:43:23.900 |Main\t|main.cpp(277)\t|main\t|Agent Start Reason: start recorder in manual mode was pressed\r\n"
+        "Info\t| 2026-05-14 14:43:34.063 |DEFAULT_MODULE\t|MetadataCollection.DumpDirectory.cpp(97)\t|MetadataCollection::DumpDirectory::filenamesForAllDirectories\t|Recovered metadata directory for event DAILYTEST20260514: d:\\recordedEvents\\2026-05-14_p_DAILYTEST20260514\\2026-05-14_p_DAILYTEST20260514_metadata.0330.10.i (via existing files)\r\n"
+    )
+    EVENT = (
+        "INFO | 2026-05-14 15:30:19 | START NEW LOG SESSION >>> VPU.exe - Version: 5.21.8 >>> Host: lab-workbench-z2\r\n"
+        "Info\t| 2026-05-14 15:30:20.214 |Main\t|main.cpp(277)\t|main\t|Agent Start Reason:  event command. Event: Name[Daily Test 2026 05 14] _id[DAILYTEST20260514] venue[61adbfa8fe9c3ca33185672b] startDate[2026-05-14T19:30:00.000Z] endDate[2026-05-14T19:40:00.000Z] productionType[basketball]\r\n"
+    )
+
+    def test_head_setup_is_a_setup_run_with_no_event_id(self):
+        os.makedirs(os.path.join(self.tmp.name, "2026-05-14_p_DAILYTEST20260514"))   # the folder is there too
+        ev = self.run_on(self.SETUP)
+        self.assertEqual(event_watch.verdict(ev, T0 + 3000), "setup")
+        s = event_watch.summary(ev, T0 + 3000, ended=False)
+        self.assertEqual(s["kind"], "setup")
+        self.assertEqual(s["state"], "setup")
+        self.assertIsNone(s["eventId"])
+        self.assertEqual(s["startReason"], "start recorder in manual mode was pressed")
+        self.assertEqual(s["vpuVersion"], "5.21.8")
+        end = event_watch.summary(ev, T0 + 3000, ended=True)
+        self.assertEqual(end["state"], "ended")
+        self.assertIsNone(end["reason"])         # head setup never streams, so it didn't fail to
+
+    def test_an_event_session_after_head_setup_starts_a_fresh_event(self):
+        ev = self.run_on(self.SETUP)
+        ev = self.run_on(self.EVENT, ev)
+        self.assertEqual(ev.pop("endedRun")["kind"], "setup")
+        s = event_watch.summary(ev, T0 + 3000, ended=False)
+        self.assertEqual(s["kind"], "daily-test")
+        self.assertEqual(s["eventId"], "DAILYTEST20260514")
+        self.assertEqual(s["restarts"], 0)       # a new run, not a restart
+        self.assertIsNone(s["startReason"])
+
+    def test_head_setup_after_an_event_ends_the_event(self):
+        ev = self.run_on(self.EVENT)
+        ev = self.run_on(self.SETUP, ev)
+        ended = ev.pop("endedRun")
+        self.assertEqual(ended["kind"], "daily-test")
+        self.assertEqual(ended["eventId"], "DAILYTEST20260514")
+        self.assertEqual(ended["state"], "ended")
+        self.assertEqual(event_watch.verdict(ev, T0 + 3000), "setup")
+        self.assertIsNone(ev["eventId"])
+
+    def test_a_head_setup_restart_stays_one_setup_run(self):
+        ev = self.run_on(self.SETUP)
+        ev = self.run_on(self.SETUP, ev)         # the lab unit's failed init, retried by the Agent
+        self.assertNotIn("endedRun", ev)
+        self.assertEqual(event_watch.verdict(ev, T0 + 3000), "setup")
+
+
 class EventFolderTest(unittest.TestCase):
     def test_an_old_folder_still_being_written_is_the_live_event(self):
         with tempfile.TemporaryDirectory() as d:

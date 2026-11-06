@@ -23,6 +23,11 @@ caller posts at the event's start, when a verdict is confirmed by two reads in
 a row, and at its end with a summary: did it go on air, for how long, and if
 not, why.
 
+Not every VPU.exe run is an event. Head setup (a tech pressing "start recorder
+in manual mode" in the Agent GUI) runs VPU.exe with no event and no stream.
+Its start reason says so, and the record is then a setup run: kind "setup",
+verdict "setup", no event id (PV-48).
+
 Line shapes (VPU.exe 5.27-5.37; "Level | yyyy-MM-dd HH:mm:ss.fff |Module
 |File(line) |Function |Message", tab-separated), from Get-VpuStreamLog.ps1:
   urlToStreamWriter for urls zixi://...|zixi://...|rtmp://...   the chain
@@ -31,6 +36,8 @@ Line shapes (VPU.exe 5.27-5.37; "Level | yyyy-MM-dd HH:mm:ss.fff |Module
   Created Zixi stream: HD_Writer0_Stream0                       on air (Zixi)
   Video Connection rtmp://... Created Successfuly               on air (RTMP)
   START NEW LOG SESSION >>> VPU.exe - Version: x                (re)started
+  Agent Start Reason:  event command. Event: Name[...] _id[...]  an event run
+  Agent Start Reason: start recorder in manual mode was pressed  head setup
   CloseUnit ... Reason: "stopStreaming event command"           event ended
   LEAKY BUCKET Debayer dropping queueSize ...                   frames dropped
 """
@@ -287,6 +294,12 @@ def parse_vpu_lines(text: str) -> list:
                 out.append({"t": t, "kind": "start", "name": name, "id": m.group(2),
                             "gameKey": g.group(1) if g else None,
                             "scheduledStart": m.group(4), "scheduledEnd": m.group(5)})
+        elif "Start Reason:" in line and "event command" not in line:
+            # Head setup: "Agent Start Reason: start recorder in manual mode
+            # was pressed" (lab-workbench-z2, VPU 5.21.8, 2026-05-14). No
+            # stream chain, connect or fail line follows.
+            m = re.search(r"Start Reason:\s*(.*?)\s*$", line)
+            out.append({"t": t, "kind": "setupStart", "reason": (m.group(1) if m else None) or None})
         elif "ReplayManager::init(" in line:
             m = re.search(r"ReplayManager::init\((\w+)\)", line)
             if m:
@@ -417,6 +430,8 @@ def slow_cameras(ev: dict) -> list:
 
 def verdict(ev: dict, now: float) -> str:
     """One word for what the event is doing now."""
+    if ev.get("setup"):
+        return "setup"              # no stream to judge
     if (ev.get("restarts") or 0) >= RESTART_LOOP_COUNT:
         return "restart-loop"
     down = ev.get("nicsDown") or []
@@ -439,6 +454,23 @@ def verdict(ev: dict, now: float) -> str:
     if first_fail and now - first_fail >= FAILING_AFTER_SECONDS:
         return "stream-failing"
     return "connecting"
+
+
+# What a record keeps when VPU.exe switches between head setup and an event:
+# where the reader is in the files and which VPU.exe, nothing about the run.
+_READER_KEYS = ("logFile", "offset", "vpuPid", "vpuVersion", "benchFile", "benchHeader", "benchSince",
+                "caughtUp")
+
+
+def _switch_run(ev: dict, t: float, setup: bool) -> None:
+    """VPU.exe restarted into the other kind of run (head setup, then the
+    scheduled event; or an event, then head setup) faster than the monitor
+    saw it stop. Keep the old run's summary in `endedRun` for the caller to
+    post as its end, and start the record again from this session."""
+    ended = summary(ev, t, ended=True)
+    keep = {k: ev[k] for k in _READER_KEYS if k in ev}
+    ev.clear()
+    ev.update(keep, startedAt=t, sessions=1, setup=setup, endedRun=ended)
 
 
 def observe(ev: dict, vpu_pid: Optional[str], now: float,
@@ -515,17 +547,31 @@ def observe(ev: dict, vpu_pid: Optional[str], now: float,
             elif k == "cameraUnreachable" and e.get("ip"):
                 ev.setdefault("unreachable", {})[e["ip"]] = t
             elif k == "start":
+                if ev.get("setup"):
+                    _switch_run(ev, t, setup=False)
+                    sessions_before = 1
+                ev["setup"] = False
                 ev["eventName"] = e["name"]
                 ev["nfhsGameKey"] = e.get("gameKey")
                 ev["scheduledStart"] = e.get("scheduledStart")
                 ev["scheduledEnd"] = e.get("scheduledEnd")
                 ev["eventId"] = e["id"]
+            elif k == "setupStart":
+                if ev.get("setup") is False:
+                    _switch_run(ev, t, setup=True)
+                    sessions_before = 1
+                ev["setup"] = True
+                ev["startReason"] = e.get("reason")
+                # Head setup still logs the last event's folder (a stale
+                # metadata path), so a folder id read before this line isn't
+                # this run's.
+                ev["eventId"] = None
             elif k == "sport":
                 ev["sport"] = e["sport"]
             elif k == "uncalibrated":
                 ev["calibrated"] = False
                 ev.setdefault("sport", e.get("sport"))
-            elif k == "eventId":
+            elif k == "eventId" and not ev.get("setup"):
                 # The newest session's folder names the event. A restart
                 # mid-event logs the same id again.
                 ev["eventId"] = e["id"]
@@ -545,7 +591,7 @@ def observe(ev: dict, vpu_pid: Optional[str], now: float,
         restarts_now = 1
     if restarts_now:
         ev["restarts"] = (ev.get("restarts") or 0) + restarts_now
-    if not ev.get("eventId"):
+    if not ev.get("eventId") and not ev.get("setup"):
         ev["eventId"] = newest_event_id(events_dir, since=ev.get("startedAt"))
 
     bench = _newest(log_dir, "AgentBenchmarks_", ".csv")
@@ -595,7 +641,10 @@ def summary(ev: dict, now: float, ended: bool) -> dict:
     out = {
         "schema": SCHEMA,
         "eventId": eid,
-        "kind": ("daily-test" if eid and eid.upper().startswith("DAILYTEST") else "event") if eid else None,
+        "kind": "setup" if ev.get("setup") else
+                ("daily-test" if eid and eid.upper().startswith("DAILYTEST") else "event") if eid else None,
+        # The Agent's reason for starting VPU.exe, on a setup run.
+        "startReason": ev.get("startReason"),
         "state": ("ended" if ended else v),
         "startedAt": _iso(ev.get("startedAt")),
         "wentOnAir": bool(first),
@@ -681,7 +730,8 @@ def summary(ev: dict, now: float, ended: bool) -> dict:
     if ended:
         out["endedAt"] = _iso(ev.get("closedAt") or now)
         # Why it never aired, in the order a tech would rule things out.
-        if not first:
+        # Head setup never streams, so it has no reason.
+        if not first and not ev.get("setup"):
             out["reason"] = ("restart-loop" if out["restarts"] >= RESTART_LOOP_COUNT else
                              "camera-link-down" if out["camerasDown"] else
                              "camera-degraded" if out["camerasSlow"] else

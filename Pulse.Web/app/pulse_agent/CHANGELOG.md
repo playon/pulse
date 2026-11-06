@@ -17,6 +17,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- Head setup is reported as a setup run, not an event (PV-48). A VPU.exe run whose Agent start reason isn't an event command posts `setup-start`, hourly `setup-update` and `setup-end`, with event `kind` and `state` `setup`, no event id and the new `startReason`. A switch between setup and an event in one VPU.exe run posts the old run's `-end` before the new run's `-start`. Deploy the check-in Worker first: an older Worker stores the new reasons as null.
+
 ### Changed
 - Cameras no longer depend on the retired camera-config file. Scoreboard source is detection-only: a connected OCR camera makes ScoreConnect optional; otherwise ScoreConnect is checked, with no configured-but-disconnected OCR warning (including Pulse's startup and ScoreConnect views). In `pulse.telemetry/v1`, `scoreboard.ocr` stays present as null because OCR configuration is unknown; new optional `scoreboard.ocrDetected` is true/false for a successful camera read and null when it failed. Existing configuration fields are not redefined as detection.
 - Readiness now blocks NVIDIA drivers older than 536.67 (`gpu-driver-old`) and repeated VPU software crashes (`vpu-restart-loop`); a proven clean run after recent crashes stays a risk (`vpu-restarts-recent`). The monitor reads the same recent VPU log sessions as Diagnostics. No telemetry fields changed.
