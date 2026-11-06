@@ -9,6 +9,7 @@ tools/agent-release/build_agent_zip.py, serve them over local HTTP, and run
 real monitor ticks (demo mode) from the slots.
 """
 
+from datetime import datetime, timezone
 import hashlib
 import http.server
 import io
@@ -20,6 +21,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 import zipfile
 
 _WEB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -67,6 +69,14 @@ class Fixture(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = self.tmp.name
+        schedule_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(schedule_dir.cleanup)
+        self.schedule = os.path.join(schedule_dir.name, "dashboardEvents.json")
+        with open(self.schedule, "w") as fh:
+            json.dump([], fh)
+        schedule_patch = patch.object(runner, "SCHEDULE_FILE", self.schedule)
+        schedule_patch.start()
+        self.addCleanup(schedule_patch.stop)
         self._slot("a", "0.1.0")
         os.makedirs(os.path.join(self.root, "runtime"))
         with open(os.path.join(self.root, "runtime", "requirements.txt"), "w") as fh:
@@ -131,6 +141,155 @@ class Fixture(unittest.TestCase):
         self.now += advance
         return runner.tick(self.root, list(argv), is_event_live=lambda: self.event, run=self._run,
                            download=self._download, now=self.now)
+
+
+class Schedule(Fixture):
+    def test_process_probe_failure_holds(self):
+        import subprocess
+        with patch.object(runner.sys, "platform", "win32"), patch.object(runner.subprocess, "run") as probe:
+            probe.return_value = subprocess.CompletedProcess([], 1, stdout="", stderr="failed")
+            self.assertTrue(runner.event_live())
+
+    def write_schedule(self, events):
+        with open(self.schedule, "w") as fh:
+            json.dump(events, fh)
+
+    def event_at(self, minutes, *, z=True, duration=60):
+        now = time.time()
+        def stamp(value):
+            value = datetime.fromtimestamp(value, timezone.utc).isoformat()
+            return value.replace("+00:00", "Z" if z else "")
+        return {"start": {"$date": stamp(now + minutes * 60)},
+                "end": {"$date": stamp(now + (minutes + duration) * 60)}}
+
+    def pin_update(self):
+        sha = self.serve("0.2.0", _zip_bytes("0.2.0"))
+        self.pin("0.2.0", sha)
+        return sha
+
+    def assert_held(self):
+        self.tick()
+        self.assertEqual(self.downloads, [])
+        self.assertEqual(self.slots()["active"], "a")
+        self.assertEqual(self.slots().get("tries", {}), {})
+        self.assertEqual(self.slots()["retryAt"], {})
+        self.assertEqual(self.ticks[-1], ("a", []))
+
+    def test_empty_schedule_allows_update(self):
+        self.pin_update()
+        self.tick()
+        self.assertEqual(len(self.downloads), 1)
+
+    def test_event_in_29_minutes_holds_with_and_without_z(self):
+        self.pin_update()
+        for z in (True, False):
+            with self.subTest(z=z):
+                self.write_schedule([self.event_at(29, z=z)])
+                self.assert_held()
+
+    def test_event_in_31_minutes_allows_update(self):
+        self.pin_update()
+        self.write_schedule([self.event_at(31)])
+        self.tick()
+        self.assertEqual(len(self.downloads), 1)
+
+    def test_inside_event_window_holds_even_without_vpu_process(self):
+        self.pin_update()
+        self.write_schedule([self.event_at(-20)])
+        self.assert_held()
+
+    def test_past_and_tomorrows_events_do_not_hold(self):
+        self.pin_update()
+        self.write_schedule([self.event_at(-120), self.event_at(24 * 60)])
+        self.tick()
+        self.assertEqual(len(self.downloads), 1)
+
+    def test_missing_malformed_unreadable_and_stale_schedule_hold(self):
+        self.pin_update()
+        os.remove(self.schedule)
+        self.assert_held()
+        with open(self.schedule, "w") as fh:
+            fh.write("[")
+        self.assert_held()
+        self.write_schedule([])
+        real_open = open
+        def unreadable(path, *args, **kwargs):
+            if path == self.schedule:
+                raise PermissionError()
+            return real_open(path, *args, **kwargs)
+        with patch("builtins.open", side_effect=unreadable):
+            self.assert_held()
+        old = time.time() - runner.SCHEDULE_MAX_AGE_SECONDS - 1
+        os.utime(self.schedule, (old, old))
+        self.assert_held()
+        with open(os.path.join(self.root, runner.LOG_FILE)) as fh:
+            self.assertIn("held: schedule unknown", fh.read())
+
+    def test_invalid_entry_holds_even_after_an_event_was_found(self):
+        self.pin_update()
+        for events in ({}, [None], [{"start": {"$date": "bad"}}],
+                       [self.event_at(20), {}], [self.event_at(20, duration=-1)]):
+            with self.subTest(events=events):
+                self.write_schedule(events)
+                self.assert_held()
+                self.assertEqual(runner.schedule_hold(), "schedule unknown")
+
+    def test_probation_forced_pass_waits_but_regular_tick_runs(self):
+        self.pin_update()
+        self.tick()
+        self.write_schedule([self.event_at(20)])
+        self.tick()
+        self.assertEqual(self.ticks[-1], ("b", []))
+        self.assertTrue(self.slots()["probation"]["needsFullPass"])
+        self.write_schedule([])
+        self.tick()
+        self.assertEqual(self.ticks[-1], ("b", ["--force"]))
+
+    def test_failed_probation_rollback_waits_and_survives_restart(self):
+        self.pin_update()
+        self.tick()
+        self.write_schedule([self.event_at(20)])
+        self.tick_ok["b"] = False
+        self.assertEqual(self.tick(), 1)
+        self.assertEqual(self.slots()["active"], "b")
+        self.assertIn("rollback", self.slots()["probation"])
+        self.tick_ok["b"] = True
+        self.tick()
+        self.assertEqual(self.ticks[-1], ("b", []))
+        self.write_schedule([])
+        self.tick()
+        self.assertEqual(self.slots()["active"], "a")
+        self.assertEqual(self.update()["status"], "rolled-back")
+
+    def test_killed_probation_rollback_waits(self):
+        self.pin_update()
+        self.tick()
+        self.write_schedule([self.event_at(20)])
+        with open(os.path.join(self.root, runner.MARKER_FILE), "w") as fh:
+            fh.write("killed")
+        self.tick()
+        self.assertEqual(self.slots()["active"], "b")
+        self.write_schedule([])
+        self.tick()
+        self.assertEqual(self.slots()["active"], "a")
+
+    def test_schedule_changes_during_download_hold_switch(self):
+        self.pin_update()
+        def download(*args):
+            result = self._download(*args)
+            self.write_schedule([self.event_at(20)])
+            return result
+        runner.tick(self.root, [], is_event_live=lambda: False, run=self._run,
+                    download=download, now=self.now)
+        self.assertEqual(self.slots()["active"], "a")
+        self.assertIn("b", self.slots()["slots"])
+        self.tick()
+        self.assertEqual(self.slots()["active"], "a")
+        self.assertEqual(len(self.downloads), 1)
+        self.write_schedule([])
+        self.tick()
+        self.assertEqual(self.slots()["active"], "b")
+        self.assertEqual(len(self.downloads), 1)
 
 
 class Target(Fixture):
@@ -891,6 +1050,12 @@ class EndToEnd(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp(prefix="pulse-runner-root-")
         self.addCleanup(shutil.rmtree, self.root, True)
+        self.schedule = os.path.join(self.root, "dashboardEvents.json")
+        with open(self.schedule, "w") as fh:
+            json.dump([], fh)
+        schedule_patch = patch.object(runner, "SCHEDULE_FILE", self.schedule)
+        schedule_patch.start()
+        self.addCleanup(schedule_patch.stop)
         # What enroll leaves: this tree in slot a, the runtime's requirements.
         shutil.copytree(_WEB, os.path.join(self.root, "slots", "a"),
                         ignore=shutil.ignore_patterns("python", "__pycache__", "tests", "*.log", "pulse-*.json"))
@@ -934,6 +1099,42 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual((u["status"], u["version"], u["from"]), ("rolled-back", "9.9.2", "9.9.1"))
         self.assertIn("9.9.2 is broken", u["error"])
         self.assertEqual(self.tick(), 0)                       # back on 9.9.1, and stays there
+
+    def test_event_twenty_minutes_out_holds_update_but_regular_pass_posts(self):
+        self.pin("9.9.1")
+        now = time.time()
+        stamp = lambda value: datetime.fromtimestamp(value, timezone.utc).isoformat().replace("+00:00", "Z")
+        with open(self.schedule, "w") as fh:
+            json.dump([{"start": {"$date": stamp(now + 20 * 60)},
+                        "end": {"$date": stamp(now + 80 * 60)}}], fh)
+        # Demo mode deliberately never sends. Capture the real monitor's
+        # send boundary in its temporary slot, retaining its pass planner,
+        # collectors and check-in builder without contacting fleet ingest.
+        posted = os.path.join(self.root, "posted.json")
+        script = os.path.join(self.root, "slots", "a", "app", "monitor_once.py")
+        with open(script) as fh:
+            code = fh.read()
+        capture = (
+            "import main\n"
+            "from pulse_agent import checkin\n"
+            "async def capture_post(**kwargs):\n"
+            "    entry = await checkin._build_checkin_entry(**kwargs)\n"
+            f"    with open({posted!r}, 'w') as fh: json.dump(entry, fh)\n"
+            "checkin._send_checkin = capture_post\n\n"
+        )
+        with open(script, "w") as fh:
+            fh.write(code.replace('if __name__ == "__main__":', capture + 'if __name__ == "__main__":'))
+        with patch.object(runner, "fetch", side_effect=AssertionError("must not download")):
+            self.assertEqual(runner.tick(self.root, [], is_event_live=lambda: False,
+                                         download=runner.fetch, url_template=self.url), 0)
+        self.assertEqual(self.slots()["active"], "a")
+        with open(posted) as fh:
+            entry = json.load(fh)
+        self.assertIn(entry["reason"], ("periodic", "state-change"))
+        self.assertTrue(entry.get("telemetry"))
+        with open(os.path.join(self.root, runner.LOG_FILE)) as fh:
+            self.assertIn("held: event at ", fh.read())
+
 
 
 if __name__ == "__main__":
