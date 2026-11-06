@@ -8,8 +8,11 @@ export async function accessIdentity(request, env) {
   if (env.DEV_ALLOW_UNAUTHENTICATED === "true") return { email: "local-dev" };
 
   const team = env.ACCESS_TEAM_DOMAIN;
-  const aud = env.ACCESS_AUD;
-  if (!team || !aud || team.startsWith("REPLACE") || aud.startsWith("REPLACE")) return null;
+  // One AUD per Access application whose tokens this Worker takes, comma
+  // separated: its own, and Pulse Vitals', which forwards its viewer's token
+  // over a service binding (PV-85).
+  const accepted = String(env.ACCESS_AUD || "").split(",").map((s) => s.trim()).filter(Boolean);
+  if (!team || !accepted.length || team.startsWith("REPLACE") || accepted.some((a) => a.startsWith("REPLACE"))) return null;
 
   const token = request.headers.get("Cf-Access-Jwt-Assertion");
   if (!token) return null;
@@ -38,7 +41,7 @@ export async function accessIdentity(request, env) {
 
   const now = Math.floor(Date.now() / 1000);
   const auds = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
-  if (!auds.includes(aud)) return null;
+  if (!auds.some((a) => accepted.includes(a))) return null;
   if (payload.iss !== `https://${team}`) return null;
   if (typeof payload.exp !== "number" || payload.exp < now) return null;
   if (typeof payload.nbf === "number" && payload.nbf > now + 60) return null;

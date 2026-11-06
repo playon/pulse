@@ -456,7 +456,7 @@ function _verdictStripModel() {
   var blockers = (v.blockers || []).length, risks = (v.risks || []).length;
   var text = (blockers ? blockers + (blockers === 1 ? " thing is" : " things are") + " stopping tonight's game"
                        : "Nothing is stopping tonight's game")
-    + " \u00b7 " + (risks ? risks + (risks === 1 ? " risk" : " risks") + " tonight" : "No risks tonight");
+    + (risks ? " \u00b7 " + risks + (risks === 1 ? " risk" : " risks") + " tonight" : (blockers ? "" : " \u00b7 No risks tonight"));
   var here = 0;
   if (currentPage !== "dashboard") {
     var tf = _dashToneFn(dash);
@@ -3036,9 +3036,9 @@ function readinessCard(verdict, freshness) {
     +   '<span>' + (blockers.length
           ? blockers.length + (blockers.length === 1 ? ' thing is' : ' things are') + " stopping tonight's game"
           : "Nothing is stopping tonight's game") + '</span>'
-    +   '<span>' + (risks.length
+    +   (risks.length || !blockers.length ? '<span>' + (risks.length
           ? risks.length + (risks.length === 1 ? ' risk' : ' risks') + ' tonight'
-          : 'No risks tonight') + '</span>'
+          : 'No risks tonight') + '</span>' : '')
     + '</div>'
     + demoBar
     + '</div>';
@@ -3229,7 +3229,7 @@ function renderDashboard() {
       lines.push("Stream readiness: " + meta.word + " - " + meta.tag);
       var nb = (rdy.blockers || []).length, nr = (rdy.risks || []).length;
       lines.push(nb
-        ? nb + (nb === 1 ? " thing is" : " things are") + " stopping tonight's game, " + nr + " risk" + (nr === 1 ? "" : "s") + " tonight"
+        ? nb + (nb === 1 ? " thing is" : " things are") + " stopping tonight's game" + (nr ? ", " + nr + " risk" + (nr === 1 ? "" : "s") + " tonight" : "")
         : "Nothing is stopping tonight's game, " + nr + " risk" + (nr === 1 ? "" : "s") + " tonight");
       lines.push("");
     }
@@ -4144,7 +4144,7 @@ async function runLocalPing(count) {
 
   try {
     while (_localPingState.running) {
-      var resp = await fetch("/api/network/local-ping?count=" + batchSize, { signal: _localPingState.abortCtrl.signal });
+      var resp = await fetch("/api/network/local-ping?count=" + batchSize, { method: "POST", signal: _localPingState.abortCtrl.signal });
       var data = await resp.json();
       if (!_localPingState.running) break;
 
@@ -4262,7 +4262,7 @@ async function _runTraceroute(target) {
   if (out) out.innerHTML = '<p class="text-pulse-muted text-sm loading-pulse">Running traceroute to ' + esc(target) + '…</p>';
 
   try {
-    var resp = await fetch("/api/network/traceroute?target=" + encodeURIComponent(target));
+    var resp = await fetch("/api/network/traceroute?target=" + encodeURIComponent(target), { method: "POST" });
     var data = await resp.json();
     if (data.error) {
       if (out) out.innerHTML = '<p class="text-sm status-fail">' + esc(data.message) + '</p>';
@@ -4521,7 +4521,7 @@ async function _runCapture(duration) {
   if (out) out.innerHTML = '<p class="text-pulse-muted text-sm loading-pulse">Running ' + duration + 's packet capture, reading TCP headers on ports 443, 1935, 80, UDP 2088…</p>';
 
   try {
-    var resp = await fetch("/api/network/capture?duration=" + duration);
+    var resp = await fetch("/api/network/capture?duration=" + duration, { method: "POST" });
     var data = await resp.json();
     if (data.error) {
       if (out) out.innerHTML = '<p class="text-sm status-fail">' + esc(data.message) + '</p>';
@@ -11969,6 +11969,124 @@ function _audioDeviceRow(d) {
 
 // ── Settings ─────────────────────────────────────────────────
 
+// ── Fleet monitoring card (Settings) ──
+// Opts this unit in to the fleet monitor, which then reports to Pulse Vitals
+// (fleet_enroll.py). Shown on the dev channel only. Every state the backend
+// can report looks different: a task that stopped ticking is "Not working",
+// never "On".
+function _fleetAgo(sec) {
+  return sec ? _scAgoLabel(new Date(sec * 1000).toISOString()) : null;
+}
+
+async function _loadFleetCard() {
+  const el = document.getElementById("set-fleet");
+  if (!el) return;
+  const st = await api("/api/fleet-monitor");
+  if (!document.body.contains(el)) return;
+  if (st && st.error) {
+    // Only a dev build has the endpoint; anything else that fails says so.
+    el.style.display = "";
+    el.innerHTML = sectionTitle("activity", "Fleet Monitoring") +
+      '<p class="text-sm text-pulse-muted">Couldn’t read the monitor’s status: ' + esc(st.message || "no response") + '</p>';
+    return;
+  }
+  if (!st || !st.available) { el.style.display = "none"; el.innerHTML = ""; return; }
+  el.style.display = "";
+  _renderFleetCard(el, st);
+}
+
+function _renderFleetCard(el, st) {
+  const WORDS = {
+    on: ["On", "pass"], paused: ["Paused from Vitals", "warn"], broken: ["Not working", "fail"],
+    elsewhere: ["Old install", "warn"], off: ["Off", "muted"],
+  };
+  const w = WORDS[st.state] || ["Unknown", "muted"];
+  const about = "Every 5 minutes this VPU checks whether it’s ready to stream and reports to Pulse Vitals. " +
+    "A check takes under a second; a full readiness pass runs about every 20 minutes. Nothing runs while an event is live.";
+  const rows = [];
+  if (st.state === "on" || st.state === "paused" || st.state === "broken") {
+    const tick = _fleetAgo(st.lastTickAt);
+    const post = _fleetAgo(st.lastPostAt);
+    rows.push(kvRowHtml("Last check", tick ? esc(tick) : '<span class="text-pulse-muted">Not yet</span>'));
+    rows.push(kvRowHtml("Last report to Vitals", post ? esc(post) + (st.lastPostKind ? ' <span class="text-pulse-muted">(' + esc(st.lastPostKind) + ")</span>" : "")
+      : '<span class="text-pulse-muted">Not yet</span>'));
+    if (st.verdict) rows.push(kvRowHtml("Verdict it reported", statusBadge(st.verdict)));
+    rows.push(kvRowHtml("Monitor build", esc(st.version || "unknown") +
+      (st.current === false ? ' <span class="text-pulse-muted">(older than this Pulse; it updates on the next launch, or opt in again)</span>' : "") +
+      (st.runner && st.slotMatchesThisBuild === false ? ' <span class="text-pulse-muted">(not this Pulse build, ' + esc(st.thisBuild || "unknown") + ")</span>" : "")));
+  }
+  let note = "";
+  if (st.state === "broken") note = '<p class="text-sm mt-2"><strong>' + esc(st.problem || "The monitor isn’t running.") + "</strong> Opting in again reinstalls it.</p>";
+  else if (st.state === "paused") note = '<p class="text-sm mt-2">Fleet control in Vitals has switched the monitor off on this unit. It checks back hourly and resumes when it’s switched on.</p>';
+  else if (st.state === "elsewhere") note = '<p class="text-sm mt-2">The monitor runs from <code>' + esc((st.task && st.task.installDir) || "another folder") +
+    "</code>. A production launch can break it there. Opt in to move it to <code>" + esc(st.root) + "</code>.</p>";
+  if (!st.admin) note += '<p class="text-sm mt-2">Pulse isn’t running as administrator, so it can’t change the monitor. Restart Pulse and choose Yes when Windows asks.</p>';
+  if (!st.sourceHasMonitor && st.state !== "on") note += '<p class="text-sm mt-2">This Pulse build has no fleet monitor.</p>';
+
+  const enrolled = st.state === "on" || st.state === "paused" || st.state === "broken";
+  const canInstall = st.admin && st.sourceHasMonitor;
+  // On the agent runner layout a launch never changes the monitor's build
+  // (fleet control picks it), so a running monitor on other code offers this
+  // build by hand. Opting out and in would also do it, but purges its history.
+  const reinstall = st.runner && st.slotMatchesThisBuild === false && (st.state === "on" || st.state === "paused");
+  const primary = st.state === "off" ? "Opt in this unit" : st.state === "elsewhere" ? "Move and opt in" : st.state === "broken" ? "Reinstall"
+    : reinstall ? "Reinstall this build" : "Update monitor";
+  const showPrimary = st.state !== "on" || st.current === false || reinstall;
+  el.innerHTML = sectionTitle("activity", "Fleet Monitoring") +
+    '<div class="flex items-center gap-2 mb-2">' + badge(w[0], w[1]) + "</div>" +
+    '<p class="text-sm text-pulse-muted mb-3">' + esc(about) + "</p>" +
+    (rows.length ? '<div class="kv-grid mb-2">' + rows.join("") + "</div>" : "") + note +
+    '<div class="settings-actions mt-3">' +
+      (showPrimary ? '<button class="btn-outline btn-ol-green" id="set-fleet-in"' + (canInstall ? "" : " disabled") + ">" + svgIcon("activity", 14) + " " + esc(primary) + "</button>" : "") +
+      (st.unitUrl || st.vitalsUrl ? '<a class="btn-outline btn-ol-blue" href="' + esc(st.unitUrl || st.vitalsUrl) + '" target="_blank" rel="noopener">' + svgIcon("globe", 14) + " View in Vitals</a>" : "") +
+      (enrolled || st.state === "elsewhere" ? '<button class="btn-outline btn-ol-red" id="set-fleet-out"' + (st.admin ? "" : " disabled") + ">Opt out</button>" : "") +
+      '<span id="set-fleet-msg" class="text-sm text-pulse-muted"></span>' +
+    "</div>" +
+    '<ul id="set-fleet-steps" class="text-xs text-pulse-muted mt-2" style="display:none"></ul>';
+
+  const msg = document.getElementById("set-fleet-msg");
+  const steps = document.getElementById("set-fleet-steps");
+  const busy = (on) => el.querySelectorAll("button").forEach((b) => { b.disabled = on || (b.id === "set-fleet-in" ? !canInstall : !st.admin); });
+  const showSteps = (list) => {
+    if (!list || !list.length) { steps.style.display = "none"; return; }
+    steps.innerHTML = list.map((s) => "<li>" + esc(s) + "</li>").join("");
+    steps.style.display = "";
+  };
+  const run = async (path, working, done) => {
+    busy(true);
+    msg.textContent = working;
+    const r = await apiPost(path, {});
+    if (r && r.ok) {
+      const fresh = await api("/api/fleet-monitor");
+      if (fresh && !fresh.error) _renderFleetCard(el, fresh);
+      const m = document.getElementById("set-fleet-msg");
+      if (m) m.textContent = done;
+      const s2 = document.getElementById("set-fleet-steps");
+      if (s2 && r.steps && r.steps.length) { s2.innerHTML = r.steps.map((s) => "<li>" + esc(s) + "</li>").join(""); s2.style.display = ""; }
+    } else {
+      busy(false);
+      msg.textContent = (r && (typeof r.error === "string" ? r.error : r.message)) || "It didn’t work, and Pulse got no reason back.";
+      showSteps(r && r.steps);
+    }
+  };
+  document.getElementById("set-fleet-in")?.addEventListener("click", async () => {
+    const body = reinstall
+      ? "Pulse puts this build (" + (st.thisBuild || "unknown") + ") in the monitor’s slot a, in place of " + (st.version || "the build it runs now") +
+        ", and runs it from there. The monitor keeps its history: its open findings and last reports.\n\n" +
+        "If fleet control in Vitals pins an agent build for this unit, the monitor goes back to that build within a few minutes."
+      : "Pulse copies this build to " + st.root + " and schedules the monitor there, as SYSTEM, every 5 minutes. " +
+        "A launch of another Pulse build doesn’t affect it.\n\nThe first check runs now, so the unit shows in Vitals within a few minutes.";
+    if (!(await confirmAction({ title: primary + "?", body, confirmLabel: primary }))) return;
+    run("/api/fleet-monitor/enroll", "Installing… the first copy takes up to a minute.", "Done. The first check is running now.");
+  });
+  document.getElementById("set-fleet-out")?.addEventListener("click", async () => {
+    if (!(await confirmAction({ title: "Opt this unit out?", tone: "danger",
+      body: "Pulse removes the monitor task and its files from " + st.root + ". The unit stops reporting, and Vitals shows it as silent after about an hour.",
+      confirmLabel: "Opt out" }))) return;
+    run("/api/fleet-monitor/unenroll", "Removing…", "Opted out. This unit no longer reports to Vitals.");
+  });
+}
+
 function renderSettings() {
   const data = cached("settings");
   if (!data) { $page().innerHTML = sectionLoading("Settings"); fetchSection("settings"); return; }
@@ -11991,6 +12109,9 @@ function renderSettings() {
       </div>
       <div id="set-update-notes" class="update-notes" style="display:none"></div>
     </div>
+
+    <!-- Fleet monitoring (dev channel only; filled by _renderFleetCard) -->
+    <div class="card mt-4" id="set-fleet" style="display:none"></div>
 
     <!-- Restart Pulse app -->
     <div class="card mt-4">
@@ -12073,6 +12194,9 @@ function renderSettings() {
       upCheckBtn.disabled = false;
     }
   });
+
+  // ── Fleet monitoring ──
+  _loadFleetCard();
 
   // ── Restart Pulse app / Reboot VPU ──
   const restartBtn = document.getElementById("set-restart-app");

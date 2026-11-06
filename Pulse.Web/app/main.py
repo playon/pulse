@@ -47,6 +47,7 @@ from powershell import (
 )
 import peer
 import cloud_api
+from local_guard import LocalOnlyGuard
 
 _web_root = _os.path.dirname(_app_dir)
 SETTINGS_PATH = _os.path.join(_web_root, "pulse-settings.json")
@@ -251,6 +252,9 @@ _server_log = _logging.getLogger("pulse")
 _server_log.info(f"pulse-server.log opened — Pulse Web bootstrap")
 
 app = FastAPI(title="Pulse Web | VPU Diagnostics")
+# Refuse any request a web page on this VPU made on its own behalf (foreign
+# Host, Origin or Sec-Fetch-Site): see local_guard.py.
+app.add_middleware(LocalOnlyGuard)
 app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 PIXELLOT_OUIS = ["00:0E:53", "00:30:53", "70:B3:D5", "00:D0:89"]
@@ -335,6 +339,11 @@ async def _on_startup():
     # _refresh_launcher_copies).
     try:
         asyncio.create_task(_refresh_launcher_copies(time.time()))
+    except Exception:
+        pass
+    # An opted-in unit's monitor follows this build (dev channel only).
+    try:
+        asyncio.create_task(_refresh_fleet_monitor())
     except Exception:
         pass
 
@@ -2044,6 +2053,180 @@ def _lmi_findings(lmi_log) -> list:
     }]
 
 
+# ── Can Pixellot's programs start? (Test-PixellotBinaries) ────────────────
+# Bear Grass NC, 2026-10-15: VPU.exe died at launch on every start for a week
+# ("libcef.dll was not found") and Pulse read PASS, because the error dialog
+# keeps a 2.8 MB VPU.exe alive and Get-Services counts it as Running. The
+# collector resolves each exe's DLL imports the way the Windows loader does,
+# and reads the loader-error popups Windows logs (System, Application Popup 26).
+START_ERROR_LIVE_SECONDS = 2 * 3600    # agent retries every ~7-11 min in an event
+START_ERROR_RECENT_SECONDS = 24 * 3600
+
+_PIX_EXE_ROLE = {
+    "vpu.exe": "Pixellot's video program (VPU.exe)",
+    "agent.exe": "The Pixellot Agent",
+    "coordinator.exe": "The Pixellot Coordinator",
+}
+
+
+def _ps_time(s):
+    """Parse the collector's yyyy-MM-ddTHH:mm:ss+hh:mm stamp, or None."""
+    from datetime import datetime
+    try:
+        return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S%z")
+    except (TypeError, ValueError):
+        return None
+
+
+def _short_time(dt) -> str:
+    """'Oct 8, 5:42 PM' in the VPU's own local time."""
+    return f"{dt.strftime('%b')} {dt.day}, {dt.strftime('%I:%M %p').lstrip('0')}"
+
+
+def _join_names(names) -> str:
+    names = list(names)
+    if len(names) <= 2:
+        return " and ".join(names)
+    return ", ".join(names[:-1]) + ", and " + names[-1]
+
+
+def _binary_findings(binaries) -> list:
+    if not binaries or binaries.get("error"):
+        return []
+    now = _ps_time(binaries.get("now"))
+    popups = [p for p in (binaries.get("popups") or []) if p.get("count")]
+    stuck = [p for p in (binaries.get("vpuProcesses") or []) if p.get("stuckOnLoaderError")]
+    days = binaries.get("popupDays") or 7
+
+    def popup_line(p):
+        first, last = _ps_time(p.get("first")), _ps_time(p.get("last"))
+        span = (f", first {_short_time(first)}, last {_short_time(last)}"
+                if first and last and p["count"] > 1 else
+                f", at {_short_time(last)}" if last else "")
+        return (f"Windows logged \"{p.get('exe')} - {p.get('title') or 'System Error'}\" "
+                f"{p['count']} time{'s' if p['count'] != 1 else ''} in the last {days} days{span} "
+                f"(System log, Application Popup event 26).")
+
+    stuck_line = (
+        f"The VPU.exe in Task Manager (process {stuck[0].get('pid')}, "
+        f"{stuck[0].get('workingSetMB')} MB) is the copy stuck on that error box, "
+        "which is why the Services check still lists it as running."
+    ) if stuck else None
+
+    # (1) A file a Pixellot program needs is missing right now.
+    exes = binaries.get("exes") or []
+    broken = [e for e in exes if e.get("missing")]
+    if broken:
+        primary = next((e for e in broken if e.get("name", "").lower() == "vpu.exe"), broken[0])
+        exe = primary.get("name") or "VPU.exe"
+        who = _PIX_EXE_ROLE.get(exe.lower(), exe)
+        dlls = []
+        for e in broken:
+            for m in e["missing"]:
+                if m.get("dll") and m["dll"] not in dlls:
+                    dlls.append(m["dll"])
+        shown = (", ".join(dlls[:3]) + f", and {len(dlls) - 3} more" if len(dlls) > 3
+                 else _join_names(dlls))
+        noun = "a file" if len(dlls) == 1 else "files"
+        evidence = [
+            f"Pulse read the list of files each Pixellot program loads at start and looked for "
+            f"each one where Windows looks (the program's folder, System32, Windows and PATH). "
+            f"Not found: {shown}."
+        ]
+        if binaries.get("runAs") == "system" and not binaries.get("userPathsRead"):
+            # The fleet monitor runs as SYSTEM and reads each logged-in user's
+            # PATH; with nobody logged in there was none to read.
+            evidence.append(
+                "This check ran as SYSTEM (the fleet monitor) with no user logged in, so no user's "
+                "PATH could be searched: a file Pixellot finds through its user's PATH would show "
+                "as missing here."
+            )
+        exe_popups = [p for p in popups if (p.get("exe") or "").lower() in
+                      {e.get("name", "").lower() for e in broken}]
+        evidence += [popup_line(p) for p in exe_popups]
+        if stuck_line:
+            evidence.append(stuck_line)
+        if any(d.lower() == "libcef.dll" for d in dlls):
+            cef = binaries.get("cefPackages") or []
+            evidence.append(
+                "CEF packages in C:\\Pixellot\\dependencies: " + (", ".join(cef) if cef else "none")
+                + ". On a working 5.37.3 VPU, Bin\\libcef.dll is a copy from the cef-127.3.5 "
+                "package that Pixellot's dependencies installer adds."
+            )
+        return [{
+            "code": "pixellot-dll-missing",
+            "severity": "critical",
+            "category": "Pixellot",
+            "title": f"{exe} can't start because {shown} {'is' if len(dlls) == 1 else 'are'} "
+                     f"missing, so the VPU can't record or stream",
+            "recommendation": (
+                f"{who} needs {noun} that {'is' if len(dlls) == 1 else 'are'} missing from the VPU "
+                f"({shown}), so it stops at launch and no game can record or stream. "
+                f"Escalate to Pixellot support to repair the Pixellot software install. "
+                f"Clicking OK on the Windows error does not fix it."
+            ),
+            "evidence": " ".join(evidence),
+            "details": [f"{m.get('dll')}: needed by {m.get('neededBy')}"
+                        for e in broken for m in e["missing"]][:12],
+        }]
+
+    # (2) No file is missing that Pulse can see, but Windows says a Pixellot
+    # program failed at startup (wrong DLL version, bad image, a crash at
+    # load). How recent decides whether it still stops tonight's game.
+    if not popups:
+        return []
+    latest = max(popups, key=lambda p: _ps_time(p.get("last")) or _ps_time("1970-01-01T00:00:00+00:00"))
+    last = _ps_time(latest.get("last"))
+    age = (now - last).total_seconds() if now and last else None
+    exe = latest.get("exe") or "VPU.exe"
+    who = _PIX_EXE_ROLE.get(exe.lower(), exe)
+    text = (latest.get("text") or "").strip()
+    evidence = " ".join([popup_line(p) for p in popups] + ([stuck_line] if stuck_line else []))
+    details = [f"{p.get('exe')}: {p.get('text')}" for p in popups][:8]
+
+    if stuck or (age is not None and age <= START_ERROR_LIVE_SECONDS):
+        return [{
+            "code": "pixellot-start-error",
+            "severity": "critical",
+            "category": "Pixellot",
+            "title": f"{exe} is failing at startup, so the VPU can't record or stream",
+            "recommendation": (
+                f"{who} stops at startup with a Windows error (\"{text}\"), so no game can record "
+                f"or stream. Escalate to Pixellot support to repair the Pixellot software install."
+            ),
+            "evidence": evidence,
+            "details": details,
+        }]
+    when = _short_time(last) if last else "earlier this week"
+    if age is not None and age <= START_ERROR_RECENT_SECONDS:
+        return [{
+            "code": "pixellot-start-error-recent",
+            "severity": "warning",
+            "category": "Pixellot",
+            "title": f"{exe} failed to start in the last day, so the next game may not stream",
+            "recommendation": (
+                f"{who} last failed at startup at {when} with a Windows error (\"{text}\"), and "
+                f"Pulse can't tell whether it has started cleanly since. Check that the last "
+                f"scheduled event streamed. If it did not, escalate to Pixellot support."
+            ),
+            "evidence": evidence,
+            "details": details,
+        }]
+    return [{
+        "code": "pixellot-start-error-past",
+        "severity": "info",
+        "category": "Pixellot",
+        "title": f"{exe} failed to start earlier this week",
+        "recommendation": (
+            f"{who} failed at startup {latest.get('count')} time"
+            f"{'s' if latest.get('count') != 1 else ''}, last at {when}. Windows has not logged it since. "
+            f"Games that week may not have streamed."
+        ),
+        "evidence": evidence,
+        "details": details,
+    }]
+
+
 # ── Graphics delivery (Get-GraphicsDelivery) ──────────────────────────────
 # Pulse's network checks can't see a scorebug that never reaches the video:
 # the hand-off from GraphicsManager to VPU.exe is localhost gRPC, so a unit
@@ -2167,7 +2350,7 @@ def _graphics_findings(gd) -> list:
     return out
 
 
-def _compute_findings(identity, performance, services, nics, hardware=None, installed_sw=None, network_config=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None) -> list:
+def _compute_findings(identity, performance, services, nics, hardware=None, installed_sw=None, network_config=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None, binaries=None) -> list:
     findings = []
 
     # None vs {} matters for probe_results: None means the caller never
@@ -2176,6 +2359,9 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
     # collection burst starving the probes, not an empty rig, and gates the
     # startup-grace suppressions below. Capture before any rebinding.
     probes_attempted = probe_results is not None
+
+    # ── Pixellot program can't start (missing DLL / loader error) ──
+    findings.extend(_binary_findings(binaries))
 
     # ── Wi-Fi uplink, internet on a camera port, Wi-Fi card off ──
     findings.extend(_uplink_findings(network_config, wifi))
@@ -2871,7 +3057,20 @@ _READINESS_POLICY = {
                                          #     (Olympic WA, 2026-08-18).
     "agent-down":            "blocker",  # F2  core capture process down
     "coordinator-down":      "blocker",  # F3  core capture process down
+    "pixellot-dll-missing":  "blocker",  # F42 a DLL VPU.exe / Agent / Coordinator loads
+                                         #     at start is missing, so it dies at launch.
+                                         #     The error box keeps a 3 MB VPU.exe alive,
+                                         #     so it read Running and the unit scored
+                                         #     PASS for a week. Field: Bear Grass NC,
+                                         #     2026-10-15 (libcef.dll, 5.37.3).
+    "pixellot-start-error":  "blocker",  # F43 Windows logged a Pixellot loader error in
+                                         #     the last 2 h, or the running VPU.exe is the
+                                         #     copy on the error box.
     "cam-none":              "blocker",  # F4  0 of N main cameras present
+    "cam-partial":           "blocker",  # F6  k of N present (k>0). A multi-camera head
+                                         #     (S2 = 2, S1 = 4) can't stitch its picture
+                                         #     with a camera missing, so it won't stream.
+                                         #     Was "risk" until Archer GA (PXLS2_15488).
     "gpu-none":              "blocker",  # F5  no NVIDIA GPU — encoder can't run
     "gpu-igpu-only":         "blocker",  # F11 Intel iGPU only — wrong hardware
     "port-dns-blocked":      "blocker",  # F23a DNS down → name resolution fails
@@ -2903,7 +3102,6 @@ _READINESS_POLICY = {
     "tz-non-us":             "blocker",  # F25 non-US time zone (Ian, 2026-09-22: critical)
 
     # ── RISKS → WARN (will likely stream, but a human should eyeball) ──
-    "cam-partial":           "risk",     # F6  k of N present (k>0)
     "cam-count-pending":     "risk",     # zero cameras during the cold-start grace:
                                          #     unconfirmed is not a pass. The Dashboard
                                          #     re-checks when the grace window closes.
@@ -2933,6 +3131,8 @@ _READINESS_POLICY = {
                                          #     The game still airs, without graphics,
                                          #     and it recurs, so WARN. Field: Tanque
                                          #     Verde, MacLaren, Armstrong IL (2026-09).
+    "pixellot-start-error-recent": "risk",  # F43b same, last 2-24 h ago: can't
+                                         #     tell whether it has started since.
     "graphics-engine-none":  "risk",     # F41 agent turns graphics off because no
                                          #     scoreboard type is selected. Airs clean
                                          #     of graphics every game until fixed.
@@ -2964,6 +3164,7 @@ _READINESS_POLICY = {
     "sw-game-platform":      "info",     # F34
     "sw-consumer-sync":      "info",     # F35
     "uptime-high":           "info",     # F36
+    "pixellot-start-error-past": "info", # F43c same, 1-7 days ago, not since.
     "tls-filtered-support":  "info",     # F38b only support-plane hosts filtered
                                          #      (LogMeIn / python.org) - remote
                                          #      support and installer downloads
@@ -3780,13 +3981,14 @@ def _camera_count_findings(ports, expected_main, probe_results, probes_attempted
     missing = expected - detected_main
     return [{
         "code": "cam-partial",
-        "severity": "warning",
+        "severity": "critical",
         "category": "Camera",
-        "title": f"{detected_main} of {expected} main cameras detected ({missing} missing)",
+        "title": f"{detected_main} of {expected} main cameras detected ({missing} missing), so it won't stream",
         "recommendation": (
             f"{missing} main camera{'s are' if missing != 1 else ' is'} expected but not "
-            f"connected." + uplink_note + " Check the missing port's cable, the camera's "
-            "power, and the switch port."
+            f"connected. The VPU needs every main camera to build the picture, so it "
+            f"won't stream until {'they are' if missing != 1 else 'it is'} back." + uplink_note
+            + " Check the missing port's cable, the camera's power, and the switch port."
         ),
         "details": details,
         "evidence": evidence,
@@ -3908,7 +4110,7 @@ def _compute_camera_findings(ports: list, poe=None) -> list:
 # ─── Data-building helpers (shared by per-page and preload) ──
 
 
-def _build_dashboard(identity, performance, services, nics, network_config=None, hardware=None, installed_sw=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, perf_sample=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None):
+def _build_dashboard(identity, performance, services, nics, network_config=None, hardware=None, installed_sw=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, perf_sample=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None, binaries=None):
     # Tag adapter roles (motherboard / camera / wifi) so both the findings and
     # the embedded "Network config" the dashboard ships carry them.
     _classify_network_adapters(network_config)
@@ -3965,13 +4167,14 @@ def _build_dashboard(identity, performance, services, nics, network_config=None,
         "Installed software": installed_sw,
         "Port connectivity": port_tests,
         "Graphics delivery": graphics_delivery,
+        "Pixellot program files": binaries,
     }
     source_errors = [
         name for name, data in _sources.items()
         if isinstance(data, dict) and data.get("error")
     ]
 
-    findings = _compute_findings(identity, performance, services, nics, hardware, installed_sw, network_config, install_state, port_tests, gpu_info, wifi, pixellot_config=pixellot_config, expectations=expectations, disk_health=disk_health, probe_results=probe_results, tls_inspection=tls_inspection, lmi_log=lmi_log, graphics_delivery=graphics_delivery)
+    findings = _compute_findings(identity, performance, services, nics, hardware, installed_sw, network_config, install_state, port_tests, gpu_info, wifi, pixellot_config=pixellot_config, expectations=expectations, disk_health=disk_health, probe_results=probe_results, tls_inspection=tls_inspection, lmi_log=lmi_log, graphics_delivery=graphics_delivery, binaries=binaries)
 
     return {
         "identity": flat_identity,
@@ -4144,7 +4347,8 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
         return None
     (identity, performance, services, nics, net_config, hardware, installed_sw,
      install_state, port_tests, gpu_info, wifi, pixellot_config, expectations,
-     disk_health, perf_sample, tls_inspection, lmi_log, graphics_delivery) = await asyncio.gather(
+     disk_health, perf_sample, tls_inspection, lmi_log, graphics_delivery,
+     binaries) = await asyncio.gather(
         run_ps("Get-SystemIdentity.ps1"),
         run_ps("Get-Performance.ps1"),
         run_ps("Get-Services.ps1"),
@@ -4180,6 +4384,11 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
         # did the scorebug ever reach the video? ~1s on VPU2; the collector
         # stops itself at 25s and says so.
         run_ps("Get-GraphicsDelivery.ps1", timeout=40),
+        # Can VPU.exe / Agent / Coordinator start? A missing DLL leaves a
+        # 3 MB VPU.exe stuck on an error box that reads Running (Bear Grass
+        # NC, 2026-10-15). ~2s on vpu-home; libcef.dll alone is 212 MB, so
+        # it seeks the import table rather than reading files.
+        run_ps("Test-PixellotBinaries.ps1", timeout=20),
     )
     # CGI probe (cached 30s; usually already warm from preload) so the
     # slow-port finding identifies the OCR by its actual camera model, not a
@@ -4218,6 +4427,8 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
             pixellot_config=pixellot_config, network_config=net_config,
             probe_results=probe_results, gpu_info=gpu_info,
             expectations=expectations, disk_health=disk_health,
+            hardware=hardware, services=services, installed_sw=installed_sw,
+            binaries=binaries,
         )
     return _build_dashboard(
         identity, performance, services, nics, net_config, hardware,
@@ -4226,6 +4437,7 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
         disk_health=disk_health, perf_sample=perf_sample,
         probe_results=probe_results, tls_inspection=tls_inspection,
         lmi_log=lmi_log, graphics_delivery=graphics_delivery,
+        binaries=binaries,
     )
 
 
@@ -4360,7 +4572,7 @@ async def api_network():
     return _build_network(config, domains, ports, ntp, local, ntp_peers, dns_resolution, wifi, tls, lmi_log)
 
 
-@app.get("/api/network/local-ping")
+@app.post("/api/network/local-ping")
 async def api_local_ping(count: int = 4):
     count = max(1, min(count, 100))  # clamp 1-100
     timeout = max(20, count * 3)  # ~3s per ping round
@@ -4374,7 +4586,7 @@ async def api_network_health():
     return await run_ps("Get-NetworkHealth.ps1", timeout=10)
 
 
-@app.get("/api/network/capture")
+@app.post("/api/network/capture")
 async def api_network_capture(duration: int = 30):
     duration = max(10, min(duration, 60))
     timeout = duration + 30  # extra headroom for pktmon stop + analysis
@@ -4383,7 +4595,7 @@ async def api_network_capture(duration: int = 30):
     return result
 
 
-@app.get("/api/network/traceroute")
+@app.post("/api/network/traceroute")
 async def api_traceroute(target: str = "pixellot.tv", max_hops: int = 20):
     max_hops = max(5, min(max_hops, 30))
     timeout = max(30, max_hops * 3)  # generous — most finish well under this
@@ -5915,6 +6127,71 @@ async def api_save_settings(request: Request):
     return {"ok": True}
 
 
+# ── Fleet monitor opt-in (Settings card) ─────────────────────
+# One click opts this unit in to the fleet monitor, which then reports to
+# Pulse Vitals. The monitor runs from its own copy of Pulse, so a production
+# launch over C:\Pulse doesn't break it. Dev channel only for now. See
+# fleet_enroll.py.
+import fleet_enroll as _fleet_enroll  # noqa: E402
+
+_DEMO_FLEET = {"state": "off"}
+
+
+def _fleet_demo_status():
+    now = time.time()
+    st = {"available": True, "channel": "dev", "admin": True, "root": _fleet_enroll.MONITOR_ROOT,
+          "vitalsUrl": _fleet_enroll.VITALS_URL, "sourceHasMonitor": True, "state": _DEMO_FLEET["state"]}
+    if st["state"] == "on":
+        st.update({"version": "1.5.0-dev", "copiedAt": now - 3600, "current": True,
+                   "lastTickAt": now - 140, "lastTickOutcome": "ok", "lastPostAt": now - 1900,
+                   "lastPostKind": "heartbeat", "verdict": "PASS", "control": "on",
+                   "unitUrl": _fleet_enroll.VITALS_URL + "#/unit/demo"})
+    return st
+
+
+@app.get("/api/fleet-monitor")
+async def api_fleet_monitor_status():
+    if DEMO_MODE:
+        return _fleet_demo_status()
+    return await asyncio.to_thread(_fleet_enroll.status, _web_root, _update_channel())
+
+
+@app.post("/api/fleet-monitor/enroll")
+async def api_fleet_monitor_enroll():
+    if DEMO_MODE:
+        await asyncio.sleep(1.5)
+        _DEMO_FLEET["state"] = "on"
+        return {"ok": True, "steps": ["Demo mode: nothing was installed."]}
+    res = await asyncio.to_thread(_fleet_enroll.enroll, _web_root, _update_channel())
+    _server_log.info("Fleet monitor opt-in: %s", "ok" if res.get("ok") else res.get("error"))
+    return res
+
+
+@app.post("/api/fleet-monitor/unenroll")
+async def api_fleet_monitor_unenroll():
+    if DEMO_MODE:
+        await asyncio.sleep(1.0)
+        _DEMO_FLEET["state"] = "off"
+        return {"ok": True, "steps": ["Demo mode: nothing was removed."]}
+    res = await asyncio.to_thread(_fleet_enroll.unenroll)
+    _server_log.info("Fleet monitor opt-out: %s", "ok" if res.get("ok") else res.get("error"))
+    return res
+
+
+async def _refresh_fleet_monitor():
+    """At a dev launch on an opted-in unit, copy this build over the
+    monitor's if it differs. Waits a minute so it never slows the launch."""
+    if DEMO_MODE:
+        return
+    await asyncio.sleep(60)
+    try:
+        res = await asyncio.to_thread(_fleet_enroll.refresh, _web_root, _update_channel())
+    except Exception as e:
+        res = {"ok": False, "error": str(e)}
+    if res is not None:
+        _server_log.info("Fleet monitor refresh: %s", "ok" if res.get("ok") else res.get("error"))
+
+
 # ── Self-update ──────────────────────────────────────────────
 # Pulse installs to C:\Pulse via a channel launcher (Pulse.bat) that already
 # knows how to resolve -> download -> install -> restart a release. These
@@ -6460,677 +6737,15 @@ async def _remove_splashtop() -> None:
             pass
 
 
-# Fire-and-forget "Pulse ran on this VPU" beacon for fleet tracking. The sink is
-# the pulse-checkin Cloudflare Worker (tools/checkin-worker/), which appends one
-# row per check-in to D1. There is no write key: Pulse ships from a public repo,
-# so a key in it was readable by anyone (Snyk flagged it on PR #229). The
-# Worker's rate limit and validation are the protection; real per-unit auth
-# comes with the Unity/DevOps transport. The env var PULSE_CHECKIN_URL
-# overrides the URL.
-#
-# Every check-in is queued on disk first and leaves the queue only when the
-# Worker acknowledges it. The previous sink (an Apps Script sheet) lost four days
-# of check-ins because nothing checked the reply; now a dead sink only delays
-# them, and they replay with their original sentAt on a later launch. The queue
-# lives in the web root beside pulse-settings.json, which the launcher's xcopy
-# update never removes.
-#
-# If the Worker can't be reached (a school filter that blocks workers.dev, a
-# Cloudflare outage), the new launch check-in also goes to the old Apps Script
-# sheet, which school filters are less likely to block. It stays queued for the
-# Worker either way, so D1 still ends up complete; the sheet is only a safety
-# net for seeing the unit at all. Only that one check-in goes, never the
-# backlog, so an outage can't flood the sheet. The sheet keys a unit on serial,
-# then venue id; check-ins no longer carry the serial, so a unit gets a new
-# sheet row keyed on its venue id at the switch. PULSE_CHECKIN_FALLBACK_URL /
-# PULSE_CHECKIN_FALLBACK_SECRET override; an empty URL turns the fallback off.
-#
-# Check-ins carry no hostname or BIOS serial (Ian, 2026-10-13): a unit is its
-# Pixellot venue id and VPU name.
-#
-# Never sends in demo/dev (DEMO_MODE), so a developer's machine can't pollute the
-# list. Fail-open in every branch: a blocked network or unreachable sink must
-# never slow or break launch. Stdlib urllib on purpose (no httpx): the beacon has
-# to work on any installed build, even one missing an optional pip dependency.
-# The address lives in checkin_lite.py, the one place to change it (the
-# monitor's event-time sender can't import this file).
-from checkin_lite import CHECKIN_URL as _CHECKIN_URL  # noqa: E402
-_CHECKIN_FALLBACK_URL    = "https://script.google.com/macros/s/AKfycbworYEcINtNfd1R6sTvHFDFqOHzYVA1XxHZRStB54T2GcTgQ8JvE0lxnboJ9q_jEFS4/exec"
-_CHECKIN_FALLBACK_SECRET = "7a161bad7765fc5078b8375007999160c5687bf5da52ae1ca717ebbad628e648"
-_CHECKIN_STATE_PATH = _os.path.join(_web_root, "pulse-checkin-queue.json")
-_CHECKIN_BATCH = 50
-# The Worker refuses a body over 64 KB with a 413 for the whole batch, so a
-# batch is cut by size as well as count. Launch check-ins (~0.5 KB) fit 50 at a
-# time; the fleet monitor's full reports (~2 KB) don't, and without this cut the
-# same oversized batch went back on every flush and the queue never drained.
-_CHECKIN_MAX_BODY_BYTES = 64 * 1024
-_CHECKIN_MAX_QUEUED = 200
-_CHECKIN_MAX_AGE_DAYS = 30
-# A failure younger than this is a blip; older is worth a notice on the About page.
-_CHECKIN_NOTICE_AFTER_HOURS = 24
-_CHECKIN_TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
-_checkin_lock = asyncio.Lock()
-
-
-def _checkin_now() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).strftime(_CHECKIN_TS_FORMAT)
-
-
-def _checkin_age_hours(ts, now: str) -> Optional[float]:
-    from datetime import datetime
-    try:
-        return (datetime.strptime(now, _CHECKIN_TS_FORMAT)
-                - datetime.strptime(ts, _CHECKIN_TS_FORMAT)).total_seconds() / 3600
-    except (TypeError, ValueError):
-        return None
-
-
-def _load_checkin_state() -> dict:
-    try:
-        with open(_CHECKIN_STATE_PATH, "r", encoding="utf-8") as fh:
-            state = json.load(fh)
-    except (OSError, ValueError):
-        return {"queue": []}
-    if not isinstance(state, dict):
-        return {"queue": []}
-    if not isinstance(state.get("queue"), list):
-        state["queue"] = []
-    state["queue"] = [e for e in state["queue"] if isinstance(e, dict) and e.get("checkinId")]
-    return state
-
-
-def _save_checkin_state(state: dict) -> None:
-    tmp = _CHECKIN_STATE_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(state, fh)
-    _os.replace(tmp, _CHECKIN_STATE_PATH)
-
-
-def _trim_checkin_queue(queue: list, now: str) -> list:
-    keep = []
-    for entry in queue:
-        age = _checkin_age_hours(entry.get("sentAt"), now)
-        if age is None or age <= _CHECKIN_MAX_AGE_DAYS * 24:
-            keep.append(entry)
-    return keep[-_CHECKIN_MAX_QUEUED:]
-
-
-def _checkin_body_bytes(batch: list) -> int:
-    # Exactly the bytes _post_checkin_sync sends.
-    return len(json.dumps({"checkins": batch}).encode("utf-8"))
-
-
-def _next_checkin_batch(queue: list) -> list:
-    """The oldest check-ins that fit one request: at most _CHECKIN_BATCH, and
-    under the Worker's body cap. Always at least one, so the caller can see
-    an entry too big to send at all."""
-    batch = []
-    for entry in queue[:_CHECKIN_BATCH]:
-        if batch and _checkin_body_bytes(batch + [entry]) > _CHECKIN_MAX_BODY_BYTES:
-            break
-        batch.append(entry)
-    return batch
-
-
-def _post_checkin_sync(url: str, body: dict) -> dict:
-    """POST one batch; return the Worker's JSON reply or raise."""
-    data = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers={
-        "Content-Type": "application/json",
-        "User-Agent": f"Pulse/{APP_VERSION}",
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=4) as resp:
-            raw = resp.read(256 * 1024)
-    except urllib.error.HTTPError as e:
-        detail = ""
-        try:
-            detail = json.loads(e.read(4096) or b"{}").get("error") or ""
-        except Exception:
-            pass
-        raise RuntimeError(f"HTTP {e.code}" + (f": {detail}" if detail else ""))
-    try:
-        reply = json.loads(raw)
-    except ValueError:
-        raise RuntimeError("reply was not JSON")
-    if not isinstance(reply, dict) or reply.get("ok") is not True or not isinstance(reply.get("results"), list):
-        raise RuntimeError("sink did not acknowledge" + (f": {reply['error']}" if isinstance(reply, dict) and reply.get("error") else ""))
-    return reply
-
-
-async def _flush_checkin_queue(state: dict, url: str) -> None:
-    """Send queued check-ins oldest first; drop only what the Worker answered for."""
-    while state["queue"]:
-        batch = _next_checkin_batch(state["queue"])
-        if _checkin_body_bytes(batch) > _CHECKIN_MAX_BODY_BYTES:
-            # One check-in the Worker can never accept. Drop it, like an
-            # "invalid" reply, rather than let it block everything behind it.
-            _server_log.warning("Check-in %s dropped: %d bytes is over the sink's limit",
-                                batch[0].get("checkinId"), _checkin_body_bytes(batch))
-            state["queue"] = state["queue"][1:]
-            continue
-        state["lastAttemptAt"] = _checkin_now()
-        try:
-            reply = await asyncio.to_thread(_post_checkin_sync, url, {"checkins": batch})
-        except Exception as e:
-            state["lastError"] = str(e) or e.__class__.__name__
-            return
-        answered = set()
-        for r in reply["results"]:
-            if isinstance(r, dict) and r.get("status") in ("inserted", "duplicate", "invalid"):
-                answered.add(r.get("checkinId"))
-                if r.get("status") == "invalid":
-                    _server_log.warning("Check-in %s rejected as invalid by the sink", r.get("checkinId"))
-        if not answered.intersection(e["checkinId"] for e in batch):
-            state["lastError"] = "sink answered for none of the batch"
-            return
-        state["queue"] = [e for e in state["queue"] if e["checkinId"] not in answered]
-        state["lastSentAt"] = state["lastAttemptAt"]
-        state.pop("lastError", None)
-        # Fleet control for the scheduled monitor (monitor.read_control):
-        # whether it runs and which collectors it skips. Kept until the Worker
-        # says otherwise, so an unreachable Worker never turns it back on.
-        if isinstance(reply.get("control"), dict):
-            state["control"] = dict(reply["control"], receivedAt=state["lastAttemptAt"])
-
-
-# The last venue id / VPU name this unit reported, set by the scheduled monitor
-# (monitor_once.py) from its post record. The identity collector can come back
-# "ok" without its Pixellot part while Pixellot rewrites its config (lab-z2,
-# 2026-10-14 05:10Z), and with no hostname or serial a check-in without those
-# two can't be tied to any unit. Empty for an interactive launch.
-_CHECKIN_IDENTITY_FALLBACK: dict = {}
-
-
-async def _build_checkin_entry(dashboard: Optional[dict] = None, reason: str = "startup",
-                               delta: Optional[dict] = None,
-                               monitor: Optional[dict] = None,
-                               telemetry: Optional[dict] = None,
-                               heartbeat: bool = False, paused: bool = False) -> Optional[dict]:
-    """One check-in. `reason` is startup (an interactive launch) or, from the
-    scheduled monitor, periodic / state-change, which also carry the finding
-    transitions (`delta`) and the pass's own cost (`monitor`). `dashboard`
-    lets the monitor reuse the pass it already ran. `heartbeat` is the
-    monitor's hourly "still PASS, nothing changed" line: identity and status
-    only, built from that pass with no further collection.
-
-    No hostname or BIOS serial (Ian, 2026-10-13): units are identified by
-    their Pixellot venue id and VPU name."""
-    import uuid
-    if paused:
-        # Fleet control has the monitor switched off: identity only, hourly,
-        # so the unit still shows as reachable and hears when it's back on.
-        known = _CHECKIN_IDENTITY_FALLBACK
-        return {"checkinId": str(uuid.uuid4()), "sentAt": _checkin_now(), "reason": "paused",
-                "venueId": known.get("venueId"), "vpuName": known.get("vpuName"),
-                "pulseVersion": APP_VERSION}
-    if heartbeat:
-        ident = (dashboard or {}).get("identity") or {}
-        return {"checkinId": str(uuid.uuid4()), "sentAt": _checkin_now(), "reason": "heartbeat",
-                "venueId": ident.get("venueId") or _CHECKIN_IDENTITY_FALLBACK.get("venueId"),
-                "vpuName": ident.get("vpuName") or _CHECKIN_IDENTITY_FALLBACK.get("vpuName"),
-                "status": "PASS"}
-    ident = await run_ps("Get-SystemIdentity.ps1")
-    if not isinstance(ident, dict) or ident.get("error"):
-        return None
-    cs   = ident.get("computerSystem") or {}
-    px   = ident.get("pixellot") or {}
-    os_  = ident.get("operatingSystem") or {}
-    entry = {
-        "checkinId":    str(uuid.uuid4()),
-        "sentAt":       _checkin_now(),
-        "venueId":      px.get("venueId") or _CHECKIN_IDENTITY_FALLBACK.get("venueId"),
-        "vpuName":      px.get("vpuName") or _CHECKIN_IDENTITY_FALLBACK.get("vpuName"),
-        "model":        cs.get("model"),
-        "pulseVersion": APP_VERSION,
-        "reason":       reason,
-    }
-    if telemetry:
-        # A monitor check-in is the utilitarian payload: the verdict lives in
-        # `telemetry`, and channel / OS build wait for the troubleshooting tier.
-        if delta is not None:
-            entry["delta"] = _checkin_delta(delta)
-        if monitor:
-            entry["monitor"] = monitor
-        entry["telemetry"] = telemetry
-        return entry
-    entry["channel"] = _update_channel()
-    entry["osBuild"] = os_.get("buildNumber")
-    # UBR tells an unpatched 17763.253 unit from a patched one; the build
-    # number alone can't. Fail-open: the check-in goes out without it.
-    try:
-        ubr = await run_ps("Get-WindowsUbr.ps1", timeout=10)
-        if isinstance(ubr, dict) and not ubr.get("error"):
-            entry["ubr"] = ubr.get("ubr")
-            entry["osBuild"] = entry["osBuild"] or ubr.get("currentBuild")
-    except Exception as e:
-        _server_log.info("Check-in UBR skipped (%s)", e)
-    # Stream Readiness verdict on the beacon: a pre-game-readiness time series at
-    # ~zero marginal cost. A readiness error never blocks the check-in.
-    try:
-        dash = dashboard if dashboard is not None else await _collect_dashboard()
-        verdict = (dash or {}).get("readiness") or {}
-        if verdict:
-            entry["readiness"] = {
-                "status":        verdict.get("status"),
-                "policyVersion": verdict.get("policyVersion"),
-                "blockers":      [b.get("code") for b in verdict.get("blockers", [])],
-                "risks":         [r.get("code") for r in verdict.get("risks", [])],
-            }
-    except Exception as e:
-        _server_log.info("Check-in readiness skipped (%s)", e)
-    if delta is not None:
-        entry["delta"] = _checkin_delta(delta)
-    if monitor:
-        entry["monitor"] = monitor
-    return entry
-
-
-def _checkin_delta(delta: dict) -> dict:
-    """The monitor's transitions, trimmed for the wire: codes and classes, not
-    the full finding copy (the sink caps a batch at 64 KB)."""
-    def slim(events):
-        return [{"code": e.get("code"), "class": e.get("class"), "title": e.get("title"),
-                 "since": e.get("since")} for e in (events or [])][:25]
-    return {
-        "status":     delta.get("status"),
-        "prevStatus": delta.get("prevStatus"),
-        "opened":     slim(delta.get("opened")),
-        "resolved":   slim(delta.get("resolved")),
-        "persisting": list(delta.get("persisting") or [])[:50],
-    }
-
-
-# ── Fleet-monitor telemetry (pulse.telemetry/v1) ─────────────────────────────
-# What the scheduled monitor reports: the utilitarian fields Ian chose for NFHS
-# Console on 2026-10-13 (verdict, blockers, streaming path, failed ports, the
-# internet adapter's IPv4 setup and MAC, cameras with per-port detail,
-# services down, scoreboard source, boots and power loss, versions). Oracle
-# already shows Pixellot's own live metrics (CPU, bandwidth, dark court), so
-# this carries what Pixellot can't see from outside the box. Troubleshooting
-# detail (full findings copy, every adapter, clock drift, PoE, GPUs, disks,
-# recordings) comes later. Kept small on purpose: Unity writes must be. D1
-# stores it as the proof of concept. Leaves out hostname, BIOS serial and
-# camera serials.
-_TELEMETRY_SCHEMA = "pulse.telemetry/v1"
-_PORT_NAMES = {
-    "Zixi Streaming": "Streaming (Zixi primary)",
-    "Zixi Backup":    "Streaming (Zixi backup)",
-    _RTMP_FALLBACK_PURPOSE: "Streaming (RTMP last resort)",
-}
-
-
-def _telemetry_ports(port_tests) -> Optional[list]:
-    if not isinstance(port_tests, dict) or port_tests.get("error"):
-        return None
-    out = []
-    for r in port_tests.get("results") or []:
-        purpose = r.get("purpose") or ""
-        out.append({
-            "name":     _PORT_NAMES.get(purpose, purpose),
-            "rule":     f"{(r.get('protocol') or '').upper()} {r.get('port')}".strip(),
-            "host":     r.get("host"),
-            "ok":       r.get("status") == "pass",
-            "optional": bool(r.get("optional")),
-        })
-    return out
-
-
-def _telemetry_streaming_path(port_tests) -> Optional[str]:
-    """Which rung of the Zixi UDP 2088 -> UDP 443 -> RTMP TCP 1935 chain a
-    stream would use now, or None if the port probe didn't run."""
-    if not isinstance(port_tests, dict) or port_tests.get("error"):
-        return None
-    ok = {r.get("purpose") for r in port_tests.get("results") or [] if r.get("status") == "pass"}
-    for purpose, name in (("Zixi Streaming", "zixi-2088"), ("Zixi Backup", "zixi-443"),
-                          (_RTMP_FALLBACK_PURPOSE, "rtmp-1935")):
-        if purpose in ok:
-            return name
-    return "blocked"
-
-
-def _telemetry_cameras(raw: dict) -> dict:
-    nics = raw.get("nics")
-    expectations = raw.get("expectations") or {}
-    expected = expectations.get("expectedMainCameras") if not expectations.get("error") else None
-    out = {"expected": expected if isinstance(expected, int) else None,
-           "detected": None, "systemType": expectations.get("systemType"), "ports": []}
-    if not isinstance(nics, dict) or nics.get("error"):
-        return out
-    probes = raw.get("probe_results") or {}
-    ports = _enrich_ports(nics, raw.get("pixellot_config"), probes)
-    _flag_uplink_ports(ports, raw.get("network_config"))
-    out["detected"] = _count_main_cameras(ports, probes)
-    for p in ports:
-        if p.get("hasInternetUplink"):
-            role = "internet cable"
-        elif not p.get("isUp"):
-            role = "no link"
-        elif p.get("isOcr"):
-            role = "scoreboard camera"
-        elif p.get("camerasDetected"):
-            role = "camera"
-        else:
-            role = "linked, no camera answering"
-        cams = p.get("camerasDetected") or []
-        out["ports"].append({
-            "port":          p.get("portLabel") or p.get("name"),
-            "portMac":       _norm_mac(p.get("mac")),
-            "state":         role,
-            "linkMbps":      p.get("linkSpeedMbps") if p.get("isUp") else None,
-            "expectedMbps":  p.get("expectedSpeedMbps"),
-            "slow":          bool(p.get("isDegraded")),
-            "cameraModel":   cams[0].get("model") if cams else None,
-            "cameraMac":     _norm_mac(cams[0].get("cgiMac") or cams[0].get("mac")) if cams else None,
-            "cameraFirmware": cams[0].get("firmwareVersion") if cams else None,
-        })
-    return out
-
-
-async def _collect_telemetry_extras(raw: dict, skip_intrusive: bool = False) -> None:
-    """Collectors the telemetry needs beyond the dashboard pass: boots and
-    power loss, and the scoreboard source. Fills `raw`; each part fails soft.
-    `skip_intrusive` is accepted for symmetry; neither collector probes the
-    network."""
-    del skip_intrusive
-    reboots, sc = await asyncio.gather(
-        run_ps("Get-RebootHistory.ps1", timeout=30),
-        # Straight to the collector, not _run_sc_status: that also appends to
-        # the ScoreConnect config history, which is the interactive tab's job.
-        run_ps("Get-ScoreConnectStatus.ps1", {"BaseUrl": sc3_base_url()}, timeout=15),
-        return_exceptions=True,
-    )
-    raw.update(reboots=reboots if isinstance(reboots, dict) and not reboots.get("error") else None,
-               scoreconnect=sc if isinstance(sc, dict) else None)
-
-
-def _prefix_to_mask(prefix) -> Optional[str]:
-    try:
-        n = int(prefix)
-    except (TypeError, ValueError):
-        return None
-    if not 0 <= n <= 32:
-        return None
-    bits = (0xFFFFFFFF << (32 - n)) & 0xFFFFFFFF if n else 0
-    return ".".join(str((bits >> sh) & 0xFF) for sh in (24, 16, 8, 0))
-
-
-def _norm_mac(v) -> Optional[str]:
-    """AA:BB:CC:DD:EE:FF, whatever separator the collector used."""
-    hexes = re.sub(r"[^0-9A-Fa-f]", "", str(v or ""))
-    if len(hexes) != 12:
-        return None
-    return ":".join(hexes[i:i + 2] for i in range(0, 12, 2)).upper()
-
-
-def _telemetry_adapters(network_config, uplink_alias) -> Optional[list]:
-    """Every adapter's IPv4 setup. The internet adapter is flagged; camera
-    ports usually sit on 169.254 link-local, flagged so a grid can hide them."""
-    if not isinstance(network_config, dict) or network_config.get("error"):
-        return None
-    macs = {a.get("interfaceIndex"): _norm_mac(a.get("macAddress"))
-            for a in network_config.get("adapters") or [] if a.get("interfaceIndex") is not None}
-    out = []
-    # The collector names it ipConfigurations; the dashboard payload, ipConfig.
-    for a in network_config.get("ipConfigurations") or network_config.get("ipConfig") or []:
-        ips = a.get("ipv4Address") or []
-        gws = a.get("ipv4DefaultGateway") or []
-        dns = [d for d in (a.get("dnsServers") or []) if ":" not in str(d)]  # IPv4 only
-        ip = ips[0] if ips else None
-        out.append({
-            "adapter":    a.get("interfaceAlias"),
-            "mac":        macs.get(a.get("interfaceIndex")),
-            "internet":   a.get("interfaceAlias") == uplink_alias,
-            "ip":         ip,
-            "subnetMask": _prefix_to_mask(a.get("prefixLength")),
-            "gateway":    gws[0] if gws else None,
-            "dns1":       dns[0] if len(dns) > 0 else None,
-            "dns2":       dns[1] if len(dns) > 1 else None,
-            "dhcp":       a.get("dhcpEnabled"),
-            "linkLocal":  bool(ip and str(ip).startswith("169.254.")),
-        })
-    return out
-
-
-def _telemetry_scoreboard(raw: dict) -> Optional[dict]:
-    sc = raw.get("scoreconnect")
-    nics = raw.get("nics")
-    ocr = "unknown"
-    if isinstance(nics, dict) and not nics.get("error"):
-        ports = _enrich_ports(nics, raw.get("pixellot_config"), raw.get("probe_results") or {})
-        _flag_uplink_ports(ports, raw.get("network_config"))
-        ocr = _scoreboard_camera_state(ports, raw.get("pixellot_config"))
-    if sc is None and ocr == "unknown":
-        return None
-    src = _scoreboard_source(sc, ocr)
-    out = {"source": src.get("source"), "ok": src.get("ok")}
-    # What `ok` doesn't say (it means "ScoreConnect is running" when there's
-    # no OCR camera): is the ScoreLink plugged in, is score data arriving, and
-    # which sport ScoreConnect decodes. 6493 read ok for a whole event with
-    # its ScoreLink missing (2026-10-14). Additive fields; `ok` keeps its v1
-    # meaning.
-    if isinstance(sc, dict) and not sc.get("error"):
-        if isinstance(sc.get("scoreLinkConnected"), bool):
-            out["scoreLinkConnected"] = sc["scoreLinkConnected"]
-        ds = sc.get("dataStatus")
-        if isinstance(ds, str) and ds:
-            out["dataFlowing"] = ds.lower().startswith("data is present")
-            out["dataStatus"] = ds[:120]
-        sport = (sc.get("configuration") or {}).get("sport") if isinstance(sc.get("configuration"), dict) else None
-        if sport:
-            out["sport"] = str(sport)[:80]
-    return out
-
-
-def _services_down(services: dict, scoreboard: Optional[dict]) -> list:
-    """Services that are down AND should be up. vpu.exe only runs during an
-    event, so it's never "down"; ScoreConnect only matters when it is the
-    score source (an OCR camera makes it optional) and it is installed."""
-    down = []
-    for name, st in services.items():
-        key = name.lower()
-        if key == "vpu" or st == "Running":
-            continue
-        if key.startswith("scoreconnect"):
-            if st == "NotFound" or (scoreboard or {}).get("source") == "ocr":
-                continue
-        down.append(name)
-    return down
-
-
-def _telemetry_power(raw: dict) -> dict:
-    rb = raw.get("reboots") or {}
-    hist = rb.get("history") or []
-    unexpected = [h for h in hist if h.get("category") == "unexpected" or h.get("eventId") in (41, 6008)]
-    return {"lastBoot": rb.get("lastBoot") or None,
-            # Power cuts and hard crashes, from Get-RebootHistory's 7-day window.
-            "unexpectedShutdowns7d": len(unexpected) if rb else None}
-
-
-def _build_telemetry(dashboard: dict, raw: dict, status_since: Optional[str] = None,
-                     status: Optional[str] = None, open_codes=None) -> dict:
-    """The utilitarian payload. Fail-soft: a collector that errored leaves its
-    part null rather than guessing. `status` is the monitor's settled verdict
-    (a finding counts only after two passes see it) and `open_codes` the
-    findings it settled on; headline and blockers follow them, so a PASS
-    never carries an unconfirmed problem as its headline."""
-    verdict = (dashboard or {}).get("readiness") or {}
-    ident = (dashboard or {}).get("identity") or {}
-    blockers, risks = verdict.get("blockers") or [], verdict.get("risks") or []
-    if open_codes is not None:
-        keep = set(open_codes)
-        blockers = [b for b in blockers if b.get("code") in keep]
-        risks = [r for r in risks if r.get("code") in keep]
-
-    services = {}
-    for s in ((dashboard or {}).get("services") or {}).get("services") or []:
-        if s.get("name"):
-            services[s["name"]] = s.get("status")
-
-    net = (dashboard or {}).get("networkConfig") or {}
-    port_tests = raw.get("port_tests")
-    ports = _telemetry_ports(port_tests)
-    cameras = _telemetry_cameras(raw)
-    scoreboard = _telemetry_scoreboard(raw)
-    adapters = _telemetry_adapters(raw.get("network_config"),
-                                   (net.get("uplinkAdapter") or {}).get("interfaceAlias"))
-    inet = next((a for a in adapters or [] if a.get("internet")), None)
-    if inet:
-        inet = {k: inet.get(k) for k in ("adapter", "mac", "ip", "subnetMask", "gateway",
-                                         "dns1", "dns2", "dhcp")}
-    return {
-        "schema":          _TELEMETRY_SCHEMA,
-        "status":          status or verdict.get("status"),
-        "statusSince":     status_since,
-        "headline":        (blockers or risks or [{}])[0].get("title"),
-        "blockers":        [b.get("title") for b in blockers][:10],
-        "checkedAt":       verdict.get("timestamp"),
-        "pixellotVersion": ident.get("pixellotVersion"),
-        "network": {
-            "internetReachable": net.get("internetReachable"),
-            "streamingPath":     _telemetry_streaming_path(port_tests),
-            "portsFailed":       None if ports is None else
-                                 [f"{p['name']} ({p['rule']})" for p in ports if not p["ok"] and not p["optional"]],
-            "internet":          inet,
-        },
-        "cameras": {
-            "systemType": cameras.get("systemType"),
-            "expected":   cameras.get("expected"),
-            "detected":   cameras.get("detected"),
-            "slow":       sum(1 for p in cameras.get("ports") or [] if p.get("slow")),
-            "ports":      cameras.get("ports"),
-        },
-        "servicesDown": _services_down(services, scoreboard) if services else None,
-        "scoreboard":   scoreboard,
-        "power":        _telemetry_power(raw),
-    }
-
-
-def _telemetry_fingerprint(telemetry: dict, open_codes) -> str:
-    """What "the data changed" means for the post rules: everything in the
-    payload except when it was measured, plus the open blocker/risk codes (a
-    risk opening may not move any payload field). A change posts at once."""
-    import hashlib
-    t = {k: v for k, v in (telemetry or {}).items() if k not in ("checkedAt", "statusSince")}
-    body = json.dumps({"t": t, "open": sorted(open_codes or [])}, sort_keys=True, default=str)
-    return hashlib.sha1(body.encode("utf-8")).hexdigest()
-
-
-def _post_fallback_sync(url: str, body: dict) -> None:
-    """POST one check-in to the Apps Script sheet; raise unless it says ok.
-
-    Apps Script answers a POST with a 302 to a result URL; urllib follows it as
-    a GET and reads the JSON ack. The reply is checked because the script
-    returns 200 with {"ok": false} on failure (the sheet's old trap: Pulse
-    logged "sent" without reading it)."""
-    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers={
-        "Content-Type": "application/json",
-        "User-Agent": f"Pulse/{APP_VERSION}",
-    })
-    # 15s: the script serializes writes behind a lock and the round trip is
-    # POST -> 302 -> GET.
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        raw = resp.read(64 * 1024)
-    try:
-        reply = json.loads(raw)
-    except ValueError:
-        raise RuntimeError("fallback reply was not JSON")
-    if not isinstance(reply, dict) or reply.get("ok") is not True:
-        raise RuntimeError("fallback did not acknowledge"
-                           + (f": {reply.get('error')}" if isinstance(reply, dict) and reply.get("error") else ""))
-
-
-async def _send_fallback(entry: dict, state: dict) -> None:
-    """The new check-in to the sheet, after the Worker failed. Records the
-    outcome in `state` (shown on the About page); never raises."""
-    url = (_os.environ.get("PULSE_CHECKIN_FALLBACK_URL", _CHECKIN_FALLBACK_URL) or "").strip()
-    secret = (_os.environ.get("PULSE_CHECKIN_FALLBACK_SECRET") or _CHECKIN_FALLBACK_SECRET).strip()
-    if not url.startswith("https://") or not secret:
-        return
-    # The sheet takes one flat check-in with the secret inside it.
-    body = dict(entry, secret=secret)
-    try:
-        await asyncio.to_thread(_post_fallback_sync, url, body)
-        state["lastFallbackAt"] = _checkin_now()
-        state.pop("lastFallbackError", None)
-        _server_log.info("Check-in sent to the fallback sheet (the Worker failed: %s)", state.get("lastError"))
-    except Exception as e:
-        state["lastFallbackError"] = str(e) or e.__class__.__name__
-        _server_log.info("Fallback check-in failed too (%s)", state["lastFallbackError"])
-
-
-def _checkin_configured(url: str) -> bool:
-    return bool(url and url.startswith("https://") and "PASTE_" not in url)
-
-
-async def _send_checkin(dashboard: Optional[dict] = None, delta: Optional[dict] = None,
-                        reason: str = "startup", monitor: Optional[dict] = None,
-                        telemetry: Optional[dict] = None, heartbeat: bool = False,
-                        paused: bool = False) -> None:
-    if DEMO_MODE:
-        return  # a dev/demo machine never reports
-    url = (_os.environ.get("PULSE_CHECKIN_URL") or _CHECKIN_URL).strip()
-    try:
-        async with _checkin_lock:
-            entry = await _build_checkin_entry(dashboard, reason, delta, monitor, telemetry,
-                                               heartbeat, paused)
-            state = _load_checkin_state()
-            if entry:
-                state["queue"].append(entry)
-            state["queue"] = _trim_checkin_queue(state["queue"], _checkin_now())
-            # Persist before sending, so a crash mid-POST still leaves it queued.
-            _save_checkin_state(state)
-            if not _checkin_configured(url):
-                return
-            await _flush_checkin_queue(state, url)
-            # Launches only: the monitor posts every few minutes, and the sheet
-            # keeps one row per unit with a run count, so monitor posts there
-            # would flood it and inflate the count.
-            if state.get("lastError") and entry and entry.get("reason") == "startup" and any(
-                    e.get("checkinId") == entry["checkinId"] for e in state["queue"]):
-                await _send_fallback(entry, state)
-            _save_checkin_state(state)
-        if state.get("lastError"):
-            _server_log.info("Check-in queued (%d waiting): %s", len(state["queue"]), state["lastError"])
-        else:
-            _server_log.info("Check-in sent for %s", (entry or {}).get("vpuName") or "unknown VPU")
-    except Exception as e:
-        try:
-            _server_log.info("Check-in skipped (%s)", e)
-        except Exception:
-            pass
-
-
-def _checkin_status() -> dict:
-    """What the About page shows. Read-only: never sends, never runs PowerShell."""
-    url = (_os.environ.get("PULSE_CHECKIN_URL") or _CHECKIN_URL).strip()
-    state = _load_checkin_state()
-    queue = state["queue"]
-    oldest = min((e.get("sentAt") for e in queue if e.get("sentAt")), default=None)
-    age = _checkin_age_hours(oldest, _checkin_now()) if oldest else None
-    # A build with no sink never tried to reach one, so it must not claim it failed to.
-    unconfigured = not DEMO_MODE and not _checkin_configured(url)
-    if unconfigured:
-        status = "not-configured"
-    elif queue:
-        status = "queued"
-    elif state.get("lastSentAt"):
-        status = "sent"
-    elif DEMO_MODE:
-        status = "demo"
-    else:
-        status = "never"
-    return {
-        "status":        status,
-        "queued":        len(queue),
-        "oldestQueued":  oldest,
-        "lastSentAt":    state.get("lastSentAt"),
-        "lastAttemptAt": state.get("lastAttemptAt"),
-        "lastError":     state.get("lastError"),
-        "notice":        (not unconfigured and bool(queue) and age is not None
-                          and age >= _CHECKIN_NOTICE_AFTER_HOURS),
-    }
+# ── Check-in and telemetry: the fleet agent's (PV-49) ───────────────────────
+# The check-in queue, the beacon and the pulse.telemetry/v1 builder live in
+# pulse_agent/ and version with the agent (pulse_agent/VERSION), not with this
+# app. They still run on this file's collectors and verdicts, so hand them the
+# engine before anything calls them.
+import pulse_agent.engine as _agent_engine  # noqa: E402
+_agent_engine.bind(_sys.modules[__name__])
+from pulse_agent.checkin import _send_checkin, _checkin_status  # noqa: E402
+from pulse_agent.telemetry import _norm_mac  # noqa: E402
 
 
 @app.get("/api/checkin-status")
@@ -7345,6 +6960,7 @@ async def build_report() -> dict:
         ("pixellotConfig",       run_ps("Get-PixellotConfig.ps1", timeout=15)),
         ("pixellotInstallState", run_ps("Test-PixellotInstallState.ps1", timeout=15)),
         ("pixellotDependencies", run_ps("Get-PixellotDependencies.ps1", timeout=15)),
+        ("pixellotBinaries",     run_ps("Test-PixellotBinaries.ps1", timeout=20)),
         ("installedSoftware",    run_ps("Get-InstalledSoftware.ps1")),
         ("gpuInfo",              run_ps("Get-GpuInfo.ps1", timeout=15)),
         ("wifi",                 run_ps("Get-WifiAdapters.ps1", timeout=10)),
@@ -7402,6 +7018,7 @@ async def build_report() -> dict:
             disk_health=sections.get("diskHealth"),
             probe_results=cam_probes,
             tls_inspection=sections.get("tlsInspection"),
+            binaries=sections.get("pixellotBinaries"),
         )
     except Exception as e:
         sections["findings"] = {"error": f"findings computation failed: {type(e).__name__}: {e}"}

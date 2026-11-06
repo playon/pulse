@@ -399,6 +399,40 @@ def _demo_scoreconnect():
 # through _CAMERA_MODELS, so role / expected-speed resolution — and the
 # Port 2 "degraded" finding (gigabit main camera negotiated to 100 Mbps) —
 # stay intact.
+def _demo_binaries():
+    import os
+
+    def ts(dt):  # the collector's yyyy-MM-ddTHH:mm:ss+hh:mm
+        z = dt.astimezone().strftime("%z")
+        return dt.strftime("%Y-%m-%dT%H:%M:%S") + z[:3] + ":" + z[3:]
+    now = datetime.now()
+    out = {
+        "now": ts(now),
+        "exes": [
+            {"name": "VPU.exe", "present": True, "readable": True, "scanned": 53, "missing": []},
+            {"name": "Agent.exe", "present": True, "readable": True, "scanned": 1, "missing": []},
+            {"name": "Coordinator.exe", "present": True, "readable": True, "scanned": 1, "missing": []},
+        ],
+        "truncated": False, "popupsRead": True, "popupDays": 7, "popups": [],
+        "vpuProcesses": [], "binHasLibcef": True,
+        "cefPackages": ["cef-127.3.5", "cef-78.3.9"],
+    }
+    if os.environ.get("PULSE_DEMO_BINARIES", "").strip().lower() == "libcef":
+        out["exes"][0]["missing"] = [{"dll": "libcef.dll", "neededBy": "VPU.exe"}]
+        out["exes"][0]["scanned"] = 51
+        out["popups"] = [{
+            "exe": "VPU.exe", "title": "System Error", "dll": "libcef.dll", "count": 66,
+            "text": "The code execution cannot proceed because libcef.dll was not found. "
+                    "Reinstalling the program may fix this problem.",
+            "first": ts(now - timedelta(days=6, hours=18)), "last": ts(now - timedelta(minutes=4)),
+        }]
+        out["vpuProcesses"] = [{"pid": 11744, "created": ts(now - timedelta(minutes=4)),
+                                "workingSetMB": 2.8, "stuckOnLoaderError": True}]
+        out["binHasLibcef"] = False
+        out["cefPackages"] = ["cef-78.3.9"]
+    return out
+
+
 def _demo_cam(ip, mac, serial, *, ocr=False, gateway=None):
     if ocr:
         return {
@@ -682,7 +716,9 @@ def _demo_network_capture(**kw):
 DEMO = {
     "Get-SystemIdentity.ps1": lambda **kw: {
         "computerSystem": {"name": _VENUE["hostname"], "manufacturer": "HP", "model": "HP Z2 Tower G9 Workstation Desktop PC"},
-        "bios": {"serialNumber": _VENUE["serial"]},
+        # releaseDate as the collector prints it: local time (UTC midnight, ET).
+        "bios": {"serialNumber": _VENUE["serial"], "smbiosVersion": "U50 Ver. 01.02.03",
+                 "releaseDate": "2023-04-11T20:00:00.0000000-04:00"},
         "uptime": {"formatted": _fmt_uptime(_uptime_secs()), "totalSeconds": _uptime_secs()},
         # LTSC 2019 (1809, build 17763) — EOS Jan 2029, well clear of the EOL
         # warning window so the demo dashboard stays clean. (Older LTSC build
@@ -788,11 +824,11 @@ DEMO = {
             # compat check passes — Ampere has no version cap. (Was GTX 1070
             # = Pascal, capped at 5.2.x, which conflicted with the 5.13.x
             # swVersion the demo venues use and produced a CRITICAL finding.)
-            {"name": "NVIDIA GeForce RTX 3060", "adapterRAMMB": 12288, "driverVersion": "31.0.15.5212",
+            {"name": "NVIDIA GeForce RTX 3060", "adapterRAMMB": 12288, "vramMB": 12288, "driverVersion": "31.0.15.5212",
              "adapterCompatibility": "NVIDIA", "vendor": "NVIDIA", "isDedicated": True},
         ],
         "diskDrives": [
-            {"model": "Samsung SSD 870 EVO 500GB", "sizeGB": 500, "interfaceType": "SATA", "serialNumber": "S3Z8NB0K901234A"}
+            {"index": 0, "model": "Samsung SSD 870 EVO 500GB", "sizeGB": 500, "interfaceType": "SATA", "mediaType": "SSD", "serialNumber": "S3Z8NB0K901234A"}
         ],
     },
     "Get-UsersAndDomains.ps1": lambda **kw: {
@@ -1122,6 +1158,24 @@ DEMO = {
             {"timeCreated": (datetime.now() - timedelta(hours=24)).isoformat(), "level": "Error", "source": "PixellotEncoder", "eventId": 2001, "message": "Hardware encoder init failed, falling back to software encoding"},
         ]
     },
+    # PV-57: what the fleet monitor reads for telemetry.calibration. Times
+    # carry the offset, as the collector writes them.
+    "Get-CalibrationStatus.ps1": lambda **kw: {
+        "configRootReadable": True,
+        "multisport": {
+            "exists": True, "readable": True, "primary": "Football",
+            "sports": [
+                {"name": "Football", "at": (datetime.now().astimezone() - timedelta(days=57)).replace(microsecond=0).isoformat()},
+                {"name": "Soccer", "at": (datetime.now().astimezone() - timedelta(days=40)).replace(microsecond=0).isoformat()},
+                {"name": "Basketball", "at": (datetime.now().astimezone() - timedelta(days=12)).replace(microsecond=0).isoformat()},
+            ],
+        },
+        "pip": {
+            "exists": True, "readable": True, "hasEnhancedPip": True, "hasInnerObjects": True,
+            "at": (datetime.now().astimezone() - timedelta(days=57, hours=-1)).replace(microsecond=0).isoformat(),
+        },
+    },
+    # Times carry the offset, as the collector's ToString('o') writes them.
     "Get-RebootHistory.ps1": lambda **kw: {
         "pending": {
             "isPending": True,
@@ -1133,22 +1187,22 @@ DEMO = {
             "options": ["Power Off", "Power On", "Previous State"],
             "manufacturer": "HP", "model": "HP EliteDesk 800 G4 WKS TWR", "message": None,
         },
-        "lastBoot": (datetime.now() - timedelta(minutes=25)).isoformat(),
+        "lastBoot": (datetime.now().astimezone() - timedelta(minutes=25)).isoformat(),
         "uptime": "0d 0h 25m",
         # The PnP task that reboots after a driver install flags reboot-required
         # — fired ~28 min ago, the "unprovoked restart shortly after logon".
-        "deviceInstallRebootTaskLastRun": (datetime.now() - timedelta(minutes=28)).isoformat(),
+        "deviceInstallRebootTaskLastRun": (datetime.now().astimezone() - timedelta(minutes=28)).isoformat(),
         "count": 4,
         "history": [
             # External planned restart — empty comment proves it was NOT Pulse.
-            {"time": (datetime.now() - timedelta(minutes=28)).isoformat(), "eventId": 1074,
+            {"time": (datetime.now().astimezone() - timedelta(minutes=28)).isoformat(), "eventId": 1074,
              "kind": "restart", "category": "planned",
              "process": "C:\\Windows\\system32\\shutdown.exe (VPU)", "user": "VPU\\Pixellot",
              "reasonCode": "0x800000ff", "reasonText": "Reason not recorded by Windows",
              "comment": "", "byPulse": False, "source": "Planned - external",
              "message": "The process C:\\Windows\\system32\\shutdown.exe (VPU) has initiated the restart of computer VPU on behalf of user VPU\\Pixellot ... Reason Code: 0x800000ff  Shutdown Type: restart  Comment:"},
             # Pulse-initiated reboot — stamped comment, positively attributed.
-            {"time": (datetime.now() - timedelta(days=2)).isoformat(), "eventId": 1074,
+            {"time": (datetime.now().astimezone() - timedelta(days=2)).isoformat(), "eventId": 1074,
              "kind": "restart", "category": "planned",
              "process": "C:\\Windows\\system32\\shutdown.exe (VPU)", "user": "VPU\\Pixellot",
              "reasonCode": "0x80040002", "reasonText": "Other (Planned)",
@@ -1156,14 +1210,14 @@ DEMO = {
              "source": "Pulse (Reboot VPU)",
              "message": "The process C:\\Windows\\system32\\shutdown.exe (VPU) has initiated the restart ... Comment: Reboot requested from Pulse diagnostics"},
             # Windows Update restart.
-            {"time": (datetime.now() - timedelta(days=4)).isoformat(), "eventId": 1074,
+            {"time": (datetime.now().astimezone() - timedelta(days=4)).isoformat(), "eventId": 1074,
              "kind": "restart", "category": "planned",
              "process": "C:\\Windows\\system32\\MusNotification.exe", "user": "NT AUTHORITY\\SYSTEM",
              "reasonCode": "0x80020002", "reasonText": "Operating System: Recovery (Planned)",
              "comment": "", "byPulse": False, "source": "Windows Update",
              "message": "The process MusNotification.exe has initiated the restart ... Operating System: Recovery (Planned)"},
             # Unexpected loss (power blip / hard crash).
-            {"time": (datetime.now() - timedelta(days=6)).isoformat(), "eventId": 41,
+            {"time": (datetime.now().astimezone() - timedelta(days=6)).isoformat(), "eventId": 41,
              "kind": "unexpected", "category": "unexpected",
              "process": "", "user": "", "reasonCode": "", "reasonText": "",
              "comment": "", "byPulse": False,
@@ -1477,6 +1531,10 @@ DEMO = {
         "findings": [],
         "notes": "Port 9001 is always owned by PID 4 (HTTP.SYS); listener ownership is not a health signal.",
     },
+    # Healthy by default (vpu-home's real shape). PULSE_DEMO_BINARIES=libcef
+    # plays Bear Grass NC, 2026-10-15: libcef.dll gone from Bin and VPU.exe
+    # stuck on the loader dialog.
+    "Test-PixellotBinaries.ps1": lambda **kw: _demo_binaries(),
     "Test-PixellotInstallState.ps1": lambda **kw: {
         "dirExists": True,
         "dir": "C:\\pixellot\\downloadedversion",

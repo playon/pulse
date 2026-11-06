@@ -73,6 +73,28 @@ const GROUPS = [
   },
 ];
 
+// Columns added after 0015 shipped. 0015 is generated from this file, so it
+// must keep emitting the table as it was; each later migration adds its own
+// (PV-51: 0016 adds ev_type; PV-49: 0017 adds the agent groups). `legacy`
+// leaves them out.
+const LATER = {
+  ev: { ev_type: "CASE WHEN json_extract(c.event, '$.kind') = 'daily-test' THEN 'daily-test' ELSE 'event' END" },
+};
+const LATER_GROUPS = [
+  // The version the unit's fleet agent last reported, from any of its posts.
+  { name: "agent", when: "c.agent_version IS NOT NULL", cols: { agent_version: "c.agent_version" } },
+  // How its newest update attempt went.
+  {
+    name: "agent_update", when: "c.agent_update_status IS NOT NULL",
+    cols: { agent_update_status: "c.agent_update_status", agent_update_version: "c.agent_update_version",
+            agent_update_error: "c.agent_update_error" },
+  },
+];
+const groups = (legacy) => [
+  ...GROUPS.map((g) => (legacy || !LATER[g.name] ? g : { ...g, cols: { ...g.cols, ...LATER[g.name] } })),
+  ...(legacy ? [] : LATER_GROUPS),
+];
+
 // Running totals and extremes over every check-in of the unit.
 const AGG = {
   run_count: { expr: LAUNCHES, merge: (o, n) => `${o} + ${n}` },
@@ -83,16 +105,16 @@ const AGG = {
                  merge: (o, n) => `MAX(COALESCE(${o}, ${n}), COALESCE(${n}, ${o}))` },
 };
 
-function columns() {
+function columns(legacy) {
   const cols = ["unit_key", ...Object.keys(AGG)];
-  for (const g of GROUPS) cols.push(`${g.name}_at`, `${g.name}_row`, ...Object.keys(g.cols));
+  for (const g of groups(legacy)) cols.push(`${g.name}_at`, `${g.name}_row`, ...Object.keys(g.cols));
   return cols;
 }
 
-function proposed() {
+function proposed(legacy) {
   const out = [`${UNIT_KEY} AS unit_key`];
   for (const [k, a] of Object.entries(AGG)) out.push(`${a.expr} AS ${k}`);
-  for (const g of GROUPS) {
+  for (const g of groups(legacy)) {
     out.push(`CASE WHEN ${g.when} THEN ${SEEN} END AS ${g.name}_at`);
     out.push(`CASE WHEN ${g.when} THEN c.id END AS ${g.name}_row`);
     for (const [k, expr] of Object.entries(g.cols)) out.push(`CASE WHEN ${g.when} THEN ${expr} END AS ${k}`);
@@ -100,10 +122,10 @@ function proposed() {
   return out;
 }
 
-function updates() {
+function updates(legacy) {
   const set = [];
   for (const [k, a] of Object.entries(AGG)) set.push(`${k} = ${a.merge(`unit_latest.${k}`, `excluded.${k}`)}`);
-  for (const g of GROUPS) {
+  for (const g of groups(legacy)) {
     const at = `${g.name}_at`;
     const row = `${g.name}_row`;
     const newer = `(excluded.${at} IS NOT NULL AND (unit_latest.${at} IS NULL OR excluded.${at} > unit_latest.${at}
@@ -117,23 +139,23 @@ function updates() {
 
 // `where` picks the check-ins: one by id for ingest, all of them (ordered) to
 // rebuild. SQLite applies the upsert row by row, so a rebuild is a replay.
-export function upsertSql(where) {
-  return `INSERT INTO unit_latest (${columns().join(", ")})
-SELECT ${proposed().join(",\n       ")}
+export function upsertSql(where, { legacy = false } = {}) {
+  return `INSERT INTO unit_latest (${columns(legacy).join(", ")})
+SELECT ${proposed(legacy).join(",\n       ")}
 FROM checkins c
 WHERE ${UNIT_KEY} IS NOT NULL AND (${where})
 ORDER BY c.id
 ON CONFLICT (unit_key) DO UPDATE SET
-  ${updates().join(",\n  ")}`;
+  ${updates(legacy).join(",\n  ")}`;
 }
 
 export const UPSERT_ONE = upsertSql("c.checkin_id = ?");
 export const REBUILD = ["DELETE FROM unit_latest", upsertSql("1")];
 
 // The table's DDL, for the migration generator (scripts/gen-0015.mjs).
-export function tableSql() {
+export function tableSql({ legacy = false } = {}) {
   const types = { run_count: "INTEGER NOT NULL DEFAULT 0", monitor_posts: "INTEGER NOT NULL DEFAULT 0" };
-  const cols = columns().map((c) => (c === "unit_key" ? "unit_key TEXT PRIMARY KEY" : `${c} ${types[c] || ""}`.trim()));
+  const cols = columns(legacy).map((c) => (c === "unit_key" ? "unit_key TEXT PRIMARY KEY" : `${c} ${types[c] || ""}`.trim()));
   return `CREATE TABLE unit_latest (\n  ${cols.join(",\n  ")}\n)`;
 }
 
