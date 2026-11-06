@@ -22,6 +22,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Readiness now blocks NVIDIA drivers older than 536.67 (`gpu-driver-old`) and repeated VPU software crashes (`vpu-restart-loop`); a proven clean run after recent crashes stays a risk (`vpu-restarts-recent`). The monitor reads the same recent VPU log sessions as Diagnostics. No telemetry fields changed.
 - A launch check-in the Worker can't take is no longer also posted to the old Google Apps Script sheet. It stays queued on the unit and replays when the Worker is reachable (30 days, 200 entries). A unit whose network blocks `workers.dev` now shows in Vitals only once it can reach it. Nothing about the check-in's fields changed. The Worker still accepts the relay header from builds that have the sheet fallback.
 
+### Fixed
+- A unit cutting and uploading its last event's recording no longer reads
+  Warning with "CPU sustained above 90%". After a game Pixellot's ffmpeg.exe
+  and PostProcess.exe can hold the CPU near 100% (Perry, 2026-10-15: ffmpeg
+  86%, PostProcess 8%). The CPU sample now measures their share; when the rest
+  of the box is at or under 90% and VPU.exe isn't running, readiness notes
+  `vod-processing` ("VOD being processed", info) instead of the risk. The
+  report carries `telemetry.vodProcessing` (additive), which Vitals shows as
+  the unit's activity, Processing VOD. Both clear on the first full pass after
+  the tools finish.
+
 ## [0.2.2] - 2026-10-21
 
 The first published agent: the zip fleet control can pin, with its SHA-256.
