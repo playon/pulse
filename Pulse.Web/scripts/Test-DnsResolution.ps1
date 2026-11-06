@@ -32,7 +32,8 @@ $testHosts = @(
     'nfhsnetwork.com'
 )
 
-function Resolve-Once {
+# One lookup, as a scriptblock so each runs in its own runspace (see below).
+$resolveOnce = {
     param(
         [string]$Name,
         [string]$Server = $null   # null = use the system resolver
@@ -84,11 +85,38 @@ try {
     # DNS redirect from benign CDN/GeoDNS load balancing needs public-vs-
     # private IP reasoning that doesn't belong in the collector.
     # $host is a PowerShell automatic variable -- use a different name.
+    #
+    # All lookups run at once. They used to run one after another, and a
+    # resolver that drops packets (a venue blocking 8.8.8.8 is common) made each
+    # one wait out Windows' DNS retry timeouts: four blocked lookups back to
+    # back ran past the 30 s collector timeout and held the whole first-launch
+    # sweep. In parallel the worst case is one wait, and $deadline caps it.
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    $pool = [runspacefactory]::CreateRunspacePool(1, 8)
+    $pool.Open()
+    $jobs = foreach ($testHost in $testHosts) {
+        foreach ($server in @($null, '8.8.8.8')) {
+            $ps = [powershell]::Create()
+            $ps.RunspacePool = $pool
+            [void]$ps.AddScript($resolveOnce.ToString()).AddArgument($testHost).AddArgument($server)
+            [pscustomobject]@{ Host = $testHost; Google = [bool]$server; Ps = $ps; Handle = $ps.BeginInvoke() }
+        }
+    }
+    function Get-JobResult($job) {
+        $left = [int][Math]::Max(0, ($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+        if ($job.Handle.AsyncWaitHandle.WaitOne($left)) {
+            $r = $job.Ps.EndInvoke($job.Handle)
+            if ($r -and $r.Count -gt 0) { return $r[0] }
+        }
+        return [ordered]@{ resolvedTo = $null; status = 'fail'; resolutionMs = $null; error = 'lookup did not finish in 15 seconds' }
+    }
     $results = foreach ($testHost in $testHosts) {
+        $sys = $jobs | Where-Object { $_.Host -eq $testHost -and -not $_.Google } | Select-Object -First 1
+        $goog = $jobs | Where-Object { $_.Host -eq $testHost -and $_.Google } | Select-Object -First 1
         [ordered]@{
             host   = $testHost
-            system = Resolve-Once -Name $testHost
-            google = Resolve-Once -Name $testHost -Server '8.8.8.8'
+            system = Get-JobResult $sys
+            google = Get-JobResult $goog
         }
     }
 
