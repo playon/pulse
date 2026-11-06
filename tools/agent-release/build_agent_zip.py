@@ -17,45 +17,22 @@ Refuses to build unless <version> matches Pulse.Web/app/pulse_agent/VERSION,
 so a tag can't publish a zip that reports another version.
 """
 
-import hashlib
 import os
 import re
 import sys
-import zipfile
+
+_WEB_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "Pulse.Web")
+sys.path.insert(0, os.path.join(_WEB_ROOT, "app"))
+# The zip format itself lives with the agent, so enrolling a unit can hash
+# its tree exactly as this builds it (pulse_agent/release_zip.py).
+from pulse_agent.release_zip import FIXED_TIME, INCLUDE, SKIP_DIRS, SKIP_PATHS, collect, write_zip  # noqa: E402,F401
 
 VERSION_RE = re.compile(r"^\d{1,4}\.\d{1,4}\.\d{1,6}$")
-# The parts of Pulse.Web the monitor runs. Everything else (tests, docs, the
-# launchers, the changelog) stays out.
-INCLUDE = ("app", "scripts", "deploy", "VERSION")
-# The embedded runtime lives on the unit, outside the slots.
-SKIP_DIRS = {"__pycache__", ".pytest_cache"}
-SKIP_PATHS = {"app/python"}
-# 1980-01-01, the earliest time a zip can hold.
-FIXED_TIME = (1980, 1, 1, 0, 0, 0)
 
 
 def agent_version(web_root: str) -> str:
     with open(os.path.join(web_root, "app", "pulse_agent", "VERSION"), "r", encoding="utf-8") as fh:
         return fh.read().strip()
-
-
-def collect(web_root: str) -> list:
-    """The files to ship, as sorted paths relative to web_root with / separators."""
-    files = []
-    for top in INCLUDE:
-        path = os.path.join(web_root, top)
-        if os.path.isfile(path):
-            files.append(top)
-            continue
-        for dirpath, dirnames, names in os.walk(path):
-            rel_dir = os.path.relpath(dirpath, web_root).replace(os.sep, "/")
-            dirnames[:] = sorted(d for d in dirnames
-                                 if d not in SKIP_DIRS and f"{rel_dir}/{d}" not in SKIP_PATHS)
-            for name in names:
-                if name.endswith((".pyc", ".pyo")) or name.startswith("."):
-                    continue
-                files.append(f"{rel_dir}/{name}")
-    return sorted(files)
 
 
 def build(web_root: str, version: str, out_dir: str) -> tuple:
@@ -71,19 +48,7 @@ def build(web_root: str, version: str, out_dir: str) -> tuple:
             raise ValueError(f"{required} is missing from the build")
     os.makedirs(out_dir, exist_ok=True)
     zip_path = os.path.join(out_dir, f"pulse-agent-{version}.zip")
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as zf:
-        for rel in files:
-            info = zipfile.ZipInfo(rel, date_time=FIXED_TIME)
-            info.compress_type = zipfile.ZIP_STORED
-            info.external_attr = 0o644 << 16
-            info.create_system = 3          # the same on every build machine
-            with open(os.path.join(web_root, rel), "rb") as fh:
-                zf.writestr(info, fh.read())
-    h = hashlib.sha256()
-    with open(zip_path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            h.update(chunk)
-    sha = h.hexdigest()
+    sha = write_zip(web_root, files, zip_path)
     with open(zip_path + ".sha256", "w", encoding="utf-8") as fh:
         fh.write(f"{sha}  {os.path.basename(zip_path)}\n")
     with open(os.path.join(out_dir, "RELEASE_NOTES.md"), "w", encoding="utf-8") as fh:
@@ -111,17 +76,21 @@ def release_notes(web_root: str, version: str, sha: str) -> str:
 {sha}
 ```
 
-Pin it (check-in Worker README, "which agent build a unit runs"):
+Pin it from Pulse Vitals, which sets it through the admin Worker's
+`POST /agent-target` after checking this release's hash (PV-85). By hand, as a
+last resort (check-in Worker README, "which agent build a unit runs"):
 
 ```sql
 -- one unit first
-INSERT INTO monitor_control (scope, agent_version, agent_sha256, note, updated_at)
+INSERT INTO agent_target (scope, version, sha256, note, set_at)
 VALUES ('<venue id>', '{version}', '{sha}', 'canary', datetime('now'))
-ON CONFLICT (scope) DO UPDATE SET agent_version = excluded.agent_version,
-  agent_sha256 = excluded.agent_sha256, note = excluded.note, updated_at = excluded.updated_at;
+ON CONFLICT (scope) DO UPDATE SET version = excluded.version, sha256 = excluded.sha256,
+  note = excluded.note, set_by = NULL, set_at = excluded.set_at;
 -- then the fleet
-UPDATE monitor_control SET agent_version = '{version}', agent_sha256 = '{sha}',
-  updated_at = datetime('now') WHERE scope = 'fleet';
+INSERT INTO agent_target (scope, version, sha256, note, set_at)
+VALUES ('fleet', '{version}', '{sha}', 'by hand', datetime('now'))
+ON CONFLICT (scope) DO UPDATE SET version = excluded.version, sha256 = excluded.sha256,
+  note = excluded.note, set_by = NULL, set_at = excluded.set_at;
 ```
 """
 
@@ -131,7 +100,7 @@ def main(argv) -> int:
         print(__doc__.strip().splitlines()[2].strip(), file=sys.stderr)
         return 2
     version, out_dir = argv
-    web_root = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "Pulse.Web")
+    web_root = _WEB_ROOT
     try:
         zip_path, sha = build(web_root, version, out_dir)
     except (ValueError, OSError) as e:
