@@ -1,8 +1,7 @@
 """pulse.telemetry/v1 blocks for Vitals' unit tabs (PV-65, PV-68, PV-70, PV-71,
 PV-74, PV-75, PV-76): the camera card, power events, disk space, drive health,
 streaming components, installed applications, whether Pixellot's programs can
-start, and the Windows build, time zone and clock. The card's PoE read (PV-66)
-waits for its own PR.
+start, and the Windows build, time zone and clock.
 
 Unknown is null throughout, never a healthy-looking default."""
 
@@ -54,16 +53,14 @@ def network(card_desc="Intel(R) I210 Gigabit Network Connection", ports=4, onboa
 class TestCameraCard(unittest.TestCase):
     def test_gie74(self):
         nic = build({"network_config": network()})["cameras"]["nic"]
-        # No `poe` key at all: the read isn't sent yet (PV-66), which is not
-        # the same as a read that failed.
-        self.assertEqual(nic, {"model": "GIE74 series", "chip": "I210", "portCount": 4, "poeSupported": True})
+        self.assertEqual(nic, {"model": "GIE74 series", "chip": "I210", "portCount": 4, "poeSupported": True, "poe": None})
 
     def test_the_onboard_port_is_not_a_card_port(self):
         self.assertEqual(T._camera_card(network(ports=4))["portCount"], 4)
 
     def test_gie64_reports_no_poe(self):
         nic = build({"network_config": network("Intel(R) 82574L Gigabit Network Connection")})["cameras"]["nic"]
-        self.assertEqual(nic, {"model": "GIE64 series", "chip": "82574L", "portCount": 4, "poeSupported": False})
+        self.assertEqual(nic, {"model": "GIE64 series", "chip": "82574L", "portCount": 4, "poeSupported": False, "poe": None})
 
     def test_gie74p_an(self):
         nic = T._camera_card(network("Intel(R) I350 Gigabit Network Connection"))
@@ -78,7 +75,7 @@ class TestCameraCard(unittest.TestCase):
         self.assertIsNone(build({"network_config": {"error": True}})["cameras"]["nic"])
         self.assertIsNone(build({"network_config": network(ports=0)})["cameras"]["nic"])
 
-    def test_the_monitor_never_loads_smartpoe(self):
+    def test_the_monitor_gates_smartpoe_on_the_camera_card_not_the_onboard_chip(self):
         ran = []
 
         async def fake(script, *a, **k):
@@ -87,12 +84,17 @@ class TestCameraCard(unittest.TestCase):
         saved = main.run_ps
         main.run_ps = fake
         try:
-            for net in (network(), network("Intel(R) 82574L"), network("Intel(R) I350"), None):
+            for chip, allowed in (("I210", True), ("I211", True), ("82574L", False),
+                                  ("I350", False), ("I354", False), ("Unknown", False)):
                 ran.clear()
-                raw = {"network_config": net}
+                raw = {"network_config": network(f"Intel(R) {chip}")}
                 asyncio.run(T._collect_telemetry_extras(raw))
-                self.assertNotIn("Get-PoePower.ps1", ran, net and net["adapters"][1])
-                self.assertNotIn("poe", raw)
+                self.assertEqual(ran.count("Get-PoePower.ps1"), int(allowed), chip)
+            for net, skip in ((None, False), ({"error": True}, False), (network(ports=0), False),
+                              (network(), True)):
+                ran.clear()
+                asyncio.run(T._collect_telemetry_extras({"network_config": net}, skip_intrusive=skip))
+                self.assertNotIn("Get-PoePower.ps1", ran)
         finally:
             main.run_ps = saved
 
@@ -540,7 +542,7 @@ class TestMonitorAndSize(unittest.TestCase):
         t = T._build_telemetry(dash, raw)
         for key in ("services", "applications", "programs", "environment"):
             self.assertIsNotNone(t[key], key)
-        self.assertNotIn("poe", t["cameras"]["nic"])
+        self.assertIsNotNone(t["cameras"]["nic"]["poe"])
         self.assertIsNotNone(t["environment"]["clock"])
         self.assertTrue(all(e["time"] for e in t["power"]["events"]))
 

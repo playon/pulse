@@ -13,7 +13,8 @@ Resource budget, in the order a tick spends it:
      Most ticks stop here and exit without importing main.py (FastAPI).
   3. A due pass imports main and runs the collectors in one powershell.exe at
      below-normal priority, with slow-changing collectors served from a disk
-     cache (powershell.configure_background). Then diff.
+     cache (powershell.configure_background). Native PoE uses an isolated
+     process so a driver crash cannot kill the shared batch. Then diff.
   4. `monitor.plan_post` decides whether to post: in full when anything
      changed or an unchanged FAIL/WARN is due again, the one-line heartbeat
      for an unchanged PASS once an hour, otherwise nothing.
@@ -78,6 +79,9 @@ SLOW_COLLECTOR_TTLS = {
     # clock drift by the hour.
     "Get-WindowsUbr.ps1": 6 * 3600,
     "Test-NtpDrift.ps1": 3600,
+    # PV-66: eleven ~90 ms SmartPoE getters, not the live tab's 2-second poll.
+    # The native crash sentinel is never cleared by a scheduled tick.
+    "Get-PoePower.ps1": 3600,
 }
 
 _BELOW_NORMAL_PRIORITY_CLASS = 0x00004000

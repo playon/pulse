@@ -20,15 +20,14 @@
          available=false with an actionable reason.
       3. Crash sentinel (see below).
 
-    Crash sentinel: unlike gen-1 (one probe per diagnostic run) this collector
-    is polled every ~2s to drive a live card. The native DLL is known to throw
-    AccessViolation on some platforms, and an AV is a corrupted-state
-    exception that .NET Framework will NOT let us catch -- it takes
-    powershell.exe down with it. Left unguarded that becomes a crash loop
-    spawning a dying process every 2s. So we increment a TEMP sentinel before
-    the first native call and clear it after the reads land; three unfinished
-    attempts latch the probe off until Pulse restarts (the launcher clears
-    stale sentinels) or the tech clears TEMP.
+    Crash sentinel: the live card polls every ~2s; the scheduled monitor reads
+    at most hourly in its own powershell.exe, never the shared batch process.
+    The native DLL can throw an uncatchable AccessViolation, taking that
+    process down. Increment a TEMP sentinel before any native call and clear
+    it only AFTER Release_Card completes. Three unfinished attempts latch
+    the probe off across scheduled ticks. Only an interactive Pulse restart
+    (the launcher clears stale sentinels) or a tech clearing TEMP resets it.
+    If the sentinel cannot be read or written, do not load the native DLL.
 
     Card name (label only): the I210 NIC model cannot tell a GIE74 from a
     GIE74P, but the ADLINK Vision Software (AVS) SDK can, where it is
@@ -422,9 +421,9 @@ $crashCount = 0
 try {
     if (Test-Path -LiteralPath $SentinelPath) {
         $raw = Get-Content -LiteralPath $SentinelPath -Raw -ErrorAction Stop
-        [void][int]::TryParse($raw.Trim(), [ref]$crashCount)
+        if (-not [int]::TryParse($raw.Trim(), [ref]$crashCount)) { $crashCount = $SentinelLimit }
     }
-} catch { $crashCount = 0 }
+} catch { $crashCount = $SentinelLimit }
 
 if ($crashCount -ge $SentinelLimit) {
     Write-PoeJson (New-PoeResult -Supported $true -Available $false `
@@ -435,7 +434,12 @@ if ($crashCount -ge $SentinelLimit) {
 
 try {
     Set-Content -LiteralPath $SentinelPath -Value ([string]($crashCount + 1)) -Encoding ASCII -ErrorAction Stop
-} catch { }
+} catch {
+    Write-PoeJson (New-PoeResult -Supported $true -Available $false `
+        -NicModel $card.Model -CardLabel $card.Label -DllPath $dllPath `
+        -Reason "The PoE crash guard could not be saved; the native power probe was not started.")
+    exit 0
+}
 
 # ---------------------------------------------------------------------------
 # Native shim. Compiled once to a hash-keyed DLL in TEMP -- every poll is a
@@ -515,14 +519,11 @@ namespace Pulse {
 # throwing out of the collector.
 # ---------------------------------------------------------------------------
 $registered = $false
+$failReason = $null
 try {
     $regRet = [Pulse.AdlinkPoE]::SmartPoE_Register_Card([uint16]$CardNum)
     if ($regRet -ne 0) {
-        try { Remove-Item -LiteralPath $SentinelPath -Force -ErrorAction SilentlyContinue } catch { }
-        Write-PoeJson (New-PoeResult -Supported $true -Available $false `
-            -NicModel $card.Model -CardLabel $card.Label -DllPath $dllPath `
-            -Reason "The SmartPoE driver is installed but reported no PoE card (Register_Card returned $regRet). The card may be seated badly, or the driver may not match this card revision.")
-        exit 0
+        throw "The SmartPoE driver is installed but reported no PoE card (Register_Card returned $regRet). The card may be seated badly, or the driver may not match this card revision."
     }
     $registered = $true
 
@@ -544,19 +545,17 @@ try {
     # OCR devices, Molex connected), so the copy must not send a tech chasing
     # drivers alone -- it names both causes and the physical check first.
     if ($rcCons -ne 0 -or $rcLeft -ne 0) {
-        try { Remove-Item -LiteralPath $SentinelPath -Force -ErrorAction SilentlyContinue } catch { }
-        $budgetReason = "The PoE card was found but would not report its power budget (consumed rc=$rcCons, remaining rc=$rcLeft). Either the card's PoE controller is not responding, or the ADLINK driver does not match this card. Check that the card's Molex power lead is plugged in. If cameras on every port still get no power, treat it as a card fault."
+        # Throw, not exit: the card must still be released (finally) before
+        # the sentinel is cleared. The catch reports $failReason verbatim.
+        $failReason = "The PoE card was found but would not report its power budget (consumed rc=$rcCons, remaining rc=$rcLeft). Either the card's PoE controller is not responding, or the ADLINK driver does not match this card. Check that the card's Molex power lead is plugged in. If cameras on every port still get no power, treat it as a card fault."
         if ($rcCons -eq -50 -or $rcLeft -eq -50) {
-            $budgetReason = "The PoE card reports it is over temperature and stopped reporting power (consumed rc=$rcCons, remaining rc=$rcLeft). Check that the VPU's fans are running and its vents are clear."
+            $failReason = "The PoE card reports it is over temperature and stopped reporting power (consumed rc=$rcCons, remaining rc=$rcLeft). Check that the VPU's fans are running and its vents are clear."
         }
-        Write-PoeJson (New-PoeResult -Supported $true -Available $false `
-            -NicModel $card.Model -CardLabel $card.Label -DllPath $dllPath `
-            -Reason $budgetReason)
-        exit 0
+        throw $failReason
     }
     # Temperature is non-essential -- a bad rc there drops the reading without
     # discarding the power figures the tech actually came for.
-    if ($rcTemp -ne 0) { $tempC = 0.0 }
+    if ($rcTemp -ne 0) { $tempC = $null }
 
     $total = $consumed + $remaining
 
@@ -644,13 +643,15 @@ try {
     $portSumDelta = [math]::Abs($consumed - $portSum)
     $portSumOk    = ($consumed -le 0) -or ($portSumDelta -le 3.0)
 
+    $temperature = $null
+    if ($null -ne $tempC) { $temperature = [math]::Round($tempC, 1) }
     $result = New-PoeResult -Supported $true -Available $true `
         -NicModel $card.Model -CardLabel $card.Label -DllPath $dllPath
     $result.budget = [ordered]@{
         totalW        = [math]::Round($total, 1)
         consumedW     = [math]::Round($consumed, 1)
         remainingW    = [math]::Round($remaining, 1)
-        tempC         = [math]::Round($tempC, 1)
+        tempC         = $temperature
         poeOnCount    = $poeOnCount
         healthyFloorW = $HealthyTotalFloorWatts
         underPowered  = $underPowered
@@ -660,19 +661,20 @@ try {
     }
     $result.ports = $ports
 
-    # Reads landed -- the driver did not take the process down.
-    try { Remove-Item -LiteralPath $SentinelPath -Force -ErrorAction SilentlyContinue } catch { }
-
-    Write-PoeJson $result
 } catch {
     $errType = $_.Exception.GetType().Name
     $errMsg  = ($_.Exception.Message -replace "[\r\n]+", " ")
-    try { Remove-Item -LiteralPath $SentinelPath -Force -ErrorAction SilentlyContinue } catch { }
-    Write-PoeJson (New-PoeResult -Supported $true -Available $false `
+    $reason = "Reading PoE power failed ($errType): $errMsg"
+    if ($failReason) { $reason = $failReason }
+    $result = New-PoeResult -Supported $true -Available $false `
         -NicModel $card.Model -CardLabel $card.Label -DllPath $dllPath `
-        -Reason "Reading PoE power failed ($errType): $errMsg")
+        -Reason $reason
 } finally {
     if ($registered) {
         try { [void][Pulse.AdlinkPoE]::SmartPoE_Release_Card([uint16]$CardNum) } catch { }
     }
 }
+
+# No JSON or reset before release: a release-time AV/hang is unfinished too.
+try { Remove-Item -LiteralPath $SentinelPath -Force -ErrorAction SilentlyContinue } catch { }
+Write-PoeJson $result

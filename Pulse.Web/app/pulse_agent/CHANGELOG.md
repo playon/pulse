@@ -17,6 +17,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- Camera-card power in Vitals (PV-66): hourly card budget, temperature and per-port power on supported GIE74 cards; unsupported or unreadable cards remain unknown, with the native driver's three-crash stop retained.
+
 ### Changed
 - Cameras no longer depend on the retired camera-config file. Scoreboard source is detection-only: a connected OCR camera makes ScoreConnect optional; otherwise ScoreConnect is checked, with no configured-but-disconnected OCR warning (including Pulse's startup and ScoreConnect views). In `pulse.telemetry/v1`, `scoreboard.ocr` stays present as null because OCR configuration is unknown; new optional `scoreboard.ocrDetected` is true/false for a successful camera read and null when it failed. Existing configuration fields are not redefined as detection.
 - Readiness now blocks NVIDIA drivers older than 536.67 (`gpu-driver-old`) and repeated VPU software crashes (`vpu-restart-loop`); a proven clean run after recent crashes stays a risk (`vpu-restarts-recent`). The monitor reads the same recent VPU log sessions as Diagnostics. No telemetry fields changed.
