@@ -31,6 +31,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - Camera Connectivity: on VPUs with ADLINK's AVS software installed, the PoE card is named exactly, for example "PCIe-GIE74P, PCB rev 4, MCU 2.0". The name can take a few seconds to appear after Pulse starts. Without AVS, the card still shows as "GIE74-series".
 - Software tab: every installed application now has a **Review** label: Approved, a risk, or Informational (not on the approved list yet). Matching is by name only, so version changes don't matter.
 - Software tab: Datto EDR is now flagged as unsupported security software (it blocks Pixellot's agent and means an RMA), and Datto RMM as a non-standard remote-access tool.
+- Settings (dev channel only): a **Fleet Monitoring** card. **Opt in this unit** installs the fleet monitor, which checks every 5 minutes whether the VPU is ready to stream and reports to Pulse Vitals. The card shows when it last checked and reported, and **Opt out** removes it. A production launch on the same VPU doesn't affect it.
 
 ### Changed
 - Finding titles are shorter: the effect ("so games start late") is no longer in the title, only in the details. For example, "Streaming is blocked by the venue's network", "KeepAgentUp is not running" and "Cameras not confirmed yet". The streaming backup finding now says which case it is: "Streaming is using its backup connection (443 UDP)", or "Streaming backup connection is blocked" when you're streaming on the main connection and the backup is blocked. The C: drive finding names its limit: "System drive (C:) is over 90% full".
@@ -40,9 +41,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 ### Fixed
 - Camera Connectivity: an Intel I210 camera card is now labelled "ADLINK GIE74-series" instead of always "GIE74P". It had been calling GIE74 cards GIE74P, and without ADLINK's AVS software Pulse can't tell the two apart.
 - Camera Connectivity: when the PoE card won't report its power budget, the message no longer blames only the driver. It now says the card's PoE controller may not be responding, and tells you to check the card's Molex power lead first. If cameras still get no power after that, treat it as a card fault.
-- Settings (dev channel only): a **Fleet Monitoring** card. **Opt in this unit** installs the fleet monitor, which checks every 5 minutes whether the VPU is ready to stream and reports to Pulse Vitals. The card shows when it last checked and reported, and **Opt out** removes it. A production launch on the same VPU doesn't affect it.
-
-### Fixed
 - A slow onboard network port is no longer reported as "Network port N is running slow". Only the camera card's ports are checked for gigabit speed.
 - Fleet Monitoring: **Opt in this unit** no longer fails with "Invalid class" on VPUs whose Windows task-scheduling interface is damaged. The installer now falls back to schtasks.exe and says it did.
 - A drive with a few uncorrected read/write errors that still reads Healthy now shows as "Fix soon" with a back-up-and-replace note. Before, it was flagged as predicting failure. 100 or more errors, an Unhealthy drive, or Windows' own failure warning are still critical.
