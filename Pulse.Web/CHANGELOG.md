@@ -25,8 +25,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 
 ### Added
 - Hardware tab: when the NVIDIA graphics card has no driver, is turned off, or shows an error in Device Manager, the Graphics card now says so and offers a fix. A missing driver is installed from Pixellot's approved list, matched to the exact card (GTX 1650 and the HP T1000 with subsystem 12DB103C: driver 536.67): Pulse checks the download is signed by NVIDIA, installs it clean and confirms the card works afterward. Any other card, including other T1000 variants for now, gets no install and a message saying so. A turned-off card is turned back on instead. If Windows can't see a graphics card at all, Pulse rescans for it and says plainly that a driver can't fix a missing card (check the card is seated and powered), without downloading anything. When the driver is working, a **Reinstall the driver** button is still there for a card Pixellot has an approved driver for. It first warns that the working driver will be replaced, that the screen may go blank and the VPU software can't process video meanwhile, and not to run it during or just before a live event, and does nothing unless you confirm.
+- Dashboard: Pulse now flags NVIDIA drivers older than 536.67 and repeated VPU software crashes, explains likely causes, and keeps a warning after a clean recovery so you know to re-check.
 - Dashboard: Pulse now catches a VPU whose Pixellot video program (VPU.exe) can't start because one of its files is missing, such as the "libcef.dll was not found" error. Stream Readiness reads FAIL and names the missing file, how many times Windows showed the error this week, and to escalate to Pixellot support. Before, these units read PASS, because the stuck program still showed as running.
 - ScoreConnect tab: a **Reinstall ScoreConnect III** button. It stops the service, deletes the whole Sportzcast LLC program folder, and installs a fresh copy, with progress shown in Pulse. Saved settings and logs are kept. Use it when ScoreConnect III won't start or keeps failing.
+- Camera Connectivity: on VPUs with ADLINK's AVS software installed, the PoE card is named exactly, for example "PCIe-GIE74P, PCB rev 4, MCU 2.0". The name can take a few seconds to appear after Pulse starts. Without AVS, the card still shows as "GIE74-series".
+
+### Fixed
+- Camera Connectivity: an Intel I210 camera card is now labelled "ADLINK GIE74-series" instead of always "GIE74P". It had been calling GIE74 cards GIE74P, and without ADLINK's AVS software Pulse can't tell the two apart.
+- Camera Connectivity: when the PoE card won't report its power budget, the message no longer blames only the driver. It now says the card's PoE controller may not be responding, and tells you to check the card's Molex power lead first. If cameras still get no power after that, treat it as a card fault.
 - Settings (dev channel only): a **Fleet Monitoring** card. **Opt in this unit** installs the fleet monitor, which checks every 5 minutes whether the VPU is ready to stream and reports to Pulse Vitals. The card shows when it last checked and reported, and **Opt out** removes it. A production launch on the same VPU doesn't affect it.
 
 ### Fixed
@@ -34,6 +40,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - A VPU missing one of its main cameras (for example 1 of 2 on an S2) now reads FAIL and says it won't stream. Before, it read only as a warning.
 - The readiness line no longer says "No risks tonight" right after "1 thing is stopping tonight's game". When something is stopping the game it leaves out the risk count unless there are risks.
 - Pulse now refuses requests that another web page open in the browser on the VPU makes to it. Before, a page could have triggered a reboot, a service restart or an update just by being open. Pulse's own page works as before, at `localhost` or `127.0.0.1`, on any port. A request that arrives under any other hostname, or from any other origin, is refused with "only answers requests from its own page".
+- ScoreConnect III install: the install log no longer closes itself a second after you open it.
+- ScoreConnect III install: Pulse no longer says the install failed when ScoreConnect III takes more than 30 seconds to start after installing. If the installer goes quiet, Pulse keeps watching and turns the install green if it finishes.
+
+## [1.4.2] - 2026-11-02
+
+### Fixed
+- Pulse installs on a new VPU again. Since 2026-11-02, a first run (or a repair of Pulse's Python) stopped at "installing pip" with "ERROR: To modify pip, please run the following command", because a download Pulse uses changed. Run Pulse again to finish setup.
 
 ## [1.4.1] - 2026-10-13
 

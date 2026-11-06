@@ -8826,9 +8826,14 @@ async function _sc3StartInstall(reinstall) {
         dataCache.scoreconnect = null;
         if (window.location.hash === "#scoreconnect") renderScoreConnect();
       }, 3000);
-    } else if (s.stage === "failed" || s.stale) {
+    } else if (s.stage === "failed") {
       clearInterval(_sc3InstallPoll); _sc3InstallPoll = null;
       _sc3Installing = false;
+    } else {
+      // A stall is not the end: an installer that goes quiet can still write
+      // "complete" later. Keep polling so the modal can turn green, but unlock
+      // it so the tech can Retry or Close while it is quiet.
+      _sc3Installing = !s.stale;
     }
     _renderSc3Progress(s);
   }, 1500);
@@ -8884,7 +8889,13 @@ function _renderSc3Progress(status) {
     `;
   }).join("");
 
+  // Every poll rebuilds the modal, so carry the log's open state and scroll
+  // position across the redraw or it snaps shut a second after it is opened.
   var el = _sc3ModalEl();
+  var oldLog = el.querySelector("details.sc3-log");
+  var logOpen = failed || (oldLog ? oldLog.open : false);
+  var oldPre = oldLog ? oldLog.querySelector("pre") : null;
+  var logScroll = oldPre ? oldPre.scrollTop : 0;
   el.innerHTML = `
     <div class="sc3-modal-box">
       <div class="sc3-modal-header">
@@ -8898,9 +8909,9 @@ function _renderSc3Progress(status) {
         </div>
         ${complete ? `<div class="status-pass" style="display:flex;align-items:center;gap:0.4rem;font-size:var(--fs-body);margin-top:0.75rem">${svgIcon("check", 14)} <span>${esc(msg || "ScoreConnect III is installed and running.")}</span></div>` : ""}
         ${err ? `<div class="status-fail" style="font-size:var(--fs-small);margin-top:0.75rem">${esc(err)}</div>` : ""}
-        ${stale && !err ? `<div class="status-fail" style="font-size:var(--fs-small);margin-top:0.75rem">The install appears stalled — no update from the installer in over 30 seconds.</div>` : ""}
+        ${stale && !err ? `<div class="status-fail" style="font-size:var(--fs-small);margin-top:0.75rem">The install appears stalled — no update from the installer in over 30 seconds. Pulse is still watching and will update this if it finishes.</div>` : ""}
         ${status.logTail ? `
-        <details class="sc3-log" ${failed ? "open" : ""}>
+        <details class="sc3-log" ${logOpen ? "open" : ""}>
           <summary>Install log</summary>
           <pre>${esc(status.logTail)}</pre>
         </details>` : ""}
@@ -8912,6 +8923,8 @@ function _renderSc3Progress(status) {
       </div>
     </div>
   `;
+  var newPre = el.querySelector("details.sc3-log pre");
+  if (newPre && logScroll) newPre.scrollTop = logScroll;
   el.classList.add("open");
 }
 
