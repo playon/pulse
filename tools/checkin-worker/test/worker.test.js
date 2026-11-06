@@ -399,6 +399,40 @@ test("utilitarian telemetry lands as unit_status columns", async () => {
   assert.equal(port.m, "00:D0:89:19:71:57");
 });
 
+test("telemetry.calibration (PV-57) is kept whole in unit_status", async () => {
+  const calibration = {
+    primary: "football",
+    sports: [{ name: "football", at: "2026-08-20T15:02:11-04:00" }, { name: "soccer", at: null }],
+    ocr: { calibrated: false, at: null },
+  };
+  await post({ secret: SECRET, checkins: [checkin({ telemetry: telemetryDoc({ calibration }) })] });
+  const u = env.DB.raw.prepare("SELECT telemetry FROM unit_status").get();
+  assert.deepEqual(JSON.parse(u.telemetry).calibration, calibration);
+  // Unknown stays null, not dropped.
+  env.DB.raw.exec("DELETE FROM checkins");
+  await post({ secret: SECRET, checkins: [checkin({ telemetry: telemetryDoc({ calibration: null }) })] });
+  const n = env.DB.raw.prepare("SELECT telemetry FROM unit_status").get();
+  assert.equal(JSON.parse(n.telemetry).calibration, null);
+});
+
+test("the hardware block (PV-64) is kept whole in the telemetry document", async () => {
+  const hardware = {
+    model: "HP EliteDesk 800 G4 WKS TWR",
+    cpu: { name: "Intel(R) Core(TM) i5-8500 CPU @ 3.00GHz", cores: 6, threads: 6 },
+    memoryGb: 32,
+    disks: [{ model: "TOSHIBA DT01ACA100", sizeGb: 932, type: "HDD" }],
+    gpus: [{ name: "NVIDIA GeForce GTX 1650", driver: "32.0.15.7628", vramMb: 4096 },
+           { name: "Intel(R) UHD Graphics 630", driver: "24.20.100.6136", vramMb: 1024 }],
+    bios: { version: "Q01 Ver. 02.07.01", date: "2019-04-23" },
+  };
+  await post({ secret: SECRET, checkins: [checkin({ reason: "periodic", telemetry: telemetryDoc({ hardware }) })] });
+  const row = env.DB.raw.prepare("SELECT telemetry FROM checkins").get();
+  assert.deepEqual(JSON.parse(row.telemetry).hardware, hardware);
+  const g = env.DB.raw.prepare(
+    "SELECT json_extract(telemetry, '$.hardware.gpus[0].vramMb') v FROM checkins").get();
+  assert.equal(g.v, 4096);
+});
+
 test("a heartbeat moves last_seen but keeps the last full reading", async () => {
   const full = checkin({ reason: "state-change", telemetry: telemetryDoc({ status: "PASS", blockers: [] }) });
   const beat = { checkinId: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", sentAt: "2026-09-20T15:00:00Z",
@@ -647,6 +681,21 @@ test("an event document with a bad schema, id or size is dropped, the check-in k
   assert.equal(rows[2].event, null);
 });
 
+test("PV-59: telemetry.scoreboard.ocr and .scoreConnect are stored with the document, not stripped", async () => {
+  const board = {
+    source: "scoreconnect", ok: true, scoreLinkConnected: true,
+    ocr: { configured: false, issue: null },
+    scoreConnect: { version: "1.4.2.2", firmware: "2.4.1", scoreLinkModel: "ScoreLinkII", scoreLinkPort: "COM5",
+                    serialPort: "COM3", eventType: "Live", botNumber: "02130" },
+  };
+  await post({ checkins: [checkin({
+    checkinId: "eeeeeeee-0000-0000-0000-000000000059", reason: "periodic",
+    telemetry: { schema: "pulse.telemetry/v1", status: "PASS", scoreboard: board } })] });
+  const u = env.DB.raw.prepare("SELECT telemetry, json_extract(telemetry, '$.scoreboard.scoreConnect.botNumber') AS bot FROM unit_status").get();
+  assert.deepEqual(JSON.parse(u.telemetry).scoreboard, board);
+  assert.equal(u.bot, "02130");
+});
+
 test("0013: unit_status carries the scoreboard detail, events carry schedule, off-air time and warnings", async () => {
   await post({ checkins: [checkin({
     checkinId: "eeeeeeee-0000-0000-0000-000000000021", reason: "periodic",
@@ -672,4 +721,182 @@ test("0013: unit_status carries the scoreboard detail, events carry schedule, of
   assert.equal(e.off_air_seconds, 175);
   assert.equal(e.scoreboard_sport_match, 0);
   assert.deepEqual(JSON.parse(e.warnings), ["scoreboard-sport-mismatch", "off-air-gaps"]);
+});
+
+// ── The fleet agent's version, update outcome and pinned target (PV-49) ──────
+
+const SHA_A = "a".repeat(64);
+const SHA_B = "0123456789abcdef".repeat(4);
+
+test("agentVersion and agentUpdate are stored, and kept in raw", async () => {
+  await post({ checkins: [checkin({ reason: "periodic", agentVersion: "0.2.0",
+                                    agentUpdate: { status: "rolled-back", version: "0.3.0",
+                                                   error: "no post within 3 ticks" } })] });
+  const row = env.DB.raw.prepare("SELECT * FROM checkins").get();
+  assert.equal(row.agent_version, "0.2.0");
+  assert.equal(row.agent_update_status, "rolled-back");
+  assert.equal(row.agent_update_version, "0.3.0");
+  assert.equal(row.agent_update_error, "no post within 3 ticks");
+  const raw = JSON.parse(row.raw);
+  assert.equal(raw.agentVersion, "0.2.0");
+  assert.deepEqual(raw.agentUpdate, { status: "rolled-back", version: "0.3.0", error: "no post within 3 ticks" });
+});
+
+test("a launch check-in has no agent version, and junk agentUpdate is dropped", async () => {
+  await post({ checkins: [checkin({ reason: "startup" })] });
+  let row = env.DB.raw.prepare("SELECT * FROM checkins").get();
+  assert.equal(row.agent_version, null);
+  assert.equal(JSON.parse(row.raw).agentUpdate, undefined);
+  for (const [i, junk] of [{ status: "exploded", version: "0.3.0" }, "applied", ["applied"], { version: "0.3.0" }].entries()) {
+    const id = `aaaaaaaa-0000-0000-0000-00000000010${i}`;
+    await post({ checkins: [checkin({ checkinId: id, reason: "periodic", agentVersion: "0.2.0", agentUpdate: junk })] });
+    row = env.DB.raw.prepare("SELECT * FROM checkins WHERE checkin_id = ?").get(id);
+    assert.equal(row.agent_version, "0.2.0");                 // the check-in still lands
+    assert.equal(row.agent_update_status, null, JSON.stringify(junk));
+  }
+  await post({ checkins: [checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000110", reason: "periodic",
+                                    agentVersion: "x".repeat(200),
+                                    agentUpdate: { status: "failed", error: "e".repeat(400) } })] });
+  row = env.DB.raw.prepare("SELECT * FROM checkins WHERE checkin_id = 'aaaaaaaa-0000-0000-0000-000000000110'").get();
+  assert.equal(row.agent_version.length, 64);
+  assert.equal(row.agent_update_error.length, 256);
+});
+
+test("unit_latest keeps the agent's newest version and update outcome", async () => {
+  const at = (n) => `2026-10-15T1${n}:00:00Z`;
+  await post({ checkins: [
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000201", sentAt: at(1), reason: "periodic", agentVersion: "0.1.0" }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000202", sentAt: at(3), reason: "heartbeat", agentVersion: "0.2.0",
+              agentUpdate: { status: "applied", version: "0.2.0" } }),
+    // A replayed older post never outranks the newer one.
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000203", sentAt: at(2), reason: "periodic", agentVersion: "0.1.0",
+              agentUpdate: { status: "failed", version: "0.2.0", error: "hash mismatch" } }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000204", sentAt: at(4), reason: "startup" }),
+  ] });
+  const l = env.DB.raw.prepare("SELECT * FROM unit_latest WHERE unit_key = 'V42'").get();
+  assert.equal(l.agent_version, "0.2.0");                    // a launch after it doesn't clear it
+  assert.equal(l.agent_at, "2026-10-15T13:00:00.000Z");
+  assert.deepEqual([l.agent_update_status, l.agent_update_version, l.agent_update_error], ["applied", "0.2.0", null]);
+});
+
+test("no agent target unless one is set", async () => {
+  const body = await (await post({ checkins: [checkin()] })).json();
+  assert.equal(body.control.agent, undefined);
+});
+
+function pinAt(scope, version, sha256) {
+  env.DB.raw.prepare("INSERT INTO agent_target (scope, version, sha256, set_at) VALUES (?, ?, ?, datetime('now'))")
+    .run(scope, version, sha256);
+}
+
+test("agent target: the fleet's pin, a unit's own pin wins, a unit with a mode row but no pin gets the fleet's", async () => {
+  pinAt("fleet", "0.2.0", SHA_A);
+  pinAt("V42", "0.3.0", SHA_B);
+  env.DB.raw.exec(`INSERT INTO monitor_control (scope, mode) VALUES ('V7', 'off')`);
+  const reply = async (venueId, n) => (await (await post({ checkins: [checkin({
+    checkinId: `aaaaaaaa-0000-0000-0000-00000000030${n}`, venueId })] })).json()).control;
+  assert.deepEqual((await reply("V42", 1)).agent, { version: "0.3.0", sha256: SHA_B });   // canary
+  assert.deepEqual((await reply("V99", 2)).agent, { version: "0.2.0", sha256: SHA_A });   // no pin of its own
+  const v7 = await reply("V7", 3);
+  assert.equal(v7.mode, "off");
+  assert.deepEqual(v7.agent, { version: "0.2.0", sha256: SHA_A });
+});
+
+test("a pin never changes a unit's mode: fleet off, unit pinned, the unit stays off", async () => {
+  env.DB.raw.exec(`UPDATE monitor_control SET mode = 'off' WHERE scope = 'fleet'`);
+  pinAt("V42", "0.3.0", SHA_B);
+  const body = await (await post({ checkins: [checkin()] })).json();
+  assert.equal(body.control.mode, "off");
+  assert.deepEqual(body.control.agent, { version: "0.3.0", sha256: SHA_B });
+});
+
+test("the retired monitor_control pin columns are not read", async () => {
+  env.DB.raw.exec(`UPDATE monitor_control SET agent_version = '0.2.0', agent_sha256 = '${SHA_A}' WHERE scope = 'fleet'`);
+  const body = await (await post({ checkins: [checkin()] })).json();
+  assert.equal(body.control.agent, undefined);
+});
+
+test("agent_target refuses a malformed pin", () => {
+  const bad = [["v0.2.0", SHA_A], ["0.2", SHA_A], ["0.2.0", SHA_A.toUpperCase()], ["0.2.0", "abc"], ["0.2.0", null]];
+  for (const [v, h] of bad) {
+    assert.throws(() => pinAt("fleet", v, h), /constraint/, `${v} ${h}`);
+  }
+});
+
+test("a broken pin lookup leaves agent out but keeps mode and skip", async () => {
+  env.DB.raw.exec(`UPDATE monitor_control SET mode = 'off' WHERE scope = 'fleet'`);
+  env.DB.raw.exec("DROP TABLE agent_target");
+  const body = await (await post({ checkins: [checkin()] })).json();
+  assert.deepEqual(body.control, { mode: "off", skip: [] });
+});
+
+test("switching a unit off the way the README says keeps its agent pin", async () => {
+  pinAt("V42", "0.1.0", SHA_B);
+  env.DB.raw.exec(`INSERT OR REPLACE INTO monitor_control (scope, mode, note, updated_at) VALUES ('V42', 'off', 'why', datetime('now'))`);
+  const body = await (await post({ checkins: [checkin()] })).json();
+  assert.equal(body.control.mode, "off");
+  assert.deepEqual(body.control.agent, { version: "0.1.0", sha256: SHA_B });
+});
+
+// PV-19: the five never-filled telemetry columns stay out of every view.
+const UNFILLED = ["tel_risk_count", "tel_reboot_pending", "tel_poe_draw_w", "tel_clock_offset_s", "tel_camera_macs"];
+
+test("no view exposes the never-filled telemetry columns", () => {
+  const db = env.DB.raw;
+  const views = db.prepare("SELECT name FROM sqlite_master WHERE type = 'view'").all();
+  assert.ok(views.length >= 4);
+  const gone = new Set([...UNFILLED, "risk_count", "reboot_pending", "poe_draw_w", "clock_offset_s", "camera_macs"]);
+  for (const { name } of views) {
+    const cols = db.prepare(`SELECT name FROM pragma_table_info('${name}')`).all().map((c) => c.name);
+    for (const c of cols) assert.ok(!gone.has(c), `${name}.${c}`);
+  }
+});
+
+test("checkins_et lists every checkins column except the unfilled five", () => {
+  const db = env.DB.raw;
+  const names = (t) => db.prepare(`SELECT name FROM pragma_table_info('${t}')`).all().map((c) => c.name);
+  const et = new Set(names("checkins_et"));
+  for (const c of names("checkins")) {
+    assert.equal(et.has(c), !UNFILLED.includes(c), `checkins_et vs checkins.${c} (add new columns to the view)`);
+  }
+  assert.ok(et.has("received_at_et") && et.has("sent_at_et"));
+});
+
+// PV-20
+test("readiness.status outside PASS/WARN/FAIL is stored as null", async () => {
+  const items = [
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000301", readiness: { status: "FIAL" } }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000302", readiness: { status: "WARN" } }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000303", reason: "heartbeat", readiness: undefined, status: "pass" }),
+  ];
+  await post({ secret: SECRET, checkins: items });
+  const get = (id) => env.DB.raw.prepare("SELECT readiness_status s FROM checkins WHERE checkin_id = ?").get(id).s;
+  assert.equal(get(items[0].checkinId), null);
+  assert.equal(get(items[1].checkinId), "WARN");
+  assert.equal(get(items[2].checkinId), null);
+});
+
+test("alert counts distinct units by venue, not by the retired serial and hostname", async () => {
+  await post({ secret: SECRET, checkins: [
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000311", venueId: "V1", vpuName: "A", hostname: undefined, serialNumber: undefined }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000312", venueId: "V1", vpuName: "A", hostname: undefined, serialNumber: undefined }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000313", venueId: "V2", vpuName: "B", hostname: undefined, serialNumber: undefined }),
+    checkin({ checkinId: "aaaaaaaa-0000-0000-0000-000000000314", venueId: undefined, vpuName: "C", hostname: undefined, serialNumber: undefined }),
+  ] });
+  const res = await runAlertCheck(env, new Date());
+  assert.equal(res.count, 4);
+  assert.equal(res.units, 3);
+});
+
+// PV-28: venue-keyed units read through checkins_unit, retention through
+// idx_checkins_received, and the serial/hostname index is gone.
+test("check-in indexes match how venue-keyed units are read", () => {
+  const db = env.DB.raw;
+  const plan = (sql) => db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all().map((r) => r.detail).join(" | ");
+  const idx = db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'checkins'").all().map((r) => r.name);
+  assert.ok(!idx.includes("idx_checkins_unit"));
+  const unit = "COALESCE(venue_id, vpu_name, hostname, serial_number) = ?";
+  assert.match(plan(`SELECT received_at FROM checkins WHERE ${unit} ORDER BY received_at DESC LIMIT 50`), /checkins_unit/);
+  assert.match(plan(`SELECT sent_at FROM checkins WHERE ${unit} AND received_at >= ?`), /checkins_unit/);
+  assert.match(plan("DELETE FROM checkins WHERE received_at < ?"), /idx_checkins_received/);
 });

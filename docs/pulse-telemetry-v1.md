@@ -124,6 +124,7 @@ No hostname or BIOS serial is sent.
   "blockers": ["The venue network is blocking clock sync"],
   "checkedAt": "2026-10-13T19:34:30Z",
   "pixellotVersion": "5.37.3",
+  "runnerVersion": "2",
   "network": {
     "internetReachable": true,
     "streamingPath": "rtmp-1935",
@@ -153,6 +154,7 @@ No hostname or BIOS serial is sent.
 | `statusSince` | when `status` last changed ("FAIL for 3 h") |
 | `headline` | the top confirmed blocker, else the top risk, else null |
 | `blockers` | confirmed blocker titles |
+| `runnerVersion` | the agent runner's own version (`RUNNER_VERSION` in `pulse_agent/runner.py`). An agent update never replaces the runner, so this shows which units need enrolling again for a runner fix. null: a runner from before PV-85's review fixes (re-enroll it), or a monitor not run by the runner |
 | `network.streamingPath` | which rung of the failover chain a stream would use now: `zixi-2088` → `zixi-443` → `rtmp-1935`, or `blocked` |
 | `network.portsFailed` | required outbound rules that failed |
 | `network.internet` | the internet adapter's IPv4 setup and MAC (`AA:BB:CC:DD:EE:FF`) |
@@ -191,6 +193,7 @@ D1 database `pulse-checkins` (Cloudflare account ian.moore@playonsports.com):
 - `transitions`: every finding opened or resolved
 - `checkins`: every check-in
 
-Source: `Pulse.Web/app/main.py` (`_build_telemetry`), `Pulse.Web/app/monitor.py`
-(`plan_tick`, `plan_post`), `Pulse.Web/app/monitor_once.py`,
+Source: `Pulse.Web/app/pulse_agent/telemetry.py` (`_build_telemetry`),
+`Pulse.Web/app/pulse_agent/monitor.py` (`plan_tick`, `plan_post`),
+`Pulse.Web/app/monitor_once.py`,
 `tools/checkin-worker/` (ingest and migrations).
