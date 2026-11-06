@@ -29,8 +29,8 @@ TYPE, string, WEB    // options WEB,SPORTZCAST,DAKTRONICS,OUTFITTERS,OCR,NEVCO
 ```
 
 **This is the "scoreboard set to WEB / OFF / MANUAL" field.** No VPU Manager
-API call needed — `Get-Content` + the INI parser pattern already in
-`Get-PixellotConfig.ps1`. PS 5.1-safe, zero new transport, zero risk.
+API call needed — `Get-Content` + INI section/key parsing. PS 5.1-safe, zero
+new transport, zero risk.
 
 Other useful `graphics.cfg` keys observed:
 
@@ -70,7 +70,7 @@ are the exact fallback policy (80% failures over 60s, 300s grace) — so Pulse
 can explain *why* it fell back, not just that it did.
 
 `ENHANCED_PIP` here mirrors the `Graphics\pipdesign\enhanced_pip.txt` presence
-check already in `Get-PixellotConfig.ps1:125-144` — cross-check them; a
+check already in `Get-PixellotConfig.ps1` — cross-check them; a
 disagreement is itself a finding.
 
 Also in `[PIP]`:
@@ -137,9 +137,9 @@ Also in `[PIP]`:
 Ships entirely off the two config files + what Pulse already collects. This is
 now a small, low-risk change — no message bus, no writes.
 
-New collector reads `graphics.cfg` + `PiP.cfg` (reusing the INI parse pattern
-in `Get-PixellotConfig.ps1:31-87`, minus `[CAM_CREDENTIALS]`), joins with the
-existing SC III status and OCR calibration, and renders one verdict:
+New collector reads `graphics.cfg` + `PiP.cfg` with INI section/key parsing
+(excluding `[CAM_CREDENTIALS]`), joins with the existing SC III status and
+OCR calibration, and renders one verdict:
 
 | Condition | Verdict |
 |---|---|
