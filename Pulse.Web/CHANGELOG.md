@@ -23,8 +23,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 
 ## [Unreleased]
 
-### Changed
-- The wrong-time-source finding no longer shows a command to run; it says to escalate to remote support.
 ### Added
 - Hardware tab: when the NVIDIA graphics card has no driver, is turned off, or shows an error in Device Manager, the Graphics card now says so and offers a fix. A missing driver is installed from Pixellot's approved list, matched to the exact card (GTX 1650 and the HP T1000 with subsystem 12DB103C: driver 536.67): Pulse checks the download is signed by NVIDIA, installs it clean and confirms the card works afterward. Any other card, including other T1000 variants for now, gets no install and a message saying so. A turned-off card is turned back on instead. If Windows can't see a graphics card at all, Pulse rescans for it and says plainly that a driver can't fix a missing card (check the card is seated and powered), without downloading anything. When the driver is working, a **Reinstall the driver** button is still there for a card Pixellot has an approved driver for. It first warns that the working driver will be replaced, that the screen may go blank and the VPU software can't process video meanwhile, and not to run it during or just before a live event, and does nothing unless you confirm.
 - Dashboard: Pulse now flags NVIDIA drivers older than 536.67 and repeated VPU software crashes, explains likely causes, and keeps a warning after a clean recovery so you know to re-check.
@@ -37,6 +35,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 ### Changed
 - Finding titles are shorter: the effect ("so games start late") is no longer in the title, only in the details. For example, "Streaming is blocked by the venue's network", "KeepAgentUp is not running" and "Cameras not confirmed yet". The streaming backup finding now says which case it is: "Streaming is using its backup connection (443 UDP)", or "Streaming backup connection is blocked" when you're streaming on the main connection and the backup is blocked. The C: drive finding names its limit: "System drive (C:) is over 90% full".
 - Stream Readiness is stricter about six things. It now reads **FAIL** when a Pixellot update didn't finish, or when the VPU doesn't have enough memory. It now reads **WARN**, not PASS, for a worn SSD (80% or more of its rated writes), unsupported security software, a crypto miner, a torrent client, a system cleaner, a gaming platform, a cloud-sync client, or a venue firewall inspecting support services such as LogMeIn.
+- The wrong-time-source finding no longer shows a command to run; it says to escalate to remote support.
 
 ### Fixed
 - Camera Connectivity: an Intel I210 camera card is now labelled "ADLINK GIE74-series" instead of always "GIE74P". It had been calling GIE74 cards GIE74P, and without ADLINK's AVS software Pulse can't tell the two apart.
