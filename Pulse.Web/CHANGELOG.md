@@ -24,15 +24,42 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 ## [Unreleased]
 
 ### Added
+- Hardware tab: when the NVIDIA graphics card has no driver, is turned off, or shows an error in Device Manager, the Graphics card now says so and offers a fix. A missing driver is installed from Pixellot's approved list, matched to the exact card (GTX 1650 and the HP T1000 with subsystem 12DB103C: driver 536.67): Pulse checks the download is signed by NVIDIA, installs it clean and confirms the card works afterward. Any other card, including other T1000 variants for now, gets no install and a message saying so. A turned-off card is turned back on instead. If Windows can't see a graphics card at all, Pulse rescans for it and says plainly that a driver can't fix a missing card (check the card is seated and powered), without downloading anything. When the driver is working, a **Reinstall the driver** button is still there for a card Pixellot has an approved driver for. It first warns that the working driver will be replaced, that the screen may go blank and the VPU software can't process video meanwhile, and not to run it during or just before a live event, and does nothing unless you confirm.
+- Dashboard: Pulse now flags NVIDIA drivers older than 536.67 and repeated VPU software crashes, explains likely causes, and keeps a warning after a clean recovery so you know to re-check.
 - Dashboard: Pulse now catches a VPU whose Pixellot video program (VPU.exe) can't start because one of its files is missing, such as the "libcef.dll was not found" error. Stream Readiness reads FAIL and names the missing file, how many times Windows showed the error this week, and to escalate to Pixellot support. Before, these units read PASS, because the stuck program still showed as running.
 - ScoreConnect tab: a **Reinstall ScoreConnect III** button. It stops the service, deletes the whole Sportzcast LLC program folder, and installs a fresh copy, with progress shown in Pulse. Saved settings and logs are kept. Use it when ScoreConnect III won't start or keeps failing.
+- Camera Connectivity: on VPUs with ADLINK's AVS software installed, the PoE card is named exactly, for example "PCIe-GIE74P, PCB rev 4, MCU 2.0". The name can take a few seconds to appear after Pulse starts. Without AVS, the card still shows as "GIE74-series".
+- Software tab: every installed application now has a **Review** label: Approved, a risk, or Informational (not on the approved list yet). Matching is by name only, so version changes don't matter.
+- Software tab: Datto EDR is now flagged as unsupported security software (it blocks Pixellot's agent and means an RMA), and Datto RMM as a non-standard remote-access tool.
+
+### Changed
+- Finding titles are shorter: the effect ("so games start late") is no longer in the title, only in the details. For example, "Streaming is blocked by the venue's network", "KeepAgentUp is not running" and "Cameras not confirmed yet". The streaming backup finding now says which case it is: "Streaming is using its backup connection (443 UDP)", or "Streaming backup connection is blocked" when you're streaming on the main connection and the backup is blocked. The C: drive finding names its limit: "System drive (C:) is over 90% full".
+- Stream Readiness is stricter about six things. It now reads **FAIL** when a Pixellot update didn't finish, or when the VPU doesn't have enough memory. It now reads **WARN**, not PASS, for a worn SSD (80% or more of its rated writes), unsupported security software, a crypto miner, a torrent client, a system cleaner, a gaming platform, a cloud-sync client, or a venue firewall inspecting support services such as LogMeIn.
+- The wrong-time-source finding no longer shows a command to run; it says to escalate to remote support.
+
+### Fixed
+- Camera Connectivity: an Intel I210 camera card is now labelled "ADLINK GIE74-series" instead of always "GIE74P". It had been calling GIE74 cards GIE74P, and without ADLINK's AVS software Pulse can't tell the two apart.
+- Camera Connectivity: when the PoE card won't report its power budget, the message no longer blames only the driver. It now says the card's PoE controller may not be responding, and tells you to check the card's Molex power lead first. If cameras still get no power after that, treat it as a card fault.
 - Settings (dev channel only): a **Fleet Monitoring** card. **Opt in this unit** installs the fleet monitor, which checks every 5 minutes whether the VPU is ready to stream and reports to Pulse Vitals. The card shows when it last checked and reported, and **Opt out** removes it. A production launch on the same VPU doesn't affect it.
 
 ### Fixed
 - Secure Connections now catches a firewall or web filter that drops all or part of a service's reply, shows the bytes that arrived, and blocks Stream Readiness when a broadcast service is affected.
+- A slow onboard network port is no longer reported as "Network port N is running slow". Only the camera card's ports are checked for gigabit speed.
+- Fleet Monitoring: **Opt in this unit** no longer fails with "Invalid class" on VPUs whose Windows task-scheduling interface is damaged. The installer now falls back to schtasks.exe and says it did.
+- A drive with a few uncorrected read/write errors that still reads Healthy now shows as "Fix soon" with a back-up-and-replace note. Before, it was flagged as predicting failure. 100 or more errors, an Unhealthy drive, or Windows' own failure warning are still critical.
+- Software tab: Chrome web-app shortcuts such as "Google Drive", Gmail and Docs no longer trigger the cloud-sync warning.
+- Pixellot Software no longer flags a missing retired camera-config file; cameras are identified from live camera data and standard addresses. Scoreboard cameras are detection-only: the startup check and ScoreConnect no longer claim a configured camera is unplugged, and check ScoreConnect when no scoreboard camera is seen.
+- Pixellot Software tab: a T1000 graphics card is now read as a Turing card with no Pixellot version limit, instead of "unknown architecture", on VPUs where Pulse can't run `nvidia-smi`. The version check passed before; only the wording and the architecture shown change.
 - A VPU missing one of its main cameras (for example 1 of 2 on an S2) now reads FAIL and says it won't stream. Before, it read only as a warning.
 - The readiness line no longer says "No risks tonight" right after "1 thing is stopping tonight's game". When something is stopping the game it leaves out the risk count unless there are risks.
 - Pulse now refuses requests that another web page open in the browser on the VPU makes to it. Before, a page could have triggered a reboot, a service restart or an update just by being open. Pulse's own page works as before, at `localhost` or `127.0.0.1`, on any port. A request that arrives under any other hostname, or from any other origin, is refused with "only answers requests from its own page".
+- ScoreConnect III install: the install log no longer closes itself a second after you open it.
+- ScoreConnect III install: Pulse no longer says the install failed when ScoreConnect III takes more than 30 seconds to start after installing. If the installer goes quiet, Pulse keeps watching and turns the install green if it finishes.
+
+## [1.4.2] - 2026-11-02
+
+### Fixed
+- Pulse installs on a new VPU again. Since 2026-11-02, a first run (or a repair of Pulse's Python) stopped at "installing pip" with "ERROR: To modify pip, please run the following command", because a download Pulse uses changed. Run Pulse again to finish setup.
 
 ## [1.4.1] - 2026-10-13
 
