@@ -3,7 +3,8 @@
 A working driver is replaced only when the Hardware tab sends {"reinstall": true}
 after the technician confirms the warning. Anything else - an empty body, a
 truthy string, a number - must leave Repair-GpuDriver.ps1 on its default, which
-refuses a healthy card.
+refuses a healthy card. The endpoint hands off to gpu_job.start, which runs the
+script detached.
 """
 
 import asyncio
@@ -30,17 +31,21 @@ class _Req:
         return self._body
 
 
-def _args_sent(req):
+def _sent(req):
     seen = {}
 
-    async def fake_run_ps(script, args=None, **kw):
-        seen["script"], seen["args"] = script, args
-        return {"status": "x"}
+    def fake_start(kind, reinstall):
+        seen["kind"], seen["reinstall"] = kind, reinstall
+        return {"ok": True}
 
-    with mock.patch.object(main, "run_ps", fake_run_ps):
+    with mock.patch.object(main.gpu_job, "start", fake_start):
         asyncio.run(main.api_gpu_driver_repair(req))
-    assert seen["script"] == "Repair-GpuDriver.ps1"
-    return seen["args"]
+    return seen
+
+
+def _args_sent(req):
+    """The Reinstall argument the script ends up with: {"Reinstall": 1} or None."""
+    return {"Reinstall": 1} if _sent(req)["reinstall"] is True else None
 
 
 class ReinstallFlag(unittest.TestCase):
@@ -59,6 +64,25 @@ class ReinstallFlag(unittest.TestCase):
 
     def test_a_non_object_body_does_not(self):
         self.assertIsNone(_args_sent(_Req([True])))
+
+    def test_kind_is_passed_through_only_as_a_string(self):
+        self.assertEqual(_sent(_Req({"kind": "rescan"}))["kind"], "rescan")
+        self.assertEqual(_sent(_Req({"kind": ["rescan"]}))["kind"], "")
+        self.assertEqual(_sent(_Req(bad_json=True))["kind"], "")
+
+
+class StatusAndAck(unittest.TestCase):
+    def test_status_reads_the_job(self):
+        with mock.patch.object(main.gpu_job, "status", lambda: {"stage": "downloading"}):
+            self.assertEqual(asyncio.run(main.api_gpu_driver_repair_status())["stage"], "downloading")
+
+    def test_ack_needs_a_run_id(self):
+        called = []
+        with mock.patch.object(main.gpu_job, "ack", lambda rid: called.append(rid) or {"ok": True}):
+            self.assertFalse(asyncio.run(main.api_gpu_driver_repair_ack(_Req({})))["ok"])
+            self.assertFalse(asyncio.run(main.api_gpu_driver_repair_ack(_Req({"runId": 5})))["ok"])
+            self.assertTrue(asyncio.run(main.api_gpu_driver_repair_ack(_Req({"runId": "abc"})))["ok"])
+        self.assertEqual(called, ["abc"])
 
 
 if __name__ == "__main__":

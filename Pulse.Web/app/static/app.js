@@ -3818,8 +3818,20 @@ function renderHardware() {
 // driver or shows an error, offers Repair-GpuDriver.ps1: Pixellot's approved
 // driver, installed clean. A card Windows cannot see at all gets a rescan and
 // a plain statement that a driver cannot fix it -- never a download.
-var _gpuDriverBusy = false;
-var _gpuDriverResult = null;   // last repair result, kept across re-renders
+// The repair itself runs as a detached job on the VPU (gpu_job.py) and is
+// shown in a modal (below) that polls its status file, so it survives a
+// reload and the browser's GPU process crashing while the driver swaps.
+var _gpuDriverBusy = false;    // a run is live (or alive but silent)
+var _gpuDriverResult = null;   // the latest run's result until it is acknowledged
+
+// Folds the job status into the panel's two flags.
+function _gpuApplyJob(j) {
+  _gpuJob = j && !j.error ? j : _gpuJob;
+  j = _gpuJob;
+  _gpuDriverBusy = !!(j && (j.live || j.stale));
+  _gpuDriverResult = null;
+  if (j && j.finished && !j.acknowledged) _gpuDriverResult = _gpuJobResult(j);
+}
 
 async function _loadGpuDriverPanel() {
   var el = document.getElementById("gpu-driver-panel");
@@ -3827,9 +3839,17 @@ async function _loadGpuDriverPanel() {
   if (!_gpuDriverBusy) {
     el.innerHTML = `<div class="text-xs text-pulse-muted mb-2">Checking the graphics driver…</div>`;
   }
-  var s = await api("/api/gpu-driver");
+  var both = await Promise.all([api("/api/gpu-driver"), api("/api/gpu-driver/repair/status")]);
   if (currentPage !== "hardware") return;
-  _renderGpuDriverPanel(s);
+  _gpuApplyJob(both[1]);
+  _renderGpuDriverPanel(both[0]);
+  // A run started from another tab or before a reload: show it.
+  if (_gpuShouldReopen(_gpuJob)) _gpuOpenModal(_gpuJob);
+}
+
+function _gpuBusyHtml() {
+  return `<div class="text-xs text-pulse-muted mt-2">A graphics driver install is running on this VPU.
+    <button class="btn-outline btn-ol-blue" onclick="_gpuOpenModal()">Show progress</button></div>`;
 }
 
 function _gpuDriverResultHtml(r) {
@@ -3903,7 +3923,7 @@ function _renderGpuDriverPanel(s) {
       <button class="btn-outline btn-ol-amber" id="gpu-driver-btn" ${_gpuDriverBusy ? "disabled" : ""}>
         ${svgIcon(_gpuDriverBusy ? "refresh" : "play", 12)} ${_gpuDriverBusy ? "Working…" : "Reinstall the driver…"}
       </button>
-      ${_gpuDriverBusy ? `<div class="text-xs text-pulse-muted mt-2">Working. This can take 10 to 20 minutes. Keep this page open.</div>` : ""}
+      ${_gpuDriverBusy ? _gpuBusyHtml() : ""}
       ${result}`;
     var rbtn = document.getElementById("gpu-driver-btn");
     if (rbtn) rbtn.addEventListener("click", function() { _runGpuDriverRepair(rk); });
@@ -3970,7 +3990,7 @@ function _renderGpuDriverPanel(s) {
         ${svgIcon(_gpuDriverBusy ? "refresh" : "play", 12)} ${_gpuDriverBusy ? "Working…" : esc(k.button)}
       </button>
       ${rk2 && !_gpuDriverBusy ? `<button class="btn-outline btn-ol-muted" id="gpu-driver-reinstall-btn">Reinstall the driver…</button>` : ""}
-      ${_gpuDriverBusy ? `<div class="text-xs text-pulse-muted mt-2">Working. This can take 10 to 20 minutes. Keep this page open.</div>` : ""}
+      ${_gpuDriverBusy ? _gpuBusyHtml() : ""}
     </div>${result}`;
   var btn = document.getElementById("gpu-driver-btn");
   if (btn) btn.addEventListener("click", function() { _runGpuDriverRepair(k); });
@@ -3979,17 +3999,277 @@ function _renderGpuDriverPanel(s) {
 }
 
 async function _runGpuDriverRepair(k) {
-  if (_gpuDriverBusy) return;
+  if (_gpuDriverBusy) { _gpuOpenModal(); return; }
   var ok = await confirmAction({ title: k.confirmTitle, body: k.confirmBody, confirmLabel: k.confirmLabel, tone: k.tone });
   if (!ok) return;
+  var kind = k.reinstall ? "reinstall" : k.kind;
   _gpuDriverBusy = true;
   _gpuDriverResult = null;
-  var s0 = await api("/api/gpu-driver");
-  _renderGpuDriverPanel(s0);
-  var r = await apiPost("/api/gpu-driver/repair", k.reinstall ? { reinstall: true } : {});
+  _gpuJob = { stage: "starting", kind: kind, live: true, stagesSeen: [], message: "Starting the driver repair." };
+  _gpuOpenModal(_gpuJob);
+  var r = await apiPost("/api/gpu-driver/repair", k.reinstall ? { reinstall: true, kind: kind } : { kind: kind });
+  if (r && (r.ok || r.status === "already-running")) {
+    _gpuStartPolling();   // already-running: show the run that is going
+    return;
+  }
   _gpuDriverBusy = false;
-  _gpuDriverResult = r;
+  _gpuJob = { stage: "done", kind: kind, finished: true, startFailed: true,
+              result: { error: true, message: (r && (r.message || r.error)) || "Pulse did not answer." } };
+  _renderGpuModal(_gpuJob);
+}
+
+// ── Graphics driver install modal ────────────────────────────
+// Same look as the SC III installer (it reuses the sc3-modal classes), but
+// built for an install that blacks out the screen it is drawn on:
+//  - progress lives in a status file on the VPU, so a reload or a browser
+//    restart just reopens this modal on the same run;
+//  - a failed poll is not the end: Pulse can be busy for a moment while the
+//    driver swaps, so the modal keeps polling and only says it lost contact
+//    after two minutes, and even then keeps trying;
+//  - the server, not this page, decides a run is stalled (no heartbeat for
+//    3 minutes) or died (its process ended without a result).
+var _gpuJob = null;          // latest status from /api/gpu-driver/repair/status
+var _gpuPoll = null;         // interval handle
+var _gpuPollFails = 0;       // consecutive failed polls
+var _GPU_POLL_MS = 2000;
+var _GPU_LOST_AFTER = 60;    // failed polls (x 2 s) before saying contact is lost
+var _GPU_REOPEN_HOURS = 12;  // an unacknowledged result older than this stays shut
+var _gpuClosedRuns = {};     // runs closed in this page, even if the ack didn't land
+
+var _GPU_STEP_ORDER = ["checking", "rescanning", "enabling", "downloading", "verifying", "installing", "confirming"];
+var _GPU_STEP_LABELS = {
+  checking: "Check the graphics card",
+  rescanning: "Rescan for the card",
+  enabling: "Turn the card on",
+  downloading: "Download the driver",
+  verifying: "Check NVIDIA's signature",
+  installing: "Install the driver",
+  confirming: "Confirm the card works",
+};
+var _GPU_KIND_STEPS = {
+  install: ["checking", "downloading", "verifying", "installing", "confirming"],
+  reinstall: ["checking", "downloading", "verifying", "installing", "confirming"],
+  rescan: ["checking", "rescanning"],
+  enable: ["checking", "enabling"],
+};
+var _GPU_GOOD = ["installed", "installed-reboot", "rescan-fixed", "enabled", "not-needed", "reboot-needed"];
+var _GPU_RESTART = ["installed", "installed-reboot", "rescan-fixed", "enabled", "reboot-needed"];
+
+// Stages that are not steps of their own fold into the step they belong to.
+function _gpuStepOf(stage) {
+  if (stage === "starting" || stage === "preparing") return "checking";
+  return stage;
+}
+
+function _gpuJobResult(j) {
+  if (j.result) return j.result;
+  if (j.died) return { error: true, message: "The install stopped without reporting a result. The VPU may have restarted, or the install process was closed. Check the graphics card below before trying again." };
+  return null;
+}
+
+function _gpuShouldReopen(j) {
+  if (!j || j.error || j.stage === "idle" || j.stage === "unknown") return false;
+  if (j.live || j.stale) return !(j.stale && _gpuClosedRuns[j.runId]);
+  if (_gpuClosedRuns[j.runId]) return false;
+  if (!j.finished || j.acknowledged) return false;
+  var ended = j.updatedEpoch || j.startedEpoch || 0;
+  var now = j.nowEpoch || Date.now() / 1000;
+  return now - ended < _GPU_REOPEN_HOURS * 3600;
+}
+
+function _gpuModalEl() {
+  var el = document.getElementById("gpu-driver-modal");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "gpu-driver-modal";
+    el.className = "sc3-modal";
+    el.addEventListener("click", function(e) {
+      if (e.target === el && !_gpuModalLocked()) closeGpuModal();
+    });
+    document.body.appendChild(el);
+  }
+  return el;
+}
+
+// Locked while the run is live and Pulse can still see it. Unlocked once it
+// finishes, stalls, dies, or contact with Pulse is lost.
+function _gpuModalLocked() {
+  var j = _gpuJob;
+  return !!(j && j.live && !j.finished && _gpuPollFails < _GPU_LOST_AFTER);
+}
+
+function _gpuOpenModal(j) {
+  if (j) _gpuJob = j;
+  if (!_gpuJob) { _gpuStartPolling(); return; }
+  _renderGpuModal(_gpuJob);
+  if (!_gpuJob.finished) _gpuStartPolling();
+}
+
+function _gpuStartPolling() {
+  if (_gpuPoll) clearInterval(_gpuPoll);
+  _gpuPollFails = 0;
+  var tick = async function() {
+    var s = await api("/api/gpu-driver/repair/status");
+    if (!s || s.error || s.stage === "unknown") {
+      _gpuPollFails++;
+      if (_gpuJob) _renderGpuModal(_gpuJob);
+      return;
+    }
+    _gpuPollFails = 0;
+    if (s.stage === "idle") return;   // start() has not written the file yet
+    _gpuApplyJob(s);
+    _renderGpuModal(s);
+    if (s.finished) {
+      clearInterval(_gpuPoll); _gpuPoll = null;
+      if (currentPage === "hardware") _loadGpuDriverPanel();
+    }
+  };
+  _gpuPoll = setInterval(tick, _GPU_POLL_MS);
+  tick();
+}
+
+async function closeGpuModal() {
+  if (_gpuModalLocked()) return;
+  var el = document.getElementById("gpu-driver-modal");
+  if (el) el.classList.remove("open");
+  if (_gpuPoll) { clearInterval(_gpuPoll); _gpuPoll = null; }
+  var j = _gpuJob;
+  if (j && j.runId) _gpuClosedRuns[j.runId] = true;
+  if (j && j.finished && j.runId) {
+    await apiPost("/api/gpu-driver/repair/ack", { runId: j.runId });
+    j.acknowledged = true;
+  }
+  if (j && j.finished) _gpuDriverResult = null;
   if (currentPage === "hardware") _loadGpuDriverPanel();
+}
+
+async function _gpuRestartVpu() {
+  if (!(await confirmAction({ title: "Restart the VPU now?", body: "This restarts Windows to finish the driver install. Any active recording is interrupted, and the unit is offline for a few minutes. Pulse won't come back on its own. Reopen it from the desktop shortcut once Windows is back.", confirmLabel: "Restart the VPU", tone: "danger" }))) return;
+  var r = await apiPost("/api/maintenance/reboot-vpu", {});
+  if (r && r.success) {
+    if (_gpuJob && _gpuJob.runId) apiPost("/api/gpu-driver/repair/ack", { runId: _gpuJob.runId });
+    var el = document.getElementById("gpu-driver-modal");
+    if (el) el.classList.remove("open");
+    _showMaintenanceOverlay("Restarting the VPU…",
+      (r.message ? r.message + " " : "The VPU is restarting. ") + "Reopen Pulse from the desktop shortcut once Windows is back.");
+    _pollForRestart(dataCache._version);
+  } else {
+    var note = document.getElementById("gpu-modal-restart-msg");
+    if (note) note.textContent = (r && (r.message || (typeof r.error === "string" ? r.error : null))) || "Couldn't restart the VPU.";
+  }
+}
+
+function _gpuFmtMb(b) { return Math.round(b / 1048576).toLocaleString(); }
+function _gpuFmtDur(sec) {
+  sec = Math.max(0, Math.round(sec || 0));
+  var m = Math.floor(sec / 60), s = sec % 60;
+  return m ? m + " min " + s + " s" : s + " s";
+}
+
+function _renderGpuModal(j) {
+  var kind = j.kind || (j.reinstall ? "reinstall" : "install");
+  var seen = (j.stagesSeen || []).map(_gpuStepOf);
+  var want = (_GPU_KIND_STEPS[kind] || _GPU_KIND_STEPS.install).slice();
+  var steps = _GPU_STEP_ORDER.filter(function(k) { return want.indexOf(k) !== -1 || seen.indexOf(k) !== -1; });
+  var result = j.finished ? _gpuJobResult(j) : null;
+  var good = !!(result && !result.error && _GPU_GOOD.indexOf(result.status) !== -1);
+  var failed = !!(j.finished && !good);
+  var stale = !!j.stale;
+  var lost = _gpuPollFails >= _GPU_LOST_AFTER;
+  var active = j.finished ? null : _gpuStepOf(j.stage || "starting");
+  var lastSeen = seen.length ? seen[seen.length - 1] : "checking";
+
+  var stepsHtml = steps.map(function(k) {
+    var st;
+    if (j.finished) {
+      st = seen.indexOf(k) === -1 ? "pending" : (failed && k === lastSeen ? "failed" : "done");
+    } else {
+      var ai = steps.indexOf(active);
+      var i = steps.indexOf(k);
+      st = i < ai ? "done" : i === ai ? (stale ? "failed" : "active") : "pending";
+    }
+    var icon = st === "done" ? svgIcon("check", 14)
+      : st === "failed" ? svgIcon("x", 14)
+      : st === "active" ? '<span class="sc3-step-spinner"></span>'
+      : '<span class="sc3-step-dot"></span>';
+    var detail = "";
+    if (st === "active") {
+      detail = j.message || "";
+      if (k === "downloading" && j.bytesDone != null) {
+        detail = j.bytesTotal
+          ? _gpuFmtMb(j.bytesDone) + " of " + _gpuFmtMb(j.bytesTotal) + " MB (" + Math.floor(100 * j.bytesDone / j.bytesTotal) + "%)"
+          : _gpuFmtMb(j.bytesDone) + " MB so far";
+      }
+      if (k === "installing") detail = "";   // the warning above already says it
+      if (k === "installing" && j.startedEpoch) {
+        detail = "Running for " + _gpuFmtDur((j.nowEpoch || j.updatedEpoch || 0) - j.startedEpoch) + " in all.";
+      }
+    }
+    return `<div class="sc3-step sc3-step-${st}">
+        <span class="sc3-step-icon">${icon}</span><span>${esc(_GPU_STEP_LABELS[k] || k)}</span>
+      </div>
+      ${detail ? `<div class="sc3-step-msg">${esc(detail)}</div>` : ""}`;
+  }).join("");
+
+  // Bar position from real events only: the stage reached, plus download bytes.
+  var pct = { starting: 2, checking: 5, rescanning: 8, enabling: 8, preparing: 10, downloading: 12,
+              verifying: 62, installing: 70, confirming: 92 }[j.stage] || 5;
+  if (j.stage === "downloading" && j.bytesTotal) pct = 12 + Math.floor(48 * j.bytesDone / j.bytesTotal);
+  if (j.finished) pct = 100;
+  var barColor = failed || stale ? "var(--c-accent-red)" : good ? "var(--c-accent-green)" : "var(--c-accent-blue)";
+
+  var title = kind === "rescan" ? "Rescanning for the graphics card"
+    : kind === "enable" ? "Turning the graphics card on"
+    : kind === "reinstall" ? "Reinstalling the graphics driver" : "Installing the graphics driver";
+  var installKind = kind === "install" || kind === "reinstall" || seen.indexOf("installing") !== -1;
+  var locked = _gpuModalLocked();
+  var restart = good && _GPU_RESTART.indexOf(result.status) !== -1;
+  var stepsTxt = result && result.steps ? result.steps.map(function(st) {
+    return (st.ok ? "OK    " : "FAIL  ") + st.step + ": " + (st.detail || "");
+  }).join("\n") : "";
+
+  var el = _gpuModalEl();
+  var oldLog = el.querySelector("details.sc3-log");
+  var logOpen = oldLog ? oldLog.open : failed;
+  el.innerHTML = `
+    <div class="sc3-modal-box" role="dialog" aria-modal="true" aria-labelledby="gpu-modal-title">
+      <div class="sc3-modal-header">
+        <span class="sc3-modal-title" id="gpu-modal-title">${svgIcon("monitor", 16)} ${esc(title)}</span>
+        ${locked ? "" : `<button class="sc3-modal-close" onclick="closeGpuModal()" title="Close" aria-label="Close">${svgIcon("x", 16)}</button>`}
+      </div>
+      <div class="sc3-modal-body">
+        ${installKind && !j.finished ? `<div class="dh-repair-card mb-2"><div class="dh-repair-body">
+          The screen goes black for a few seconds while Windows swaps the driver, maybe more than once,
+          and a remote session may drop. The install keeps running either way. If your session drops,
+          reconnect and open Pulse again: this window comes back with the result.
+          Don't restart the VPU or close Pulse until it finishes.</div></div>` : ""}
+        <div class="sc3-steps">${stepsHtml}</div>
+        <div class="sc3-bar-track"><div class="sc3-bar-fill" style="width:${pct}%;background:${barColor}"></div></div>
+        ${good ? `<div class="status-pass" style="display:flex;align-items:center;gap:0.4rem;font-size:var(--fs-body);margin-top:0.75rem">${svgIcon("check", 14)} <span>${esc(result.message || result.status)}</span></div>` : ""}
+        ${failed ? `<div class="status-fail" style="font-size:var(--fs-small);margin-top:0.75rem">${esc((result && result.message) || "The driver repair did not finish.")}</div>` : ""}
+        ${stale && !j.finished ? `<div class="status-fail" style="font-size:var(--fs-small);margin-top:0.75rem">No update from the install in ${esc(_gpuFmtDur(j.ageSec))}. It may be stuck. Pulse keeps watching and updates this if it finishes. Check the graphics card before starting another install.</div>` : ""}
+        ${lost && !j.finished ? `<div class="status-fail" style="font-size:var(--fs-small);margin-top:0.75rem">Pulse has not answered for two minutes. The install keeps running on its own. Pulse keeps trying; if it has closed, open it again to see the result.</div>` : ""}
+        ${stepsTxt ? `<details class="sc3-log" ${logOpen ? "open" : ""}>
+          <summary>What Pulse did${result.durationSec != null ? " · " + esc(_gpuFmtDur(result.durationSec)) : ""}</summary>
+          <pre>${esc(stepsTxt)}</pre>
+        </details>` : ""}
+        ${j.finished || stale || lost ? `<div class="sc3-modal-actions">
+          ${restart ? `<button class="btn-outline btn-ol-red" onclick="_gpuRestartVpu()">${svgIcon("refresh", 14)} Restart the VPU now</button>` : ""}
+          <button class="btn-outline" onclick="closeGpuModal()">${restart ? "Restart later" : "Close"}</button>
+        </div>
+        ${restart ? `<div class="text-xs text-pulse-muted mt-2" id="gpu-modal-restart-msg"></div>` : ""}` : ""}
+      </div>
+    </div>`;
+  el.classList.add("open");
+}
+
+// On any page load: a driver install started before a reload or a browser
+// crash reopens its modal, wherever the tech lands.
+async function _gpuResumeOnLoad() {
+  var j = await api("/api/gpu-driver/repair/status");
+  if (!j || j.error) return;
+  _gpuApplyJob(j);
+  if (_gpuShouldReopen(j)) _gpuOpenModal(j);
 }
 
 // ── Applications ─────────────────────────────────────────────
@@ -12717,6 +12997,7 @@ async function init() {
   const startPage = window.location.hash.slice(1) || "dashboard";
   navigate(startPage);
   _updateThemeToggle();
+  _gpuResumeOnLoad();
   // Hold the splash screen until every preload section has settled
   // (success or error), so users see the loading state through a full
   // cold start instead of a half-rendered dashboard.
