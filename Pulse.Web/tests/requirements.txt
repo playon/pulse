@@ -1,0 +1,2 @@
+# Test-only schema validation; never installed on a VPU.
+jsonschema>=4.23,<5
