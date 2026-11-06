@@ -9,9 +9,9 @@ export async function runAlertCheck(env, now = new Date()) {
   let text = null;
   try {
     const recent = await env.DB.prepare(
-      "SELECT COUNT(*) AS n, COUNT(DISTINCT COALESCE(serial_number,'') || '|' || COALESCE(hostname,'')) AS units FROM checkins WHERE received_at >= ?",
+      "SELECT COUNT(*) AS n, COUNT(DISTINCT COALESCE(venue_id, vpu_name, hostname, serial_number)) AS units FROM checkins WHERE received_at >= ?",
     ).bind(since).first();
-    if ((recent && recent.n) >= min) return { alerted: false, count: recent.n };
+    if ((recent && recent.n) >= min) return { alerted: false, count: recent.n, units: recent.units };
 
     const last = await env.DB.prepare("SELECT MAX(received_at) AS at FROM checkins").first();
     const lastText = last && last.at ? `last one received ${formatUtc(last.at)}` : "none received yet";
