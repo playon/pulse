@@ -933,6 +933,33 @@ _ARCH_VERSION_CAPS = {
 }
 
 
+# Oldest NVIDIA driver a VPU is known to run on. 536.67 is the driver
+# Pixellot's own cloud repair bundle installs (gaas: Dependencies + 4.22.8 +
+# 536.67). Both older drivers seen in the field broke VPU.exe:
+#   446.14 - Tecumseh (MI) 2026-09-28, Pixellot 5.37.2: every VPU.exe start
+#            died on the first frame with cudaErrorInvalidPtx (218, "a PTX
+#            JIT compilation failed") - the driver is too old to compile
+#            Pixellot's CUDA kernels. Head Setup failed, frames still came in.
+#   516.94 - Madison Memorial (WI) 2026-09-10: HwDetector CUDA/NVENC failure
+#            + CameraDYNACOLOR.dll 126, cleared by the repair bundle.
+# Nothing between 516.94 and 536.67 has been observed, so the floor is the
+# version Pixellot ships rather than a proven minimum.
+_NVIDIA_DRIVER_MIN = (536, 67)
+
+
+def _nvidia_driver_release(wmi_version):
+    """NVIDIA release number from the Windows driver version, or None.
+
+    Windows reports NVIDIA drivers as e.g. "31.0.15.3667"; the release is
+    the last digit of the third group plus the fourth: 5|3667 -> 536.67.
+    "26.21.14.4614" -> (446, 14)."""
+    parts = _parse_version(wmi_version)
+    if len(parts) != 4:
+        return None
+    n = (parts[2] % 10) * 10000 + parts[3]
+    return (n // 100, n % 100)
+
+
 def _parse_version(v: str):
     """Return tuple of ints from a dotted version, ignoring suffixes.
     "5.13.6" → (5, 13, 6). "2.66.17" → (2, 66, 17). Empty/bad → ()."""
@@ -2350,7 +2377,208 @@ def _graphics_findings(gd) -> list:
     return out
 
 
-def _compute_findings(identity, performance, services, nics, hardware=None, installed_sw=None, network_config=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None, binaries=None) -> list:
+# ── VPU.exe restart loop ─────────────────────────────────────
+# A crash-looping VPU.exe still reads "Running" in a process snapshot: the
+# agent starts a fresh copy every 15-60 s. Get-VpuRestarts reads the VPU log's
+# session markers; this decides whether they add up to a loop and why.
+#
+# Separate from event_watch.py's per-event "restart-loop" state: these are
+# readiness findings from VPU session logs, including outside an event. Loader
+# failures before logging remain pixellot-dll-missing / pixellot-start-error.
+#
+# Causes are the signatures found in the field log bundles (Aug-Sep 2026,
+# 16 Windows loop episodes across 9 venues). Every string here appears in a
+# Windows VPU.exe log; Linux (gen-3) VPUs log different ones and don't run
+# Pulse, so don't add theirs. First match in table order wins
+# a tie; otherwise the cause seen in the most crashed sessions.
+_VPU_RESTART_WINDOW_MIN = 60    # count crashes over the last hour
+_VPU_RESTART_LOOP_MIN = 3       # this many crashes in the window is a loop
+_VPU_RESTART_STABLE_MIN = 10    # current run this old with frames = recovered
+
+# Close reasons the agent logs when a person or the schedule stopped VPU.exe
+# on purpose. Those exits are not crashes.
+_VPU_DELIBERATE_CLOSE = (
+    "restart VPU button",           # agent GUI (spelled "AgnetGui" in the log)
+    "stop recorder",                # manual mode / remote calibration
+    "start recorder",
+    "stopStreaming event command",  # event ended
+    "As not in event",              # watchdog closing an idle VPU.exe
+)
+
+_VPU_RESTART_CAUSES = [
+    {
+        "cause": "driver-too-old",
+        "match": ("cudaErrorInvalidPtx",),
+        "label": "the NVIDIA graphics driver is too old for it",
+        "fix": ("Install NVIDIA driver %d.%02d or newer and restart the VPU." % _NVIDIA_DRIVER_MIN),
+        # Tecumseh (MI) 2026-09-28, driver 446.14.
+    },
+    {
+        "cause": "gpu-not-found",
+        "match": ("Unable to initialize NVML", "Failed to find an NVIDIA GPU"),
+        "label": "it can't find the NVIDIA graphics card",
+        "fix": ("Shut the VPU down fully and power it back on. If it keeps crashing, reinstall "
+                "the NVIDIA driver; if that doesn't clear it, escalate to Tier 3 to check the "
+                "graphics card."),
+        # Aurora Christian (IL) 08-27, 5fede100 08-26: NVML code 9 (driver not
+        # loaded). 5ff3348d 09-25: codes 6/15 (GPU not found / lost) with the
+        # card and driver 576.28 still listed in Windows - gpu-none can't see it.
+    },
+    {
+        "cause": "gpu-crashed",
+        "match": ("cudaErrorLaunchFailure",),
+        "label": "the graphics card stops responding while it runs",
+        "fix": ("Make sure the VPU's vents are clear and it isn't overheating, then restart it. "
+                "If it keeps crashing, escalate to Tier 3: the graphics card may be failing."),
+        # 6501c452 09-16: cudaErrorLaunchFailure mid-run on driver 536.67.
+    },
+    {
+        "cause": "out-of-memory",
+        "match": ("Insufficient memory", "Unable to allocate"),
+        "label": "it runs out of memory while starting",
+        "fix": "Restart the VPU to clear its memory. If it keeps crashing, escalate to Tier 3.",
+        # 5d36d4e0 08-26: 142 starts in 81 min, OpenCV "Insufficient memory"
+        # with 12 GB of RAM free - VPU.exe's virtual size was ~137 GB.
+    },
+    {
+        "cause": "camera-connect",
+        "match": ("Can't connect to camera", "Camera first connection problem"),
+        "label": "it can't connect to a camera when it starts",
+        "fix": "Check each camera's cable and power, starting with the Camera Connectivity tab.",
+        # 62ca8d65 09-11, VPU_vpu_20260507: agent closes it with "Attempt to
+        # initialize vpu has failed" and tries again.
+    },
+    {
+        "cause": "camera-stream",
+        "match": ("camera-datapath", "camera-reset"),
+        "label": "a camera's video keeps dropping out and it resets itself",
+        "fix": "Check the camera cables and speeds on the Camera Connectivity tab.",
+        # 5d88ce4e 09-08, 5dd3af46 09-14: "Found camera data path problem".
+    },
+    {
+        # A symptom, not a cause: the processing pipeline stopped getting
+        # frames. Alongside a camera data-path error it is the camera (matched
+        # above); alone it was either a camera or the GPU, so say both.
+        "cause": "pipeline-stall",
+        "match": ("debayer-stall",),
+        "label": "its video processing keeps stalling",
+        "fix": ("Check the Camera Connectivity tab for a camera dropping frames. If the cameras "
+                "look healthy, escalate to Tier 3: the graphics card may be failing."),
+        # 6501c452 09-16: "no new debayer thread entries ... doing dump" in 24
+        # of 40 sessions, 27 starts in 2 h.
+    },
+]
+_VPU_RESTART_UNKNOWN = {
+    "cause": "unknown",
+    "label": "of an error it didn't log",
+    "fix": ("Restart the VPU. If it keeps crashing, escalate to Tier 3 with the Pixellot "
+            "logs from C:\\Pixellot\\Data\\Log."),
+}
+
+
+def _vpu_session_crashed(s) -> bool:
+    """True when a VPU.exe session ended by crashing rather than on purpose."""
+    reason = s.get("closeReason") or ""
+    if s.get("fatal"):
+        return True
+    if "Attempt to initialize" in reason:
+        # Agent closing a VPU.exe that never became healthy.
+        return True
+    if any(k in reason for k in _VPU_DELIBERATE_CLOSE):
+        return False
+    return bool(s.get("ended")) and not s.get("goodbye")
+
+
+def _vpu_restart_cause(crashed) -> dict:
+    counts = {}
+    for s in crashed:
+        text = " ".join([s.get("fatal") or "", s.get("closeReason") or ""] + list(s.get("tags") or []))
+        for i, c in enumerate(_VPU_RESTART_CAUSES):
+            if any(m in text for m in c["match"]):
+                counts[i] = counts.get(i, 0) + 1
+                break
+    if not counts:
+        return _VPU_RESTART_UNKNOWN
+    best = max(counts, key=lambda i: (counts[i], -i))
+    return _VPU_RESTART_CAUSES[best]
+
+
+def _vpu_restart_findings(restarts) -> list:
+    if not restarts or restarts.get("error"):
+        return []
+    sessions = [s for s in (restarts.get("sessions") or [])
+                if (s.get("startedMinutesAgo") or 0) <= _VPU_RESTART_WINDOW_MIN]
+    crashed = [s for s in sessions if _vpu_session_crashed(s)]
+    if len(crashed) < _VPU_RESTART_LOOP_MIN:
+        return []
+
+    cause = _vpu_restart_cause(crashed)
+    n = len(crashed)
+    latest = sessions[-1]
+    fatal = next((s["fatal"] for s in reversed(crashed) if s.get("fatal")), None)
+    if fatal:
+        # "Fatal\t| <ts> |CUDA\t|file(line)\t|func\t|message" -> "CUDA: message"
+        parts = [p.strip() for p in fatal.split("|")]
+        fatal = f"{parts[2]}: {parts[-1]}" if len(parts) >= 4 else fatal
+    evidence = (
+        f"The Pixellot VPU log (C:\\Pixellot\\Data\\Log\\VPU_*.log) shows {len(sessions)} "
+        f"VPU.exe starts in the last {_VPU_RESTART_WINDOW_MIN} minutes; {n} ended in a crash"
+        " (a Fatal error, a failed start, or no clean shutdown)."
+        + (f" Most recent error: {fatal[:240]}" if fatal else "")
+    )
+    drivers = sorted({s.get("driver") for s in crashed if s.get("driver")})
+    if drivers:
+        evidence += f" NVIDIA driver reported by VPU.exe: {', '.join(drivers)}."
+
+    # Recovered: every run since the last crash shut down cleanly, and at
+    # least one of them proved the fix - it got camera frames and exited
+    # cleanly, or it is running now with frames and has lasted
+    # _VPU_RESTART_STABLE_MIN minutes (sooner if it started after a driver or
+    # Pixellot change - the fix a tech just made). A copy that is running but
+    # hasn't proved anything yet neither breaks nor makes the recovery. It
+    # stays a WARN until the crashes age out of the window: unconfirmed is not
+    # a pass.
+    after = sessions[sessions.index(crashed[-1]) + 1:]
+    running_now = bool(restarts.get("vpuRunning")) and not latest.get("ended")
+    changed = any(latest.get(k) and crashed[-1].get(k) and
+                  latest[k] != crashed[-1][k] for k in ("driver", "version"))
+    age = restarts.get("vpuStartedMinutesAgo") or latest.get("startedMinutesAgo") or 0
+    finished = [s for s in after if not (s is latest and running_now)]
+    proved = any(s.get("goodbye") and s.get("firstFrame") for s in finished) or (
+        after and running_now and latest.get("firstFrame") and
+        (changed or age >= _VPU_RESTART_STABLE_MIN))
+    recovered = all(s.get("goodbye") for s in finished) and proved
+
+    base = {
+        "category": "Pixellot",
+        "cause": cause["cause"],
+        "crashCount": n,
+        "evidence": evidence,
+    }
+    if recovered:
+        return [dict(base, **{
+            "code": "vpu-restarts-recent",
+            "severity": "warning",
+            "title": "The VPU software was crashing earlier this hour, and has stopped",
+            "recommendation": (
+                f"The Pixellot video software crashed {n} times in the last hour because "
+                f"{cause['label']}. It has run cleanly since. Re-check Pulse in "
+                f"{_VPU_RESTART_STABLE_MIN} minutes; if it crashes again: {cause['fix']}"
+            ),
+        })]
+    return [dict(base, **{
+        "code": "vpu-restart-loop",
+        "severity": "critical",
+        "title": "The VPU software keeps crashing, so games can't go on air",
+        "recommendation": (
+            f"The Pixellot video software has crashed {n} times in the last hour because "
+            f"{cause['label']}, so Head Setup won't load and games won't go on air. "
+            f"{cause['fix']}"
+        ),
+    })]
+
+
+def _compute_findings(identity, performance, services, nics, hardware=None, installed_sw=None, network_config=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None, binaries=None, vpu_restarts=None) -> list:
     findings = []
 
     # None vs {} matters for probe_results: None means the caller never
@@ -2612,7 +2840,7 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
     # alone is wrong-hardware. Skipped if the compat check above already
     # raised a "no-gpu" critical (would be duplicate noise).
     if hardware and not hardware.get("error"):
-        compat_no_gpu = any(f["title"] == "No NVIDIA GPU detected" for f in findings)
+        compat_no_gpu = any(f.get("code") == "gpu-none" for f in findings)
         if not compat_no_gpu:
             gpus = hardware.get("gpus") or []
             dedicated = [g for g in gpus if g.get("isDedicated")]
@@ -2630,6 +2858,38 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
                         f"This VPU only has built-in graphics ({vendor_str}), so it's missing "
                         f"the dedicated NVIDIA or AMD card a VPU needs to encode video. Check "
                         f"that the graphics card is seated, powered, and has a current driver."
+                    ),
+                })
+
+            # NVIDIA driver too old for Pixellot's CUDA code. The card, the
+            # cameras and the processes all look healthy, so without this the
+            # Dashboard reads Game-ready while VPU.exe restarts every minute.
+            floor = "%d.%02d" % _NVIDIA_DRIVER_MIN
+            for g in dedicated:
+                if g.get("vendor") != "NVIDIA":
+                    continue
+                release = _nvidia_driver_release(g.get("driverVersion"))
+                if release is None or release >= _NVIDIA_DRIVER_MIN:
+                    continue
+                installed = "%d.%02d" % release
+                findings.append({
+                    "code": "gpu-driver-old",
+                    "severity": "critical",
+                    "category": "Hardware",
+                    "title": "Graphics driver is too old, so the VPU software can't process video",
+                    "recommendation": (
+                        f"The NVIDIA graphics driver on this VPU ({installed}) is too old for "
+                        f"the Pixellot software, so it can't process camera video: Head Setup "
+                        f"won't load and games won't go on air, even though the cameras are "
+                        f"connected. Install NVIDIA driver {floor} or newer and restart the VPU."
+                    ),
+                    "evidence": (
+                        f"{g.get('name') or 'NVIDIA GPU'} reports Windows driver version "
+                        f"{g.get('driverVersion')} (NVIDIA {installed}). Pixellot's repair "
+                        f"bundle installs {floor}. Field reports with older drivers show the Pixellot VPU log "
+                        f"(C:\\Pixellot\\Data\\Log\\VPU_*.log) shows 'Installed NVIDIA driver: "
+                        f"an old release' followed by a Fatal cudaErrorInvalidPtx at the first frame, "
+                        f"and VPU.exe restarting about once a minute."
                     ),
                 })
 
@@ -3001,6 +3261,7 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
     findings.extend(_port_findings(port_tests))
     findings.extend(_tls_findings(tls_inspection, lmi_log))
     findings.extend(_lmi_findings(lmi_log))
+    findings.extend(_vpu_restart_findings(vpu_restarts))
 
     # ── Scorebug never reached the broadcast (on-box, not network) ──
     findings.extend(_graphics_findings(graphics_delivery))
@@ -3073,6 +3334,9 @@ _READINESS_POLICY = {
                                          #     Was "risk" until Archer GA (PXLS2_15488).
     "gpu-none":              "blocker",  # F5  no NVIDIA GPU — encoder can't run
     "gpu-igpu-only":         "blocker",  # F11 Intel iGPU only — wrong hardware
+    "vpu-restart-loop":      "blocker",  # VPU.exe session logs confirm repeated crashes.
+    "gpu-driver-old":        "blocker",  # Driver <536.67; Tecumseh MI 446.14,
+                                         # cudaErrorInvalidPtx on the first frame.
     "port-dns-blocked":      "blocker",  # F23a DNS down → name resolution fails
     "ssl-inspection":        "blocker",  # F37 venue DPI substituting certs on
                                          #     Pixellot-critical HTTPS. Every port
@@ -3113,6 +3377,7 @@ _READINESS_POLICY = {
     "stream-resiliency-reduced": "risk", # F8  stream healthy on Zixi but part of the
                                          #     failover chain blocked (was stream-443-blocked)
     "watchdog-down":         "risk",     # F9  KeepAgentUp down — no self-heal
+    "vpu-restarts-recent":   "risk",     # Recent crashes, clean run since; re-check.
     "pixellot-over-cap":     "risk",     # F10 build newer than GPU/OS supports
     "gpu-anomaly":           "risk",     # F12 Volta / roster anomaly
     "uplink-on-camera-port": "risk",     # internet cable on the camera card. Had no
@@ -4110,7 +4375,7 @@ def _compute_camera_findings(ports: list, poe=None) -> list:
 # ─── Data-building helpers (shared by per-page and preload) ──
 
 
-def _build_dashboard(identity, performance, services, nics, network_config=None, hardware=None, installed_sw=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, perf_sample=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None, binaries=None):
+def _build_dashboard(identity, performance, services, nics, network_config=None, hardware=None, installed_sw=None, install_state=None, port_tests=None, gpu_info=None, wifi=None, pixellot_config=None, expectations=None, disk_health=None, perf_sample=None, probe_results=None, tls_inspection=None, lmi_log=None, graphics_delivery=None, binaries=None, vpu_restarts=None):
     # Tag adapter roles (motherboard / camera / wifi) so both the findings and
     # the embedded "Network config" the dashboard ships carry them.
     _classify_network_adapters(network_config)
@@ -4168,13 +4433,14 @@ def _build_dashboard(identity, performance, services, nics, network_config=None,
         "Port connectivity": port_tests,
         "Graphics delivery": graphics_delivery,
         "Pixellot program files": binaries,
+        "VPU software crash history": vpu_restarts,
     }
     source_errors = [
         name for name, data in _sources.items()
         if isinstance(data, dict) and data.get("error")
     ]
 
-    findings = _compute_findings(identity, performance, services, nics, hardware, installed_sw, network_config, install_state, port_tests, gpu_info, wifi, pixellot_config=pixellot_config, expectations=expectations, disk_health=disk_health, probe_results=probe_results, tls_inspection=tls_inspection, lmi_log=lmi_log, graphics_delivery=graphics_delivery, binaries=binaries)
+    findings = _compute_findings(identity, performance, services, nics, hardware, installed_sw, network_config, install_state, port_tests, gpu_info, wifi, pixellot_config=pixellot_config, expectations=expectations, disk_health=disk_health, probe_results=probe_results, tls_inspection=tls_inspection, lmi_log=lmi_log, graphics_delivery=graphics_delivery, binaries=binaries, vpu_restarts=vpu_restarts)
 
     return {
         "identity": flat_identity,
@@ -4348,7 +4614,7 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
     (identity, performance, services, nics, net_config, hardware, installed_sw,
      install_state, port_tests, gpu_info, wifi, pixellot_config, expectations,
      disk_health, perf_sample, tls_inspection, lmi_log, graphics_delivery,
-     binaries) = await asyncio.gather(
+     binaries, vpu_restarts) = await asyncio.gather(
         run_ps("Get-SystemIdentity.ps1"),
         run_ps("Get-Performance.ps1"),
         run_ps("Get-Services.ps1"),
@@ -4389,6 +4655,8 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
         # NC, 2026-10-15). ~2s on vpu-home; libcef.dll alone is 212 MB, so
         # it seeks the import table rather than reading files.
         run_ps("Test-PixellotBinaries.ps1", timeout=20),
+        # VPU.exe session history: a crash loop still reads Running in services.
+        run_ps("Get-VpuRestarts.ps1", timeout=20),
     )
     # CGI probe (cached 30s; usually already warm from preload) so the
     # slow-port finding identifies the OCR by its actual camera model, not a
@@ -4438,6 +4706,7 @@ async def _collect_dashboard(skip_intrusive: bool = False, raw_out: Optional[dic
         probe_results=probe_results, tls_inspection=tls_inspection,
         lmi_log=lmi_log, graphics_delivery=graphics_delivery,
         binaries=binaries,
+        vpu_restarts=vpu_restarts,
     )
 
 
@@ -6980,6 +7249,8 @@ async def build_report() -> dict:
         # is what gets sent to a district's IT team, so the raw cert detail
         # matters here even more than in the UI.
         ("tlsInspection",        run_ps("Test-TlsInspection.ps1", timeout=60)),
+        # VPU.exe session history - the only place a crash loop shows.
+        ("vpuRestarts",          run_ps("Get-VpuRestarts.ps1", timeout=20)),
     ]
 
     def _norm(r):
@@ -7019,6 +7290,7 @@ async def build_report() -> dict:
             probe_results=cam_probes,
             tls_inspection=sections.get("tlsInspection"),
             binaries=sections.get("pixellotBinaries"),
+            vpu_restarts=sections.get("vpuRestarts"),
         )
     except Exception as e:
         sections["findings"] = {"error": f"findings computation failed: {type(e).__name__}: {e}"}
