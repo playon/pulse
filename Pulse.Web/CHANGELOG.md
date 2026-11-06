@@ -29,6 +29,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - Dashboard: Pulse now catches a VPU whose Pixellot video program (VPU.exe) can't start because one of its files is missing, such as the "libcef.dll was not found" error. Stream Readiness reads FAIL and names the missing file, how many times Windows showed the error this week, and to escalate to Pixellot support. Before, these units read PASS, because the stuck program still showed as running.
 - ScoreConnect tab: a **Reinstall ScoreConnect III** button. It stops the service, deletes the whole Sportzcast LLC program folder, and installs a fresh copy, with progress shown in Pulse. Saved settings and logs are kept. Use it when ScoreConnect III won't start or keeps failing.
 - Camera Connectivity: on VPUs with ADLINK's AVS software installed, the PoE card is named exactly, for example "PCIe-GIE74P, PCB rev 4, MCU 2.0". The name can take a few seconds to appear after Pulse starts. Without AVS, the card still shows as "GIE74-series".
+- Software tab: every installed application now has a **Review** label: Approved, a risk, or Informational (not on the approved list yet). Matching is by name only, so version changes don't matter.
+- Software tab: Datto EDR is now flagged as unsupported security software (it blocks Pixellot's agent and means an RMA), and Datto RMM as a non-standard remote-access tool.
 
 ### Fixed
 - Camera Connectivity: an Intel I210 camera card is now labelled "ADLINK GIE74-series" instead of always "GIE74P". It had been calling GIE74 cards GIE74P, and without ADLINK's AVS software Pulse can't tell the two apart.
@@ -36,6 +38,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - Settings (dev channel only): a **Fleet Monitoring** card. **Opt in this unit** installs the fleet monitor, which checks every 5 minutes whether the VPU is ready to stream and reports to Pulse Vitals. The card shows when it last checked and reported, and **Opt out** removes it. A production launch on the same VPU doesn't affect it.
 
 ### Fixed
+- Software tab: Chrome web-app shortcuts such as "Google Drive", Gmail and Docs no longer trigger the cloud-sync warning.
 - Pixellot Software no longer flags a missing retired camera-config file; cameras are identified from live camera data and standard addresses. Scoreboard cameras are detection-only: the startup check and ScoreConnect no longer claim a configured camera is unplugged, and check ScoreConnect when no scoreboard camera is seen.
 - Pixellot Software tab: a T1000 graphics card is now read as a Turing card with no Pixellot version limit, instead of "unknown architecture", on VPUs where Pulse can't run `nvidia-smi`. The version check passed before; only the wording and the architecture shown change.
 - A VPU missing one of its main cameras (for example 1 of 2 on an S2) now reads FAIL and says it won't stream. Before, it read only as a warning.
