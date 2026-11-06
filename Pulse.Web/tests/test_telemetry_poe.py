@@ -174,7 +174,18 @@ class TestPoeCollectorGuard(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.sentinel = Path(self.tmp.name) / "PulsePoE-probe.sentinel"
         source = SOURCE.read_text(encoding="ascii")
-        self.source = source[:source.index("if (-not ([System.Management.Automation.PSTypeName]")] + source[source.index("$registered = $false"):]
+        # The AVS label probe (#239) has its own native loader. Stub it out
+        # too, so the harness still holds no DllImport at all.
+        avs_start = source.index("\nfunction Invoke-AvsProbe {")
+        avs_end = source.index("\nfunction Start-AvsProbe {")
+        source = source[:avs_start] + "\nfunction Invoke-AvsProbe { param($Card) }\n" + source[avs_end:]
+        # Anchor on the script-level SmartPoE loader and read, not the AVS ones.
+        self.source = (source[:source.index("\nif (-not ([System.Management.Automation.PSTypeName]'Pulse.AdlinkPoE')")]
+                       + source[source.index("\n$registered = $false"):])
+        # The script's param() block must be first in a script; inlined after
+        # the harness it is a parse error. Run as the collector, not -AvsProbe.
+        self.assertIn("param([switch]$AvsProbe)", self.source)
+        self.source = self.source.replace("param([switch]$AvsProbe)", "$AvsProbe = $false", 1)
         self.assertNotIn("DllImport", self.source.split("#>", 1)[1])
 
     def tearDown(self):

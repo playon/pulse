@@ -4,7 +4,7 @@
     Installer-time SSL-interception diagnosis for failed bootstrap downloads.
 .DESCRIPTION
     Called by run.bat when a first-run download fails (embedded Python from
-    www.python.org, get-pip.py from bootstrap.pypa.io, packages from PyPI).
+    www.python.org, the pip zipapp from bootstrap.pypa.io, packages from PyPI).
     Completes a TLS handshake to each host while accepting ANY certificate,
     then validates the certificate actually presented against the machine's
     trust store. A cert that doesn't chain to a trusted root means a firewall

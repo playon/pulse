@@ -12,7 +12,7 @@
 
     Three gates, cheapest first, so an unsupported box never loads the driver:
 
-      1. NIC model. Only the Intel I210 / I211 (ADLINK GIE74P) expose PoE
+      1. NIC model. Only the Intel I210 / I211 (ADLINK GIE74 / GIE74P) expose PoE
          telemetry. The 82574L (GIE64) and I350 / I354 (GIE74P-AN) do not --
          Register_Card either fails or hangs on those, so we never call it.
       2. SmartPoE.dll presence. It ships with the ADLINK driver bundle, NOT
@@ -29,6 +29,14 @@
     (the launcher clears stale sentinels) or a tech clearing TEMP resets it.
     If the sentinel cannot be read or written, do not load the native DLL.
 
+    Card name (label only): the I210 NIC model cannot tell a GIE74 from a
+    GIE74P, but the ADLINK Vision Software (AVS) SDK can, where it is
+    installed. Its product scan takes ~5 s (measured on vpu-home and lab-z2,
+    2026-10-15), far too slow for a 2 s poll, so this collector never calls
+    AVS itself. It reads a cached answer from TEMP, and when there is none it
+    starts ONE hidden background copy of itself with -AvsProbe to write it.
+    See the AVS section below.
+
     PS 5.1 portability (see CLAUDE.md):
       - Pure ASCII only. No em-dashes or smart quotes in this file.
       - The DllImport declarations live in compiled C# (C# 5 / CodeDom safe),
@@ -36,13 +44,22 @@
       - Every unwanted native return value is cast to [void] so it cannot
         land on stdout ahead of the JSON payload.
 
+.PARAMETER AvsProbe
+    Internal. Run the slow AVS product scan, write the result to TEMP and
+    exit with no output. Started by the collector itself, never by main.py.
+
 .OUTPUTS
-    Single JSON object on stdout. See $result construction at the bottom.
+    Single JSON object on stdout (none with -AvsProbe). See $result
+    construction at the bottom.
 #>
+param([switch]$AvsProbe)
 
 $ErrorActionPreference = "Stop"
 
-# Port count on the GIE74P PSE controller. Card index is always 0 -- the VPU
+# Captured at script scope: the background AVS probe relaunches this file.
+$SelfPath = $PSCommandPath
+
+# Port count on the GIE74-series PSE controller. Card index is always 0 -- the VPU
 # chassis has one PoE NIC.
 $PortCount = 4
 $CardNum   = 0
@@ -126,13 +143,35 @@ function Get-AdlinkCardInfo {
 
     $desc  = if ($nics.Count -gt 0) { [string]$nics[0].InterfaceDescription } else { "" }
     $count = $nics.Count
+    # Identifies the physical card for the AVS cache: a swapped card has new
+    # MACs, so its cached name is not reused. The WMI fallback has no MACs;
+    # its key is then just stable, never wrong.
+    $macKey = (@($nics | ForEach-Object { [string]$_.MacAddress }) | Sort-Object) -join ","
 
+    # I210 / I211 cards are labelled "GIE74-series", never "GIE74P". The fleet
+    # carries three I210 x4 variants that the NIC model cannot tell apart
+    # (from POEControler -diagnostic on Linux units, 2026-09-30):
+    #   PCIe-GIE74,  PCB rev 1, MCU 1.14, CPLD 20160718_1110
+    #   PCIe-GIE74P, PCB rev 4, MCU 1.14
+    #   PCIe-GIE74P, PCB rev 4, MCU 2.0
+    # Calling them all GIE74P mislabelled a GIE74 on vpu-home. Windows cannot
+    # reliably name the variant either (checked 2026-10-14):
+    #   - SmartPoE_Get_ProductName / Get_DeviceInfo exist only in library
+    #     1.3.5. System32 holds 1.1.2 on VPU2 and lab-z2 (no such exports) but
+    #     1.3.5 on vpu-home, so availability varies per unit. ProductName also
+    #     returns a bare int whose mapping is only in ADLINK's manual, which is
+    #     not on the box. Unmapped and untested on an I210 card, so not called.
+    #   - Get_MCUVersion exists in both, but MCU 1.14 is shared by a GIE74 and
+    #     a GIE74P, so it cannot separate them.
+    #   - The ADLINK bundle writes nothing under HKLM\SOFTWARE\ADLINK.
+    # So name the family, not the variant. The one exception is the AVS SDK,
+    # which does report the product where it is installed (see the AVS section).
     if ($desc -like "*82574L*") {
         [pscustomobject]@{ Model = "82574L"; Label = "ADLINK GIE64 (Intel 82574L x$count)";    Supported = $false }
     } elseif ($desc -like "*I210*") {
-        [pscustomobject]@{ Model = "I210";   Label = "ADLINK GIE74P (Intel I210 x$count)";     Supported = $true  }
+        [pscustomobject]@{ Model = "I210";   Label = "ADLINK GIE74-series (Intel I210 x$count)"; Supported = $true;  Count = $count; Macs = $macKey }
     } elseif ($desc -like "*I211*") {
-        [pscustomobject]@{ Model = "I211";   Label = "ADLINK GIE74P (Intel I211 x$count)";     Supported = $true  }
+        [pscustomobject]@{ Model = "I211";   Label = "ADLINK GIE74-series (Intel I211 x$count)"; Supported = $true;  Count = $count; Macs = $macKey }
     } elseif ($desc -like "*I350*") {
         [pscustomobject]@{ Model = "I350";   Label = "ADLINK GIE74P-AN (Intel I350 x$count)";  Supported = $false }
     } elseif ($desc -like "*I354*") {
@@ -146,18 +185,179 @@ function Get-AdlinkCardInfo {
 
 $card = Get-AdlinkCardInfo
 
+# ---------------------------------------------------------------------------
+# AVS product name (label only). The ADLINK Vision Software SDK names the
+# exact card, e.g. "Product:PCIe-GIE74P / MCUVersion:2.0 / PCBVersion:4", but
+# only where it is installed (Pixellot's POEControler.exe uses it; the fleet
+# image does not always carry it). Signatures are copied from the shipped
+# header C:\Program Files\ADLINK\AVS\Include\C#\AVS_SDK.cs -- never guess one,
+# a guessed SmartPoE signature has already killed the process with an
+# uncatchable AccessViolation. Only the four read-only product calls are used.
+#
+# AVS_GetProductNums takes ~5 s (4.6 s vpu-home, 5.0 s lab-z2, 2026-10-15),
+# so the scan runs in a hidden background child and the answer is cached:
+#   line 1  key   -- card MACs + AVS_SDK.dll timestamp
+#   line 2  label -- empty when AVS cannot name a GIE74-family card
+#   line 3  raw   -- what AVS returned, for anyone debugging a label
+# The attempt file is the crash sentinel for this native call: the spawner
+# bumps it before the child starts and the child deletes it once it has a
+# definite answer. A child killed by an AV, or a scan that fails, leaves it in
+# place; the next try waits $AvsRetrySeconds, and $AvsAttemptLimit tries
+# latch it off until the card or the AVS install changes.
+# ---------------------------------------------------------------------------
+$AvsDllDir       = "C:\Program Files\ADLINK\AVS\DLL"
+$AvsCachePath    = Join-Path $env:TEMP "PulsePoE-avs-product.txt"
+$AvsAttemptPath  = Join-Path $env:TEMP "PulsePoE-avs-probe.attempt"
+$AvsAttemptLimit = 3
+$AvsRetrySeconds = 120
+
+function Get-AvsCacheKey {
+    param([string]$MacKey)
+    $stamp = ""
+    try {
+        $stamp = [string](Get-Item -LiteralPath (Join-Path $AvsDllDir "AVS_SDK.dll") -ErrorAction Stop).LastWriteTimeUtc.Ticks
+    } catch { }
+    return ($MacKey + "|" + $stamp)
+}
+
+# One ProductInfo text per AVS product in, a card label out. Returns "" unless
+# exactly one product is a GIE7x card: a GIE64+ beside an I210 NIC, or two
+# GIE7x cards, means AVS is not describing the card this collector reads.
+function ConvertTo-AvsCardLabel {
+    param([string[]]$Infos, [string]$NicModel, [int]$NicCount)
+    $names = @()
+    foreach ($info in $Infos) {
+        $product = ""; $pcb = ""; $mcu = ""
+        foreach ($line in ([string]$info -split "[\r\n]+")) {
+            $idx = $line.IndexOf(":")
+            if ($idx -le 0) { continue }
+            $k = $line.Substring(0, $idx).Trim()
+            $v = $line.Substring($idx + 1).Trim()
+            if ($k -eq "Product")    { $product = $v }
+            if ($k -eq "PCBVersion") { $pcb = $v }
+            if ($k -eq "MCUVersion") { $mcu = $v }
+        }
+        if ($product -notmatch '^PCIe-GIE7') { continue }
+        $name = $product
+        if ($pcb) { $name += ", PCB rev " + $pcb }
+        if ($mcu) { $name += ", MCU " + $mcu }
+        $names += $name
+    }
+    if ($names.Count -ne 1) { return "" }
+    return ("ADLINK " + $names[0] + " (Intel " + $NicModel + " x" + $NicCount + ")")
+}
+
+function Invoke-AvsProbe {
+    param($Card)
+    if (-not (Test-Path -LiteralPath (Join-Path $AvsDllDir "AVS_SDK.dll"))) { return }
+    $key = Get-AvsCacheKey ([string]$Card.Macs)
+    $env:PATH = "$AvsDllDir;$env:PATH"
+    if (-not ([System.Management.Automation.PSTypeName]'Pulse.AdlinkAvs').Type) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace Pulse {
+    public static class AdlinkAvs {
+        [DllImport("AVS_SDK.dll", EntryPoint = "AVS_GetProductNums")]
+        public static extern uint AVS_GetProductNums();
+        [DllImport("AVS_SDK.dll", EntryPoint = "AVS_GetProductHandle")]
+        public static extern IntPtr AVS_GetProductHandle(uint index);
+        [DllImport("AVS_SDK.dll", EntryPoint = "AVS_GetProductInfo")]
+        public static extern int AVS_GetProductInfo(IntPtr handle, byte[] data, uint bufsize);
+    }
+}
+'@ -ErrorAction Stop
+    }
+
+    $nums  = [Pulse.AdlinkAvs]::AVS_GetProductNums()
+    $infos = @()
+    $raw   = @("nums=$nums")
+    $complete = ($nums -gt 0)
+    for ($i = 0; $i -lt $nums; $i++) {
+        $h = [Pulse.AdlinkAvs]::AVS_GetProductHandle([uint32]$i)
+        if ($h -eq [IntPtr]::Zero) { $raw += "[$i] no handle"; $complete = $false; continue }
+        # 256 bytes is the buffer ADLINK's own sample passes.
+        $buf = New-Object byte[] 256
+        $rc  = [Pulse.AdlinkAvs]::AVS_GetProductInfo($h, $buf, [uint32]256)
+        if ($rc -ne 0) { $raw += "[$i] info rc=$rc"; $complete = $false; continue }
+        $text = [System.Text.Encoding]::ASCII.GetString($buf).Split([char]0)[0]
+        $infos += $text
+        $raw += ("[$i] " + ((@($text -split "[\r\n]+") | Where-Object { $_ }) -join "; "))
+    }
+    # A scan that did not finish is not an answer: leave the attempt file so it
+    # is retried, rather than caching an empty label for good.
+    if (-not $complete) { return }
+
+    $label = ConvertTo-AvsCardLabel -Infos $infos -NicModel ([string]$Card.Model) -NicCount ([int]$Card.Count)
+    $tmp = $AvsCachePath + "." + $PID + ".tmp"
+    Set-Content -LiteralPath $tmp -Value @($key, $label, ($raw -join " | ")) -Encoding ASCII -ErrorAction Stop
+    Move-Item -LiteralPath $tmp -Destination $AvsCachePath -Force -ErrorAction Stop
+    Remove-Item -LiteralPath $AvsAttemptPath -Force -ErrorAction SilentlyContinue
+}
+
+function Start-AvsProbe {
+    $attempts = 0
+    try {
+        if (Test-Path -LiteralPath $AvsAttemptPath) {
+            $item = Get-Item -LiteralPath $AvsAttemptPath -ErrorAction Stop
+            if (((Get-Date) - $item.LastWriteTime).TotalSeconds -lt $AvsRetrySeconds) { return }
+            $txt = Get-Content -LiteralPath $AvsAttemptPath -Raw -ErrorAction Stop
+            [void][int]::TryParse(([string]$txt).Trim(), [ref]$attempts)
+        }
+    } catch { $attempts = 0 }
+    if ($attempts -ge $AvsAttemptLimit) { return }
+    if (-not $SelfPath) { return }
+    try {
+        Set-Content -LiteralPath $AvsAttemptPath -Value ([string]($attempts + 1)) -Encoding ASCII -ErrorAction Stop
+        # Hidden window, own console: nothing it prints reaches this stdout.
+        $psExe = Join-Path $PSHOME "powershell.exe"
+        Start-Process -FilePath $psExe -WindowStyle Hidden -ErrorAction Stop -ArgumentList @(
+            "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            "-File", ('"' + $SelfPath + '"'), "-AvsProbe")
+    } catch { }
+}
+
+# Cached AVS label for this card, or "" (and a background scan is started
+# when there is no answer yet). Never blocks on AVS.
+function Get-AvsCardLabel {
+    param($Card)
+    if (-not (Test-Path -LiteralPath (Join-Path $AvsDllDir "AVS_SDK.dll"))) { return "" }
+    $key = Get-AvsCacheKey ([string]$Card.Macs)
+    try {
+        if (Test-Path -LiteralPath $AvsCachePath) {
+            $lines = @(Get-Content -LiteralPath $AvsCachePath -ErrorAction Stop)
+            if ($lines.Count -ge 1 -and $lines[0] -eq $key) {
+                if ($lines.Count -ge 2) { return [string]$lines[1] }
+                return ""
+            }
+        }
+    } catch { }
+    Start-AvsProbe
+    return ""
+}
+
+if ($AvsProbe) {
+    try { Invoke-AvsProbe $card } catch { }
+    exit 0
+}
+
 if (-not $card.Supported) {
     $reason = switch ($card.Model) {
         "82574L" { "Power draw can't be measured on this camera card (ADLINK GIE64, Intel 82574L). The ports still deliver power; Pulse just can't read how much." }
         "I350"   { "Power draw can't be measured on this camera card (ADLINK GIE74P-AN, Intel I350). The ports still deliver power." }
         "I354"   { "Power draw can't be measured on this camera card (ADLINK GIE74P-AN, Intel I354). The ports still deliver power." }
         "None"   { "No camera card was detected (Intel I210 / I211 / I350 / 82574L), so there is no power draw to measure." }
-        default  { "PoE power telemetry requires an ADLINK GIE74P card (Intel I210 or I211). This system reports: $($card.Label)" }
+        default  { "PoE power telemetry requires an ADLINK GIE74-series card (Intel I210 or I211). This system reports: $($card.Label)" }
     }
     Write-PoeJson (New-PoeResult -Supported $false -Available $false `
         -NicModel $card.Model -CardLabel $card.Label -Reason $reason)
     exit 0
 }
+
+$avsLabel = ""
+try { $avsLabel = Get-AvsCardLabel $card } catch { $avsLabel = "" }
+if ($avsLabel) { $card.Label = $avsLabel }
 
 # ---------------------------------------------------------------------------
 # Gate 2 -- locate SmartPoE.dll. Same search order as gen-1 Run.ps1: known
@@ -319,6 +519,7 @@ namespace Pulse {
 # throwing out of the collector.
 # ---------------------------------------------------------------------------
 $registered = $false
+$failReason = $null
 try {
     $regRet = [Pulse.AdlinkPoE]::SmartPoE_Register_Card([uint16]$CardNum)
     if ($regRet -ne 0) {
@@ -337,8 +538,20 @@ try {
     $rcLeft = [Pulse.AdlinkPoE]::SmartPoE_Get_POELeftPowbudget([uint16]$CardNum, [ref]$remaining)
     $rcTemp = [Pulse.AdlinkPoE]::SmartPoE_Get_Temperature([uint16]$CardNum, [ref]$tempC)
 
+    # Error codes come from ADLINK's SmartPoE.h / SmartPoE.cs (GIE Series
+    # Include folder). -50 is PoE_ErrorOverTemperature. -51 is NOT in either
+    # header, so its meaning is unknown. It was seen on a GIE74 whose PSE was
+    # confirmed dead (vpu-home, 2026-09-30: no PoE on any port for S3, S2 or
+    # OCR devices, Molex connected), so the copy must not send a tech chasing
+    # drivers alone -- it names both causes and the physical check first.
     if ($rcCons -ne 0 -or $rcLeft -ne 0) {
-        throw "The PoE card is present but rejected the power-budget read (consumed rc=$rcCons, remaining rc=$rcLeft). The ADLINK driver may not match this card revision."
+        # Throw, not exit: the card must still be released (finally) before
+        # the sentinel is cleared. The catch reports $failReason verbatim.
+        $failReason = "The PoE card was found but would not report its power budget (consumed rc=$rcCons, remaining rc=$rcLeft). Either the card's PoE controller is not responding, or the ADLINK driver does not match this card. Check that the card's Molex power lead is plugged in. If cameras on every port still get no power, treat it as a card fault."
+        if ($rcCons -eq -50 -or $rcLeft -eq -50) {
+            $failReason = "The PoE card reports it is over temperature and stopped reporting power (consumed rc=$rcCons, remaining rc=$rcLeft). Check that the VPU's fans are running and its vents are clear."
+        }
+        throw $failReason
     }
     # Temperature is non-essential -- a bad rc there drops the reading without
     # discarding the power figures the tech actually came for.
@@ -451,9 +664,11 @@ try {
 } catch {
     $errType = $_.Exception.GetType().Name
     $errMsg  = ($_.Exception.Message -replace "[\r\n]+", " ")
+    $reason = "Reading PoE power failed ($errType): $errMsg"
+    if ($failReason) { $reason = $failReason }
     $result = New-PoeResult -Supported $true -Available $false `
         -NicModel $card.Model -CardLabel $card.Label -DllPath $dllPath `
-        -Reason "Reading PoE power failed ($errType): $errMsg"
+        -Reason $reason
 } finally {
     if ($registered) {
         try { [void][Pulse.AdlinkPoE]::SmartPoE_Release_Card([uint16]$CardNum) } catch { }
