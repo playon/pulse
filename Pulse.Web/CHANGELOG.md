@@ -43,6 +43,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - Settings (dev channel only): a **Fleet Monitoring** card. **Opt in this unit** installs the fleet monitor, which checks every 5 minutes whether the VPU is ready to stream and reports to Pulse Vitals. The card shows when it last checked and reported, and **Opt out** removes it. A production launch on the same VPU doesn't affect it.
 
 ### Fixed
+- Secure Connections now catches a firewall or web filter that drops all or part of a service's reply, shows the bytes that arrived, and blocks Stream Readiness when a broadcast service is affected.
 - A slow onboard network port is no longer reported as "Network port N is running slow". Only the camera card's ports are checked for gigabit speed.
 - Fleet Monitoring: **Opt in this unit** no longer fails with "Invalid class" on VPUs whose Windows task-scheduling interface is damaged. The installer now falls back to schtasks.exe and says it did.
 - A drive with a few uncorrected read/write errors that still reads Healthy now shows as "Fix soon" with a back-up-and-replace note. Before, it was flagged as predicting failure. 100 or more errors, an Unhealthy drive, or Windows' own failure warning are still critical.

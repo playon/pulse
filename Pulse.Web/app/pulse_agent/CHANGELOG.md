@@ -18,6 +18,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Changed
+- A firewall or web filter dropping all or part of a TLS reply now raises the existing filter finding; broadcast services fail readiness, while support-only services keep their non-gating note or warning.
 - Cameras no longer depend on the retired camera-config file. Scoreboard source is detection-only: a connected OCR camera makes ScoreConnect optional; otherwise ScoreConnect is checked, with no configured-but-disconnected OCR warning (including Pulse's startup and ScoreConnect views). In `pulse.telemetry/v1`, `scoreboard.ocr` stays present as null because OCR configuration is unknown; new optional `scoreboard.ocrDetected` is true/false for a successful camera read and null when it failed. Existing configuration fields are not redefined as detection.
 - Readiness now blocks NVIDIA drivers older than 536.67 (`gpu-driver-old`) and repeated VPU software crashes (`vpu-restart-loop`); a proven clean run after recent crashes stays a risk (`vpu-restarts-recent`). The monitor reads the same recent VPU log sessions as Diagnostics. No telemetry fields changed.
 - A launch check-in the Worker can't take is no longer also posted to the old Google Apps Script sheet. It stays queued on the unit and replays when the Worker is reachable (30 days, 200 entries). A unit whose network blocks `workers.dev` now shows in Vitals only once it can reach it. Nothing about the check-in's fields changed. The Worker still accepts the relay header from builds that have the sheet fallback.
