@@ -294,8 +294,13 @@ class RunnerLayout(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(r, "slots", "a", "app", "python")))   # the runtime is shared
         self.assertEqual(open(os.path.join(r, "agent_runner.py")).read(), "# runner\n")
         slots = json.load(open(os.path.join(r, fe.SLOTS_FILE)))
-        self.assertEqual((slots["active"], slots["slots"]["a"]["version"], slots["slots"]["a"]["sha256"]),
-                         ("a", "0.2.0", None))
+        # The hash this tree's release zip would have, so a pin of exactly
+        # this build downloads nothing (pulse_agent/release_zip.py).
+        from pulse_agent.release_zip import tree_sha256
+        sha = slots["slots"]["a"]["sha256"]
+        self.assertRegex(sha, r"^[0-9a-f]{64}$")
+        self.assertEqual(sha, tree_sha256(self.src))
+        self.assertEqual((slots["active"], slots["slots"]["a"]["version"]), ("a", "0.2.0"))
         self.assertFalse(os.path.exists(os.path.join(r, "app")))                         # older layout gone
         self.assertEqual(json.load(open(os.path.join(r, "pulse-monitor-state.json"))), {"status": "WARN"})
         installer = [c for c in self.calls if c[0] == "powershell.exe"][-1]

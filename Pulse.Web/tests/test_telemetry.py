@@ -7,6 +7,7 @@ import re
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 
 _APP_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app")
 if _APP_DIR not in sys.path:
@@ -45,11 +46,22 @@ class TestBuildTelemetry(unittest.TestCase):
         # (2026-10-14: ok read true all event with 6493's ScoreLink missing).
         self.assertTrue({"source", "ok"} <= set(t["scoreboard"]))
         self.assertTrue(set(t["scoreboard"]) <= {"source", "ok", "scoreLinkConnected", "dataFlowing",
-                                                  "dataStatus", "sport", "ocr", "scoreConnect"})
+                                                  "dataStatus", "sport", "ocr", "ocrDetected", "scoreConnect"})
         self.assertEqual(set(t["power"]), {"lastBoot", "unexpectedShutdowns7d", "pendingReboot",
                                            "afterPowerLoss", "deviceInstallRebootLastRun", "events"})
         self.assertEqual(set(t["calibration"]), {"primary", "sports", "ocr"})
         self.assertEqual(t["calibration"]["primary"], "Football")
+
+    def test_runner_version_comes_from_the_runner(self):
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"PULSE_RUNNER_VERSION": "2"}):
+            self.assertEqual(agent_telemetry._build_telemetry(self.dash, self.raw)["runnerVersion"], "2")
+        for bad in ("", "x" * 40, "2; drop"):
+            with mock.patch.dict(os.environ, {"PULSE_RUNNER_VERSION": bad}):
+                self.assertIsNone(agent_telemetry._build_telemetry(self.dash, self.raw)["runnerVersion"])
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PULSE_RUNNER_VERSION", None)     # an older runner, or no runner
+            self.assertIsNone(agent_telemetry._build_telemetry(self.dash, self.raw)["runnerVersion"])
 
     def test_status_matches_the_verdict(self):
         self.assertEqual(self.t["status"], self.dash["readiness"]["status"])
@@ -229,13 +241,14 @@ _SC_FULL = {
                   "botServerAddress": "bot.example.invalid", "lastErrorMessage": None},
 }
 _NICS = {"ports": []}
-_PIX_NONE = {"pixellot_config": {"cameras": [], "cameraCfgExists": True}}
-_OCR_ON = {"pixellot_config": {"cameras": [{"role": "OCR"}], "cameraCfgExists": True}}
+_OCR_ON = {"ports": [{"name": "Camera NIC", "mac": "00-30-64-36-73-AA", "status": "Up",
+                      "linkSpeedMbps": 1000, "arpEntries": [
+                          {"ip": "169.254.16.52", "mac": "00-D0-89-1E-89-08"}]}]}
 _SC_KEYS = {"version", "firmware", "scoreLinkModel", "scoreLinkPort", "serialPort", "eventType", "botNumber"}
 
 
-def _board(sc, pix=_PIX_NONE, nics=_NICS):
-    return agent_telemetry._telemetry_scoreboard(dict(pix or {}, scoreconnect=sc, nics=nics))
+def _board(sc, nics=_NICS, **raw):
+    return agent_telemetry._telemetry_scoreboard(dict(raw, scoreconnect=sc, nics=nics))
 
 
 class TestScoreboardDetailPV59(unittest.TestCase):
@@ -248,9 +261,9 @@ class TestScoreboardDetailPV59(unittest.TestCase):
         self.assertEqual(out["scoreConnect"], {
             "version": "1.4.2.2", "firmware": "2.4.1", "scoreLinkModel": "ScoreLinkII",
             "scoreLinkPort": "COM5", "serialPort": "COM5", "eventType": "Football", "botNumber": "54025"})
-        # Both camera reads worked and cameras.cfg has no OCR entry: a real
-        # "not configured", with no OCR issue.
-        self.assertEqual(out["ocr"], {"configured": False, "issue": None})
+        # v1's configuration block remains unknown; detection is additive.
+        self.assertIsNone(out["ocr"])
+        self.assertFalse(out["ocrDetected"])
 
     def test_no_hostname_or_device_leaves_the_box(self):
         body = json.dumps(_board(_SC_FULL))
@@ -258,35 +271,46 @@ class TestScoreboardDetailPV59(unittest.TestCase):
         self.assertNotIn("botServerAddress", body)
         self.assertNotIn("Daktronics", body)             # vendor/device stay out of this block
 
-    def test_ocr_source_reports_configured_and_issue(self):
+    def test_detected_ocr_is_the_source_without_configuration(self):
         out = _board(_SC_FULL, _OCR_ON)
         self.assertEqual(out["source"], "ocr")
-        self.assertFalse(out["ok"])
-        self.assertEqual(out["ocr"], {"configured": True, "issue": "ocr-not-connected"})
+        self.assertTrue(out["ok"])
+        self.assertIsNone(out["ocr"])
+        self.assertTrue(out["ocrDetected"])
         # ScoreConnect is still collected while OCR is the source: both blocks appear.
         self.assertEqual(out["scoreConnect"]["version"], "1.4.2.2")
         self.assertTrue(out["scoreLinkConnected"])
-
-    def test_ocr_seen_live_without_a_cameras_cfg_entry(self):
-        ocr = {"configured": False, "connected": True, "port": "Port 4", "speedMbps": 1000}
-        src = main._scoreboard_source(_SC_FULL, ocr)
-        self.assertEqual(src["source"], "ocr")
-        self.assertEqual(agent_telemetry._telemetry_scoreboard_ocr(ocr, src, _PIX_NONE["pixellot_config"]),
-                         {"configured": False, "issue": None})
 
     def test_scoreconnect_down_is_not_an_ocr_issue(self):
         out = _board({"reachable": False})
         self.assertEqual(out["source"], "scoreconnect")
         self.assertFalse(out["ok"])
-        self.assertEqual(out["ocr"], {"configured": False, "issue": None})
+        self.assertIsNone(out["ocr"])
+        self.assertFalse(out["ocrDetected"])
 
-    def test_ocr_is_null_when_the_camera_state_is_unreadable(self):
-        for pix, nics in ((_PIX_NONE, None),                                    # NIC read failed
-                          ({"pixellot_config": {"error": True, "message": "x"}}, _NICS),
-                          ({}, _NICS)):                                         # config never read
-            out = _board(_SC_FULL, pix, nics)
-            self.assertIsNone(out["ocr"], (pix, nics))
+    def test_ocr_detection_is_null_when_the_camera_state_is_unreadable(self):
+        for nics in (None, {"error": True, "message": "timed out"}):
+            out = _board(_SC_FULL, nics)
+            self.assertIsNone(out["ocr"])
+            self.assertIsNone(out["ocrDetected"])
             self.assertEqual(set(out["scoreConnect"]), _SC_KEYS)
+
+    def test_down_ocr_link_is_not_detected_even_with_stale_arp(self):
+        down = {"ports": [dict(_OCR_ON["ports"][0], status="Disconnected")]}
+        out = _board({"reachable": False}, down)
+        self.assertEqual((out["source"], out["ok"]), ("scoreconnect", False))
+        self.assertFalse(out["ocrDetected"])
+        self.assertIsNone(out["ocr"])
+
+    def test_non_default_ocr_is_detected_from_the_camera_model(self):
+        nics = {"ports": [dict(_OCR_ON["ports"][0], arpEntries=[
+            {"ip": "192.168.5.20", "mac": "00-D0-89-1E-89-08"}])]}
+        probes = {"00:D0:89:1E:89:08": {"mac": "00:D0:89:1E:89:08",
+                  "ip": "192.168.5.20", "modelNumber": "E8NC-G"}}
+        out = _board({"reachable": False}, nics, probe_results=probes)
+        self.assertEqual((out["source"], out["ok"]), ("ocr", True))
+        self.assertTrue(out["ocrDetected"])
+        self.assertIsNone(out["ocr"])
 
     def test_scoreconnect_without_the_new_fields_reads_null_not_empty(self):
         # The collector's own empties: no ScoreLink found ('' model and port),
@@ -334,8 +358,8 @@ class TestScoreboardDetailPV59(unittest.TestCase):
         self.assertEqual(out["eventType"], "7")
 
     def test_a_change_moves_the_fingerprint(self):
-        def fp(sc, pix=_PIX_NONE):
-            t = {"schema": "pulse.telemetry/v1", "scoreboard": _board(sc, pix)}
+        def fp(sc, nics=_NICS):
+            t = {"schema": "pulse.telemetry/v1", "scoreboard": _board(sc, nics)}
             return agent_telemetry._telemetry_fingerprint(t, [])
         base = fp(_SC_FULL)
         self.assertEqual(fp(dict(_SC_FULL)), base)
@@ -344,16 +368,17 @@ class TestScoreboardDetailPV59(unittest.TestCase):
         self.assertNotEqual(fp(dict(_SC_FULL, botStatus={"scoreConnectId": "31882"})), base)
         self.assertNotEqual(fp(dict(_SC_FULL, configuration=dict(_SC_FULL["configuration"], eventType="Basketball"))),
                             base)
-        self.assertNotEqual(fp(_SC_FULL, _OCR_ON), base)                       # ocr.configured
-        self.assertNotEqual(fp(_SC_FULL, {"pixellot_config": {"error": True}}), base)  # ocr -> null
+        self.assertNotEqual(fp(_SC_FULL, _OCR_ON), base)  # OCR detected
+        self.assertNotEqual(fp(_SC_FULL, None), base)     # detection unknown
 
     def test_full_scoreboard_block_stays_under_1kb(self):
         sc = dict(_SC_FULL, configuration=dict(_SC_FULL["configuration"], sport="Fairplay Basketball Code 1"))
         out = _board(sc, _OCR_ON)
         self.assertEqual(set(out), {"source", "ok", "scoreLinkConnected", "dataFlowing", "dataStatus", "sport",
-                                    "ocr", "scoreConnect"})
+                                    "ocr", "ocrDetected", "scoreConnect"})
         self.assertTrue(all(v is not None for v in out["scoreConnect"].values()))
-        self.assertIsNotNone(out["ocr"]["issue"])
+        self.assertIsNone(out["ocr"])
+        self.assertTrue(out["ocrDetected"])
         self.assertLess(len(json.dumps(out).encode("utf-8")), 1024)
 
     def test_every_string_at_its_cap_is_still_far_under_the_worker_limit(self):
@@ -574,10 +599,13 @@ class TestCalibrationCache(unittest.TestCase):
         same = fp(raw)
         self.assertEqual(fp(self._pass()[2]), same)              # served from cache: no change
         # A recalibration, as the next read after the cache expires would see it.
+        # Dated relative to now: the demo's newest sport is 12 days old, and a
+        # fixed date here fell behind it once the calendar passed it.
         with open(self.cache, encoding="utf-8") as fh:
             data = json.load(fh)
+        at = (datetime.now().astimezone() - timedelta(hours=1)).replace(microsecond=0).isoformat()
         data[self.SCRIPT]["result"]["multisport"]["sports"].append(
-            {"name": "Volleyball", "at": "2026-10-16T09:00:00-04:00"})
+            {"name": "Volleyball", "at": at})
         with open(self.cache, "w", encoding="utf-8") as fh:
             json.dump(data, fh)
         runs, changed, raw2 = self._pass()

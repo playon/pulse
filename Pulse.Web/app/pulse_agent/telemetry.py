@@ -77,7 +77,7 @@ def _telemetry_cameras(raw: dict) -> dict:
     if not isinstance(nics, dict) or nics.get("error"):
         return out
     probes = raw.get("probe_results") or {}
-    ports = engine._enrich_ports(nics, raw.get("pixellot_config"), probes)
+    ports = engine._enrich_ports(nics, probes)
     engine._flag_uplink_ports(ports, raw.get("network_config"))
     out["detected"] = engine._count_main_cameras(ports, probes)
     for p in ports:
@@ -191,9 +191,9 @@ def _telemetry_scoreboard(raw: dict) -> Optional[dict]:
     nics = raw.get("nics")
     ocr = "unknown"
     if isinstance(nics, dict) and not nics.get("error"):
-        ports = engine._enrich_ports(nics, raw.get("pixellot_config"), raw.get("probe_results") or {})
+        ports = engine._enrich_ports(nics, raw.get("probe_results") or {})
         engine._flag_uplink_ports(ports, raw.get("network_config"))
-        ocr = engine._scoreboard_camera_state(ports, raw.get("pixellot_config"))
+        ocr = engine._scoreboard_camera_state(ports)
     if sc is None and ocr == "unknown":
         return None
     src = engine._scoreboard_source(sc, ocr)
@@ -213,23 +213,13 @@ def _telemetry_scoreboard(raw: dict) -> Optional[dict]:
         sport = (sc.get("configuration") or {}).get("sport") if isinstance(sc.get("configuration"), dict) else None
         if sport:
             out["sport"] = str(sport)[:80]
-    out["ocr"] = _telemetry_scoreboard_ocr(ocr, src, raw.get("pixellot_config"))
+    # v1's OCR block describes configuration, which detection cannot establish.
+    # Keep that unknown rather than redefining configured as connected. The
+    # additive detection field distinguishes no camera seen from a failed read.
+    out["ocr"] = None
+    out["ocrDetected"] = bool(ocr) if src["ocrKnown"] else None
     out["scoreConnect"] = _telemetry_scoreconnect(sc)
     return out
-
-
-def _telemetry_scoreboard_ocr(ocr, src: dict, pixellot_config) -> Optional[dict]:
-    """PV-59: the OCR camera half of the source. None when the camera state
-    couldn't be read: the NICs failed, or Get-PixellotConfig did, which would
-    otherwise read as "no OCR entry in cameras.cfg" (never `configured: false`
-    by default). A read that found no OCR camera is a real answer.
-    `configured` is cameras.cfg's OCR role; an OCR camera seen live without
-    one makes `source` "ocr" with `configured` false. `issue` is the OCR
-    problem only, so it stays null when ScoreConnect is the source."""
-    if ocr == "unknown" or not isinstance(pixellot_config, dict) or pixellot_config.get("error"):
-        return None
-    return {"configured": bool(isinstance(ocr, dict) and ocr.get("configured")),
-            "issue": src.get("issue") if src.get("source") == "ocr" else None}
 
 
 def _tel_str(v) -> Optional[str]:
@@ -904,6 +894,19 @@ def _fit_telemetry(t: dict) -> dict:
     return t
 
 
+_RUNNER_VERSION_RE = re.compile(r"^[0-9A-Za-z.\-]{1,16}$")
+
+
+def _runner_version() -> Optional[str]:
+    """The agent runner's own version (runner.RUNNER_VERSION), which the
+    runner passes to each tick. An update never replaces the runner, so this
+    shows which units need enrolling again for a runner fix. None: run by a
+    runner from before PV-85's review fixes, or not by the runner at all."""
+    import os
+    v = os.environ.get("PULSE_RUNNER_VERSION") or ""
+    return v if _RUNNER_VERSION_RE.match(v) else None
+
+
 def _build_telemetry(dashboard: dict, raw: dict, status_since: Optional[str] = None,
                      status: Optional[str] = None, open_codes=None) -> dict:
     """The utilitarian payload. Fail-soft: a collector that errored leaves its
@@ -944,6 +947,7 @@ def _build_telemetry(dashboard: dict, raw: dict, status_since: Optional[str] = N
         "blockers":        [b.get("title") for b in blockers][:10],
         "checkedAt":       verdict.get("timestamp"),
         "pixellotVersion": ident.get("pixellotVersion"),
+        "runnerVersion":   _runner_version(),
         "network": {
             "internetReachable": net.get("internetReachable"),
             "streamingPath":     _telemetry_streaming_path(port_tests),
