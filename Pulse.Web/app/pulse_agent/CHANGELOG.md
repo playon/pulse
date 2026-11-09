@@ -17,6 +17,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- New camera findings. `camera-port-on-network` (risk): a linked camera port with no camera whose MAC shows up in another VPU port's ARP table, so its cable runs to a switch or the venue network. `camera-ip-mismatch` (blocker): Pixellot's configured main-camera addresses (`/CAMERA_n/UID` in the Coordinator log) are on no /24 of a camera port set up on Pixellot's .100-.103 pattern, and no camera answered. `camera-ip-mismatch-ocr` (risk) is the same for the OCR camera only (`/PIP/CAMERA_URL`). `camera-ip-mismatch-unconfirmed` (risk) replaces the blocker when camera ports are on a switch: the cabling is the fix, and the addresses can only be judged once the cameras are connected. `Get-CameraExpectations` now also reads the configured camera addresses, and `Get-NetworkConfig` reports those ARP sightings. No telemetry fields changed; `cameras.ports[].state` keeps its existing values. Field case: Watertown (TN) Main Gym, 2026-11-09.
+
 ### Changed
 - Cameras no longer depend on the retired camera-config file. Scoreboard source is detection-only: a connected OCR camera makes ScoreConnect optional; otherwise ScoreConnect is checked, with no configured-but-disconnected OCR warning (including Pulse's startup and ScoreConnect views). In `pulse.telemetry/v1`, `scoreboard.ocr` stays present as null because OCR configuration is unknown; new optional `scoreboard.ocrDetected` is true/false for a successful camera read and null when it failed. Existing configuration fields are not redefined as detection.
 - Readiness now blocks NVIDIA drivers older than 536.67 (`gpu-driver-old`) and repeated VPU software crashes (`vpu-restart-loop`); a proven clean run after recent crashes stays a risk (`vpu-restarts-recent`). The monitor reads the same recent VPU log sessions as Diagnostics. No telemetry fields changed.

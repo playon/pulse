@@ -3325,8 +3325,17 @@ def _compute_findings(identity, performance, services, nics, hardware=None, inst
         if known or not (identity or {}).get("isNonVpuHost"):
             enriched_ports = _enrich_ports(nics, probe_results)
             _flag_uplink_ports(enriched_ports, network_config)
+            ip_mismatch = _camera_ip_mismatch_finding(
+                enriched_ports, network_config, expectations)
             findings.extend(_camera_count_findings(
-                enriched_ports, expected_main, probe_results, probes_attempted))
+                enriched_ports, expected_main, probe_results, probes_attempted,
+                ip_mismatch=_is_blocking_ip_mismatch(ip_mismatch)))
+            # Wiring and addressing causes for missing cameras (Watertown TN,
+            # 2026-11-09): ports patched into a switch / the venue network,
+            # and camera addresses that don't match the camera ports.
+            for f in (_camera_port_network_finding(enriched_ports), ip_mismatch):
+                if f:
+                    findings.append(f)
 
     # Deduplicate by (category, title) — separate checks shouldn't produce
     # the same finding twice on the dashboard.
@@ -3380,6 +3389,10 @@ _READINESS_POLICY = {
                                          #     (S2 = 2, S1 = 4) can't stitch its picture
                                          #     with a camera missing, so it won't stream.
                                          #     Was "risk" until Archer GA (PXLS2_15488).
+    "camera-ip-mismatch":    "blocker",  # Pixellot's main-camera addresses are on no
+                                         #     camera port's /24 (ports on Pixellot's
+                                         #     .100-.103 pattern) and none answered.
+                                         #     Watertown TN, 2026-11-09.
     "gpu-none":              "blocker",  # F5  no NVIDIA GPU — encoder can't run
     "gpu-igpu-only":         "blocker",  # F11 Intel iGPU only — wrong hardware
     "vpu-restart-loop":      "blocker",  # VPU.exe session logs confirm repeated crashes.
@@ -3430,6 +3443,15 @@ _READINESS_POLICY = {
     "vpu-restarts-recent":   "risk",     # Recent crashes, clean run since; re-check.
     "pixellot-over-cap":     "risk",     # F10 build newer than GPU/OS supports
     "gpu-anomaly":           "risk",     # F12 Volta / roster anomaly
+    "camera-port-on-network": "risk",    # camera port patched into a switch / the venue
+                                         #     network (its MAC heard on another VPU port).
+                                         #     cam-none is the blocker when no camera is
+                                         #     left. Watertown TN, 2026-11-09.
+    "camera-ip-mismatch-ocr": "risk",    # only the OCR camera's address mismatches:
+                                         #     broadcast runs, its scorebug source doesn't.
+    "camera-ip-mismatch-unconfirmed": "risk",  # mismatch, but the camera ports are on a
+                                         #     switch: cabling is the fix, re-running camera
+                                         #     setup changes nothing yet (Ian, 2026-11-09).
     "uplink-on-camera-port": "risk",     # internet cable on the camera card. Had no
                                          #     code until 2026-09-22, so it defaulted to
                                          #     info and Copy for ticket pasted a critical
@@ -4028,35 +4050,271 @@ def _flag_uplink_ports(ports: list, network_config) -> None:
     (formats differ: 'AA-BB' vs 'aa:bb'), falling back to adapter name.
     Re-gated on the port's live link state so the callout clears within a
     poll or two of the cable being moved, even while the (25s-cached)
-    network-config copy still shows the old gateway. Mutates in place."""
+    network-config copy still shows the old gateway. Mutates in place.
+    Also marks ports patched into a shared network (_flag_shared_network_ports),
+    so every caller gets both wiring flags from one call."""
     misplaced = _misplaced_camera_uplinks(network_config)
-    if not misplaced:
+    if misplaced:
+        by_mac = {}
+        by_name = {}
+        for a, gw in misplaced:
+            mac = _mac_hex(a.get("macAddress") or a.get("mac"))
+            if mac:
+                by_mac[mac] = gw
+            for n in (a.get("name"), a.get("interfaceAlias")):
+                if n:
+                    by_name[str(n).strip().lower()] = gw
+
+        for p in ports:
+            if not p.get("isUp"):
+                continue
+            gw = by_mac.get(_mac_hex(p.get("mac")))
+            if gw is None:
+                gw = by_name.get(str(p.get("name") or "").strip().lower())
+            if gw is not None:
+                p["hasInternetUplink"] = True
+                p["uplinkGateway"] = gw
+    _flag_shared_network_ports(ports, network_config)
+
+
+def _mac_hex(m) -> str:
+    """MAC as bare uppercase hex: 'aa-bb-..' and 'AA:BB:..' compare equal."""
+    return str(m or "").upper().replace("-", "").replace(":", "")
+
+
+def _flag_shared_network_ports(ports: list, network_config) -> None:
+    """Mark linked camera ports whose cable runs to a network, not a camera.
+
+    Signal: Get-NetworkConfig's selfNeighborSightings, this VPU's own adapter
+    MACs listed in ANOTHER of its interfaces' neighbour (ARP) tables. Windows
+    only learns a neighbour from traffic it receives, so a camera port heard on
+    the motherboard port shares the venue network with it. A camera port is a
+    point-to-point link to one camera, so that's a patching fault. Field case:
+    Watertown (TN) Main Gym, 2026-11-09. Ports 2-4 linked at 1 Gbps with no
+    camera, all three port MACs in the motherboard port's ARP table, and the
+    links stayed up with PoE switched off.
+
+    Gated on link up, no internet uplink (its own finding) and no Pixellot
+    camera on the port: a re-patched port can leave a stale sighting in the
+    ARP cache for a while, and a camera answering proves the port is fine.
+    Sets onSharedNetwork / sharedNetworkSeenOn / sharedNetworkIsVenue."""
+    if not network_config or network_config.get("error"):
         return
-
-    def _norm_mac(m):
-        return str(m or "").upper().replace("-", "").replace(":", "")
-
-    by_mac = {}
-    by_name = {}
-    for a, gw in misplaced:
-        mac = _norm_mac(a.get("macAddress") or a.get("mac"))
-        if mac:
-            by_mac[mac] = gw
-        for n in (a.get("name"), a.get("interfaceAlias")):
-            if n:
-                by_name[str(n).strip().lower()] = gw
-
-    for p in ports:
-        if not p.get("isUp"):
+    sightings = network_config.get("selfNeighborSightings") or []
+    if not isinstance(sightings, list) or not sightings:
+        return
+    _classify_network_adapters(network_config)
+    by_idx = {a.get("interfaceIndex"): a for a in network_config.get("adapters") or []}
+    heard = {}  # camera-port MAC -> [(where alias, role)]
+    for s in sightings:
+        if not isinstance(s, dict):
             continue
-        gw = by_mac.get(_norm_mac(p.get("mac")))
-        if gw is None:
-            gw = by_name.get(str(p.get("name") or "").strip().lower())
-        if gw is not None:
-            p["hasInternetUplink"] = True
-            p["uplinkGateway"] = gw
+        where = by_idx.get(s.get("seenOnInterfaceIndex")) or {}
+        alias = s.get("seenOnInterfaceAlias") or where.get("name") or "another port"
+        heard.setdefault(_mac_hex(s.get("mac")), []).append((alias, where.get("role")))
+    for p in ports:
+        if not p.get("isUp") or p.get("hasInternetUplink") or p.get("camerasDetected"):
+            continue
+        hits = heard.get(_mac_hex(p.get("mac")))
+        if not hits:
+            continue
+        venue = [h for h in hits if h[1] in ("motherboard", "wifi")]
+        p["onSharedNetwork"] = True
+        p["sharedNetworkSeenOn"] = (venue or hits)[0][0]
+        p["sharedNetworkIsVenue"] = bool(venue)
 
 
+def _join_names(names) -> str:
+    """'Port 2', 'Port 2 and Port 3', 'Port 2, Port 3 and Port 4'."""
+    names = [n for n in names if n]
+    if len(names) <= 1:
+        return "".join(names)
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def _camera_port_network_finding(ports, poe=None) -> Optional[dict]:
+    """Critical when a linked camera port is patched into a network instead
+    of a camera (see _flag_shared_network_ports). Readiness: risk, like the
+    internet-cable-in-a-camera-port finding; the missing-camera finding is
+    the blocker when no camera is left.
+
+    `poe` (Get-PoePower, Camera tab only) adds corroboration: a switch powers
+    itself, so a linked port drawing no PoE power fits a switch on the other
+    end, where a camera would draw 4-7 W from the card. Only stated, never
+    required: Pixellot also switches PoE off after its camera tests fail."""
+    flagged = [p for p in ports or [] if p.get("onSharedNetwork")]
+    if not flagged:
+        return None
+    unpowered = set()
+    if isinstance(poe, dict) and poe.get("available") is not False:
+        for r in poe.get("ports") or []:
+            if isinstance(r, dict) and r.get("readOk") is not False and r.get("poeOn") is False:
+                unpowered.add(f"Port {r.get('port')}")
+    one = len(flagged) == 1
+    names = _join_names([p.get("portLabel") or p.get("name") for p in flagged])
+    venue = any(p.get("sharedNetworkIsVenue") for p in flagged)
+    where = "the venue network" if venue else "a network switch"
+    heard_on = sorted({p.get("sharedNetworkSeenOn") or "another port" for p in flagged})
+    how = ("The VPU can hear " + ("it" if one else "them") + " on its own internet connection"
+           if venue else "The camera ports can hear each other")
+    return {
+        "code": "camera-port-on-network",
+        "severity": "critical",
+        "category": "Camera",
+        "title": f"{names} {'is' if one else 'are'} plugged into {where}, not a camera",
+        "recommendation": (
+            f"{names} {'is' if one else 'are'} linked, but to {where} instead of a camera, "
+            f"so no camera can be reached there. {how}, which only happens when the cables "
+            f"meet at a network switch. Have someone trace {'that cable' if one else 'those cables'} "
+            f"and connect {'it' if one else 'them'} back to the camera head."
+        ),
+        "details": [
+            f"{p.get('portLabel') or 'Port'} ({p.get('name') or '?'}): heard on "
+            f"{p.get('sharedNetworkSeenOn') or 'another port'}"
+            + (", linked but drawing no PoE power" if p.get("portLabel") in unpowered else "")
+            for p in flagged
+        ],
+        "evidence": (
+            "Windows lists this VPU's own camera-port hardware addresses (MACs) in the "
+            f"network-neighbour (ARP) table of {_join_names(heard_on)}. Windows only adds a "
+            "neighbour it has received traffic from, so those ports share a network. A camera "
+            "port connects to one camera and nothing else."
+            + (" The camera card reports no PoE power on these linked ports: a switch powers "
+               "itself, while a camera would draw its power from the card."
+               if any(p.get("portLabel") in unpowered for p in flagged) else "")
+        ),
+    }
+
+
+
+def _ipv4_octets(ip) -> Optional[tuple]:
+    try:
+        parts = tuple(int(o) for o in str(ip).strip().split("."))
+    except (TypeError, ValueError):
+        return None
+    if len(parts) != 4 or any(o < 0 or o > 255 for o in parts):
+        return None
+    return parts
+
+
+def _camera_ip_mismatch_finding(ports, network_config, expectations) -> Optional[dict]:
+    """Pixellot's configured camera addresses vs the camera ports' own.
+
+    When Pixellot sets a camera port up it gives it a fixed address ending in
+    .100-.103 on the same /24 as its camera's .50-.53: the current layout is
+    ports 169.254.16.100-103 with cameras 169.254.16.50-53; older units used
+    one subnet per port (port 169.254.71.100, camera 169.254.71.50). A
+    configured camera address on a /24 that none of those ports is on means
+    the config and the ports come from two different setups. Field case:
+    Watertown (TN) Main Gym, 2026-11-09. Config on 169.254.16.50/.51/.52,
+    ports on 169.254.71/72/73.100, the cloud's last record of the cameras on
+    71.50 / 72.50.
+
+    Only ports that follow the .100-.103 convention count. VPU2 runs with
+    random link-local port addresses (169.254.243.153/16 and so on) and
+    still reaches its camera at 169.254.16.51 over the /16, so a port
+    address outside the convention says nothing about the setup. The masks
+    can't decide it either: both units carry 255.255.0.0 on every port.
+
+    Skipped for any camera Pulse actually saw at its configured address (a
+    camera answering wins over the rule), and when the configured addresses
+    or conventional port addresses are unknown.
+
+    Codes: `camera-ip-mismatch` (blocker) for main cameras;
+    `camera-ip-mismatch-ocr` (risk) for the OCR camera only; and
+    `camera-ip-mismatch-unconfirmed` (risk) when camera ports are patched
+    into a switch (_flag_shared_network_ports). Then the cameras aren't on
+    those ports at all, so re-running camera setup changes nothing tonight:
+    the cabling is the fix, and the addresses can only be judged once the
+    cameras are connected (Ian, Watertown, 2026-11-09)."""
+    if not expectations or expectations.get("error"):
+        return None
+    configured = expectations.get("configuredCameras") or []
+    if not isinstance(configured, list) or not configured:
+        return None
+    if not network_config or network_config.get("error"):
+        return None
+    _classify_network_adapters(network_config)
+
+    label_by_name = {str(p.get("name") or "").strip().lower(): p.get("portLabel")
+                     for p in ports or []}
+    ip_by_idx = {c.get("interfaceIndex"): c for c in network_config.get("ipConfigurations") or []}
+    port_addrs = []  # (label, ip)
+    for a in network_config.get("adapters") or []:
+        name = str(a.get("name") or "").strip()
+        if a.get("role") != "camera" and name.lower() not in label_by_name:
+            continue
+        raw = (ip_by_idx.get(a.get("interfaceIndex")) or {}).get("ipv4Address")
+        for ip in (raw if isinstance(raw, list) else [raw]):
+            oct_ = _ipv4_octets(ip)
+            if oct_ and 100 <= oct_[3] <= 103:
+                port_addrs.append((label_by_name.get(name.lower()) or name, ip))
+    if not port_addrs:
+        return None
+    port_nets = {_ipv4_octets(ip)[:3] for _, ip in port_addrs}
+
+    seen_ips = {str(c.get("ip") or "").strip()
+                for p in ports or [] if p.get("isUp")
+                for c in p.get("camerasDetected") or []}
+    mismatched = []
+    for c in configured:
+        if not isinstance(c, dict):
+            continue
+        oct_ = _ipv4_octets(c.get("ip"))
+        if not oct_ or c.get("ip") in seen_ips or oct_[:3] in port_nets:
+            continue
+        mismatched.append(c)
+    if not mismatched:
+        return None
+
+    def _who(c):
+        if c.get("role") == "ocr":
+            return "Scoreboard camera"
+        return f"Main camera {int(c.get('index') or 0) + 1}"
+
+    mains = [c for c in mismatched if c.get("role") != "ocr"]
+    on_switch = any(p.get("onSharedNetwork") for p in ports or [])
+    if on_switch:
+        code, severity = "camera-ip-mismatch-unconfirmed", "warning"
+        rec = ("Pixellot's camera addresses don't match how the camera ports are set up, but the "
+               "camera ports are plugged into a network switch, so the cameras aren't on them yet "
+               "and re-running camera setup won't help tonight. Fix the camera cabling first. If the "
+               "cameras still don't answer once they're plugged straight into the camera card, "
+               "escalate to Pixellot support to re-run camera setup.")
+    elif mains:
+        code, severity = "camera-ip-mismatch", "critical"
+        rec = ("Pixellot is looking for the cameras at addresses that don't match how the camera "
+               "ports are set up, and no camera answered there. Escalate to Pixellot support to "
+               "re-run camera setup so the camera addresses and the camera-port addresses match. "
+               "Don't change the addresses by hand.")
+    else:
+        code, severity = "camera-ip-mismatch-ocr", "warning"
+        rec = ("Pixellot is looking for the scoreboard camera at an address that doesn't match how "
+               "the camera ports are set up, and it didn't answer there. Escalate to Pixellot "
+               "support to re-run camera setup so the addresses match. Don't change the addresses "
+               "by hand.")
+    return {
+        "code": code,
+        "severity": severity,
+        "category": "Camera",
+        "title": ("Pixellot's camera addresses don't match the camera ports" if mains
+                  else "Pixellot's scoreboard camera address doesn't match the camera ports"),
+        "recommendation": rec,
+        "details": [
+            f"{_who(c)}: set to {c.get('ip')}, no camera port on "
+            f"{'.'.join(str(o) for o in _ipv4_octets(c.get('ip'))[:3])}.x"
+            for c in mismatched
+        ] + ["Camera ports: " + ", ".join(f"{label} {ip}" for label, ip in port_addrs)],
+        "evidence": (
+            "The camera addresses are Pixellot's settings in the Coordinator log "
+            "(/CAMERA_n/UID and /PIP/CAMERA_URL). The port addresses are each camera port's own "
+            "fixed address in Windows. Pixellot gives a camera port an address ending in .100 to "
+            ".103 on the same first three numbers as its camera (.50 to .53), so these settings "
+            "and these ports come from two different setups. No camera answered at the configured "
+            "addresses; Pixellot's own camera test reports that as \"Camera direct communication "
+            "failed\"."
+        ),
+    }
 
 # Why the zero-camera finding used to miss: a unit whose only linked camera
 # port carried the venue's internet cable (North East (MD) Gym, 2026-09-22,
@@ -4136,10 +4394,17 @@ def _scoreboard_camera_state(ports):
     }
 
 
-def _camera_count_findings(ports, expected_main, probe_results, probes_attempted) -> list:
+def _is_blocking_ip_mismatch(f) -> bool:
+    return bool(f) and f.get("code") == "camera-ip-mismatch"
+
+
+def _camera_count_findings(ports, expected_main, probe_results, probes_attempted,
+                           ip_mismatch=False) -> list:
     """cam-none / cam-partial, or cam-count-pending while a cold start makes
     zero ambiguous. `ports` are enriched and uplink-flagged. Returns a list
-    so both callers can extend with it."""
+    so both callers can extend with it. `ip_mismatch` (a blocking
+    camera-ip-mismatch) swaps the check-the-cables advice for the real
+    cause. A port on a switch wins over it: cabling is fixed first."""
     if not ports and not (isinstance(expected_main, int) and expected_main > 0):
         # No camera card and no configured count: a non-VPU host, or a card
         # that isn't on the bus (its own finding). Nothing to count against.
@@ -4151,8 +4416,11 @@ def _camera_count_findings(ports, expected_main, probe_results, probes_attempted
 
     # A port carrying the venue's internet cable is not a camera port: its
     # link proves nothing about cameras, and anything on it is the venue LAN.
-    cam_ports = [p for p in ports if not p.get("hasInternetUplink")]
+    # Same for a port patched into a network switch (_flag_shared_network_ports).
+    cam_ports = [p for p in ports
+                 if not p.get("hasInternetUplink") and not p.get("onSharedNetwork")]
     uplinks = [p for p in ports if p.get("hasInternetUplink")]
+    on_network = [p for p in ports if p.get("onSharedNetwork")]
 
     detected_main = _count_main_cameras(ports, probe_results)
     if detected_main >= expected:
@@ -4190,6 +4458,8 @@ def _camera_count_findings(ports, expected_main, probe_results, probes_attempted
             state = f"internet cable (gateway {p.get('uplinkGateway')}), not a camera"
         elif not p.get("isUp"):
             state = "no link"
+        elif p.get("onSharedNetwork"):
+            state = "linked to a network, not a camera"
         elif p.get("isOcr"):
             state = "scoreboard camera"
         elif p.get("camerasDetected"):
@@ -4202,6 +4472,23 @@ def _camera_count_findings(ports, expected_main, probe_results, probes_attempted
         names = ", ".join(p.get("portLabel") or "a camera port" for p in uplinks)
         uplink_note = (f" {names} {'is' if len(uplinks) == 1 else 'are'} carrying the "
                        f"internet cable instead of a camera.")
+    if on_network:
+        names = _join_names([p.get("portLabel") or "a camera port" for p in on_network])
+        uplink_note += (f" {names} {'is' if len(on_network) == 1 else 'are'} plugged into a "
+                        f"network switch instead of a camera.")
+    # The usual hands-on advice, unless Pulse already knows the cause.
+    if on_network:
+        none_fix = (" Trace the camera cables back to the camera head and plug them straight into "
+                    "the camera card; they shouldn't go through a switch.")
+        partial_fix = none_fix
+    elif ip_mismatch:
+        none_fix = (" The camera addresses Pixellot is set up for don't match the camera ports, "
+                    "so this needs Pixellot support; see that finding.")
+        partial_fix = none_fix
+    else:
+        none_fix = (" Check that the camera cables are seated in the camera card, the cameras have "
+                    "power, and they're in the right ports.")
+        partial_fix = " Check the missing port's cable, the camera's power, and the switch port."
     evidence = (
         "Pulse looked for Pixellot cameras in each camera-card port's network neighbours "
         "and queried the default camera addresses directly."
@@ -4218,9 +4505,7 @@ def _camera_count_findings(ports, expected_main, probe_results, probes_attempted
             "recommendation": (
                 (f"The VPU expects {expected_main} main camera{s_} but can't see any on the camera card, "
                  if known else "The VPU can't see any main cameras on the camera card, ")
-                + "so there's nothing to broadcast." + uplink_note
-                + " Check that the camera cables are seated in the camera card, the cameras have power, "
-                "and they're in the right ports."
+                + "so there's nothing to broadcast." + uplink_note + none_fix
             ),
             "details": details,
             "evidence": evidence + " No main camera answered.",
@@ -4235,7 +4520,7 @@ def _camera_count_findings(ports, expected_main, probe_results, probes_attempted
             f"{missing} main camera{'s are' if missing != 1 else ' is'} expected but not "
             f"connected. The VPU needs every main camera to build the picture, so it "
             f"won't stream until {'they are' if missing != 1 else 'it is'} back." + uplink_note
-            + " Check the missing port's cable, the camera's power, and the switch port."
+            + partial_fix
         ),
         "details": details,
         "evidence": evidence,
@@ -4975,12 +5260,17 @@ async def api_cameras(refresh: bool = False):
     probe_results = await _probe_all_cameras(raw_ports, block=refresh)
     ports = _enrich_ports(nics, probe_results, expected_main_cameras=expected_main)
     _flag_uplink_ports(ports, net_config)
+    ip_mismatch = _camera_ip_mismatch_finding(ports, net_config, expectations)
     # The camera tab renders `body`; the Dashboard's copy of this finding
     # uses `recommendation`. Same record either way.
     count_findings = [
         {**f, "body": f["recommendation"]}
-        for f in _camera_count_findings(ports, expected_main, probe_results, True)
+        for f in _camera_count_findings(ports, expected_main, probe_results, True,
+                                        ip_mismatch=_is_blocking_ip_mismatch(ip_mismatch))
         if f["code"] != CAM_COUNT_PENDING  # this tab re-polls every few seconds
+    ] + [
+        {**f, "body": f["recommendation"]}
+        for f in (_camera_port_network_finding(ports, poe), ip_mismatch) if f
     ]
     return {
         "ports": ports,
