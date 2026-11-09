@@ -216,6 +216,37 @@ try {
         catch { }
     }
 
+    # Self-sightings: one of this VPU's own adapter MACs listed in ANOTHER of
+    # its interfaces' neighbour (ARP) tables. Windows only learns a neighbour
+    # from frames it receives, so this means the two ports share one network.
+    # A camera port is a point-to-point link to one camera, so a camera port
+    # heard on the motherboard port means its cable is patched into the venue
+    # switch (Watertown TN, 2026-11-09: Ports 2-4 linked at 1 Gbps, no camera,
+    # all three port MACs in the motherboard port's ARP table). Python decides
+    # which sightings matter (roles live there); this just reports them.
+    $selfSightings = @()
+    try {
+        $macOwner = @{}
+        foreach ($a in $adapters) {
+            $m = ("$($a.macAddress)" -replace '[-:]', '').ToUpper()
+            if ($m -and $m -ne '000000000000') { $macOwner[$m] = $a.interfaceIndex }
+        }
+        Get-NetNeighbor -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object {
+            $m = ("$($_.LinkLayerAddress)" -replace '[-:]', '').ToUpper()
+            if ($selfSightings.Count -lt 32 -and $m -and $macOwner.ContainsKey($m) -and
+                $macOwner[$m] -ne $_.InterfaceIndex) {
+                $selfSightings += [ordered]@{
+                    mac                  = $m
+                    ip                   = $_.IPAddress
+                    seenOnInterfaceIndex = $_.InterfaceIndex
+                    seenOnInterfaceAlias = $_.InterfaceAlias
+                    state                = "$($_.State)"
+                }
+            }
+        }
+    }
+    catch { }
+
     $result = [ordered]@{
         adapters         = @($adapters)
         ipConfigurations = @($ipConfigs)
@@ -226,6 +257,7 @@ try {
             testedHost = $reachHost
         }
         ntpSource = $ntpSource
+        selfNeighborSightings = @($selfSightings)
     }
 
     $result | ConvertTo-Json -Depth 5 -Compress

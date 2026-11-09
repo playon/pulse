@@ -1442,6 +1442,13 @@ DEMO = {
         "expectedMainCameras": 2,
         "systemType": "S2",
         "vpuRunning": False,
+        # Pixellot's camera addresses from the Coordinator log. They match the
+        # cameras the demo ports see, so the address check stays quiet.
+        "configuredCameras": [
+            {"role": "main", "index": 0, "ip": "192.168.10.100"},
+            {"role": "main", "index": 1, "ip": "192.168.11.100"},
+            {"role": "ocr", "index": 0, "ip": "169.254.16.52"},
+        ],
     },
     # JAI S1 camera discovery. The demo box is a standard Dynacolor system,
     # so no S1 cameras — mirror what a non-S1 VPU returns (SDK absent).
@@ -2070,6 +2077,104 @@ def demo_cloud_events(venue_id, local_events):
         ],
         "generatedAt": now.isoformat(),
     }
+
+
+# Camera-port wiring scenario. PULSE_DEMO_CAMNET=watertown plays Watertown (TN)
+# Main Gym, 2026-11-09: Ports 2-4 linked at 1 Gbps with no camera, because the
+# camera cables were patched into the school network (all three camera-port
+# MACs in the motherboard port's ARP table) AND Pixellot's config pointed at
+# 169.254.16.50/.51/.52 while the ports sat on the old one-subnet-per-port
+# layout (169.254.71/72/73.100, mask 255.255.0.0). Expect cam-none (blocker),
+# camera-port-on-network and camera-ip-mismatch-unconfirmed (risks: the cabling
+# is the fix, re-running camera setup changes nothing yet), PoE at 0 W.
+# Unset = the healthy demo.
+def _demo_camnet_watertown():
+    import os
+    return os.environ.get("PULSE_DEMO_CAMNET", "").strip().lower() == "watertown"
+
+
+def _watertown_nics():
+    def port(n, mac, up, rx, tx):
+        return {"name": f"Ethernet {n}", "interfaceDescription": f"Intel(R) I210 Gigabit Network Connection #{n - 15}",
+                "status": "Up" if up else "Disconnected", "adminStatus": "Up", "driverStatus": "OK",
+                "mediaConnectionState": "Connected" if up else "Disconnected",
+                "linkSpeedMbps": 1000 if up else 0, "fullDuplex": up, "mac": mac,
+                "rxBytes": rx, "txBytes": tx, "rxErrors": 0, "txErrors": 0, "rxPacketErrors": 0,
+                "rxDiscards": 0, "txPacketErrors": 0, "txDiscards": 0, "arpEntries": []}
+    return {"ports": [
+        port(24, "00-30-64-65-8E-06", False, 0, 0),
+        port(25, "00-30-64-65-8E-07", True, 2706000000, 102100000),
+        port(26, "00-30-64-65-8E-08", True, 2770000000, 41200000),
+        port(27, "00-30-64-65-8E-09", True, 2770000000, 41200000),
+    ]}
+
+
+def _watertown_network_config():
+    cfg = DEMO["Get-NetworkConfig.ps1"].__wrapped_base__()
+    mobo = dict(cfg["adapters"][0], name="Ethernet", interfaceIndex=32, macAddress="9C-7B-EF-28-96-00")
+    cams = []
+    ips = []
+    for n, idx, mac, ip, bus in ((24, 24, "00-30-64-65-8E-06", None, 2),
+                                 (25, 25, "00-30-64-65-8E-07", "169.254.71.100", 3),
+                                 (26, 30, "00-30-64-65-8E-08", "169.254.72.100", 4),
+                                 (27, 33, "00-30-64-65-8E-09", "169.254.73.100", 5)):
+        cams.append({"name": f"Ethernet {n}", "interfaceDescription": "Intel(R) I210 Gigabit Network Connection",
+                     "status": "Up" if ip else "Disconnected", "adminStatus": "Up",
+                     "mediaConnectionState": "Connected" if ip else "Disconnected",
+                     "physicalMediaType": "802.3", "macAddress": mac, "linkSpeed": "1 Gbps" if ip else "",
+                     "interfaceIndex": idx, "pciBus": bus, "pciDevice": 0, "pciFunction": 0})
+        if ip:
+            ips.append({"interfaceAlias": f"Ethernet {n}", "interfaceIndex": idx, "ipv4Address": [ip],
+                        "ipv4DefaultGateway": [], "dnsServers": [], "dhcpEnabled": False, "prefixLength": 16})
+    wifi = [a for a in cfg["adapters"] if "802.11" in (a.get("physicalMediaType") or "")]
+    uplink = dict(cfg["ipConfigurations"][0], interfaceAlias="Ethernet", interfaceIndex=32)
+    cfg.update(
+        adapters=[mobo] + cams + wifi,
+        ipConfigurations=[uplink] + ips,
+        uplinkAdapter=dict(cfg["uplinkAdapter"], interfaceAlias="Ethernet", interfaceIndex=32),
+        selfNeighborSightings=[
+            {"mac": m, "ip": ip, "seenOnInterfaceIndex": 32, "seenOnInterfaceAlias": "Ethernet", "state": "Stale"}
+            for m, ip in (("003064658E07", "169.254.71.100"), ("003064658E08", "169.254.72.100"),
+                          ("003064658E09", "169.254.73.100"))
+        ],
+    )
+    return cfg
+
+
+def _watertown_expectations():
+    return {"expectedMainCameras": 2, "systemType": "S2", "vpuRunning": False, "configuredCameras": [
+        {"role": "main", "index": 0, "ip": "169.254.16.50"},
+        {"role": "main", "index": 1, "ip": "169.254.16.51"},
+        {"role": "ocr", "index": 0, "ip": "169.254.16.52"},
+    ]}
+
+
+def _camnet_override(script, scenario_fn):
+    base = DEMO[script]
+
+    def fn(**kw):
+        return scenario_fn() if _demo_camnet_watertown() else base(**kw)
+    fn.__wrapped_base__ = base
+    DEMO[script] = fn
+
+
+_camnet_override("Get-NicAdapters.ps1", _watertown_nics)
+_camnet_override("Get-NetworkConfig.ps1", _watertown_network_config)
+_camnet_override("Get-CameraExpectations.ps1", _watertown_expectations)
+
+
+def _watertown_poe():
+    # Linked ports drawing nothing: switches power themselves (the Pulse PoE
+    # card at Watertown read 0.0 W on every port).
+    poe = DEMO["Get-PoePower.ps1"].__wrapped_base__()
+    consumed = 0.0
+    for r in poe.get("ports") or []:
+        r.update(voltage=0.0, current=0.0, watts=0.0, poeOn=False, state="Off")
+    poe["budget"].update(consumedW=consumed, poeOnCount=0)
+    return poe
+
+
+_camnet_override("Get-PoePower.ps1", _watertown_poe)
 
 
 def get_demo(script_name, args=None):
