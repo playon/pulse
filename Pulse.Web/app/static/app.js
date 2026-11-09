@@ -3539,7 +3539,8 @@ var _dashRecheckTimer = null, _dashRecheckBusy = false, _dashLinkSig = null;
 // the camera-count finding, and nothing that flickers on every poll.
 function _camLinkSignature(ports) {
   return ports.map(function(p) {
-    return (p.isUp ? "U" : "D") + (p.hasInternetUplink ? "I" : "") + ((p.camerasDetected || []).length ? "C" : "");
+    return (p.isUp ? "U" : "D") + (p.hasInternetUplink ? "I" : "") + (p.onSharedNetwork ? "N" : "")
+      + ((p.camerasDetected || []).length ? "C" : "");
   }).join("|");
 }
 // Re-collect the Dashboard in the background and swap it in, without the
@@ -5971,7 +5972,7 @@ function _camSignature(data) {
     var errs = (p.rxPacketErrors || 0) + (p.txPacketErrors || 0) + (p.rxDiscards || 0) + (p.txDiscards || 0);
     return [p.portLabel, p.name, p.isUp, p.isOcr, p.isDegraded, p.connecting, p.cameraLabel,
             p.linkSpeedMbps, p.expectedSpeedMbps, p.fullDuplex, p.hasInternetUplink,
-            errs, cams].join("~");
+            p.onSharedNetwork, errs, cams].join("~");
   }).join("||");
   var findSig = ((data && data.findings) || []).map(function(f) {
     return f.severity + ":" + f.title;
@@ -6055,15 +6056,26 @@ function _camPortTile(port, index, ctx) {
       + (p.uplinkGateway ? ' (gateway ' + esc(p.uplinkGateway) + ')' : '')
       + '. Move this cable to the motherboard network port; the 4-port camera card is for cameras only.</span></div>'
     : '';
+  // A camera port the VPU also hears on another of its own ports (usually the
+  // motherboard port): its cable runs to a network switch, not a camera
+  // (Watertown TN, 2026-11-09). Same red treatment as the uplink callout.
+  var onNet = !hasUplink && !!p.onSharedNetwork;
+  var netWhere = p.sharedNetworkIsVenue ? "the venue network" : "a network switch";
+  var netNote = onNet
+    ? '<div class="cam-uplink-callout">' + svgIcon("alert", 12) + ' <span>Plugged into ' + netWhere
+      + ', not a camera. The VPU hears this port on ' + esc(p.sharedNetworkSeenOn || "another of its ports")
+      + '. Trace this cable back to the camera head.</span></div>'
+    : '';
   // Header carries only the port number + state pill, so the pill sits at the
   // same top-right spot on every tile; the (variable-width) role badge gets
   // its own row below and can never push the status onto a second line.
-  return `<div class="cam-port-tile ${!p.isUp ? "cam-port-down" : hasUplink ? "cam-port-uplink" : p.isDegraded ? "cam-port-degraded" : "cam-port-active"}">
+  return `<div class="cam-port-tile ${!p.isUp ? "cam-port-down" : (hasUplink || onNet) ? "cam-port-uplink" : p.isDegraded ? "cam-port-degraded" : "cam-port-active"}">
     <div class="cam-port-header">
       <span class="cam-port-num">Port ${index + 1}</span>
       <span class="cam-port-state">${badge(stateTxt, stateCls)}</span>
     </div>
     ${hasUplink ? '<div class="cam-port-role"><span class="badge-ol badge-ol-uplink">Internet Uplink</span></div>'
+      : onNet ? '<div class="cam-port-role"><span class="badge-ol badge-ol-uplink">' + (p.sharedNetworkIsVenue ? "Venue Network" : "Network Switch") + '</span></div>'
       : camLabel ? '<div class="cam-port-role"><span class="badge-ol ' + camLabelCls + '">' + esc(camLabel) + '</span></div>' : ''}
     <div class="cam-port-name">${esc(p.name)}</div>
     ${speedRow}
@@ -6087,9 +6099,9 @@ function _camPortTile(port, index, ctx) {
     })()
     : p.connecting ? '<div class="cam-connecting-note">' + svgIcon("refresh", 12) + ' Establishing link, waiting for camera…</div>'
     : !p.isUp ? _camDownGuidanceHtml(p, ctx)
-    : hasUplink ? ''
+    : (hasUplink || onNet) ? ''
     : '<div class="cam-no-detect">No Pixellot cameras on this port</div>'}
-    ${uplinkNote}
+    ${uplinkNote}${netNote}
   </div>`;
 }
 

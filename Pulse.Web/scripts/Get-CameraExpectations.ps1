@@ -17,7 +17,8 @@
     Adapted from Canopy getConnectedS1Cameras.ps1 / getFirmwareAndTvMode.ps1
     (which both read this same log key).
 .OUTPUTS
-    { expectedMainCameras: int|null, systemType: "S1"|"S2"|"S2S"|null }
+    { expectedMainCameras: int|null, systemType: "S1"|"S2"|"S2S"|null,
+      vpuRunning: bool, configuredCameras: [{ role: "main"|"ocr", index, ip }] }
 #>
 [CmdletBinding()]
 param()
@@ -28,6 +29,7 @@ $logDir = 'C:\Pixellot\Data\Log'
 
 try {
     $count = $null
+    $cameraIps = @{}
     if (Test-Path $logDir) {
         $coordLog = Get-ChildItem -Path $logDir -Filter 'coordinator*.log' -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -43,7 +45,35 @@ try {
                     $count = [int]$Matches[1]
                 }
             }
+
+            # The camera addresses Pixellot is set up to use, from the same
+            # log: "got for key /CAMERA_0/UID result: rtsp:////169.254.16.50/h264"
+            # (main cameras) and "/PIP/CAMERA_URL result: rtsp://..." (the OCR
+            # camera). Last line per key wins. Pulse compares these with the
+            # camera ports' own addresses (Watertown TN, 2026-11-09: config on
+            # 169.254.16.x, ports on 169.254.71-73.x).
+            $urlLines = & findstr /C:"/UID result:" /C:"/PIP/CAMERA_URL result:" $coordLog.FullName 2>$null
+            foreach ($ln in @($urlLines)) {
+                if ("$ln" -match 'key /(CAMERA_(\d+)/UID|PIP/CAMERA_URL) result:\s*\S*?(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})') {
+                    $key = if ($Matches[2]) { 'main' + $Matches[2] } else { 'ocr' }
+                    $cameraIps[$key] = $Matches[3]
+                }
+            }
         }
+    }
+
+    # Main cameras in index order (only the configured count when it is
+    # known), then the OCR camera. Walks fixed keys: no Sort-Object on a
+    # hashtable (5.1 rule 4).
+    $configured = @()
+    $mainLimit = if ($count) { $count } else { 8 }
+    for ($i = 0; $i -lt $mainLimit; $i++) {
+        if ($cameraIps.ContainsKey("main$i")) {
+            $configured += [ordered]@{ role = 'main'; index = $i; ip = $cameraIps["main$i"] }
+        }
+    }
+    if ($cameraIps.ContainsKey('ocr')) {
+        $configured += [ordered]@{ role = 'ocr'; index = 0; ip = $cameraIps['ocr'] }
     }
 
     $systemType = $null
@@ -66,7 +96,8 @@ try {
         expectedMainCameras = $count
         systemType          = $systemType
         vpuRunning          = $vpuRunning
-    } | ConvertTo-Json -Compress
+        configuredCameras   = @($configured)
+    } | ConvertTo-Json -Depth 4 -Compress
 }
 catch {
     [ordered]@{
