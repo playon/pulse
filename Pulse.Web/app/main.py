@@ -47,6 +47,7 @@ from powershell import (
 )
 import peer
 import cloud_api
+import gpu_job
 import software_review as _software_review
 from local_guard import LocalOnlyGuard
 
@@ -5658,20 +5659,46 @@ async def api_gpu_driver():
 
 @app.post("/api/gpu-driver/repair")
 async def api_gpu_driver_repair(request: Request):
-    """Installs Pixellot's approved NVIDIA driver when the card has no driver
-    or shows an error (see Repair-GpuDriver.ps1). A healthy card is refused
-    unless the body is {"reinstall": true}, which the Hardware tab sends only
-    after the technician confirms a warning. The ~1 GB download plus a clean
-    install can run past 20 minutes, so the timeout is generous and the call
-    blocks, like the disk repair tools. Never cached: a second click must
-    start a real run."""
+    """Starts Pixellot's approved NVIDIA driver install when the card has no
+    driver or shows an error (see Repair-GpuDriver.ps1). A healthy card is
+    refused unless the body is {"reinstall": true}, which the Hardware tab
+    sends only after the technician confirms a warning.
+
+    Returns at once: the install runs as its own process (gpu_job.py) and
+    reports through /api/gpu-driver/repair/status, because swapping the
+    driver can black the screen, crash the browser's GPU process and drop
+    LogMeIn, and a request held open for 20 minutes lost its result to any of
+    them. Refused with status 'already-running' while a run is live."""
     try:
         body = await request.json()
     except Exception:
         body = None
     reinstall = isinstance(body, dict) and body.get("reinstall") is True
-    args = {"Reinstall": 1} if reinstall else None
-    return await run_ps("Repair-GpuDriver.ps1", args=args, timeout=2700, use_cache=False)
+    kind = body.get("kind") if isinstance(body, dict) else None
+    return await asyncio.to_thread(gpu_job.start, kind if isinstance(kind, str) else "", reinstall)
+
+
+@app.get("/api/gpu-driver/repair/status")
+async def api_gpu_driver_repair_status():
+    """The running or last driver repair: stage, download bytes, steps,
+    heartbeat age, whether its process is alive, and its result once done.
+    Read straight from the status file (no PowerShell), so the modal can poll
+    it every couple of seconds."""
+    return await asyncio.to_thread(gpu_job.status)
+
+
+@app.post("/api/gpu-driver/repair/ack")
+async def api_gpu_driver_repair_ack(request: Request):
+    """The technician closed a finished repair's result, so the Hardware tab
+    stops reopening it on load."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    run_id = body.get("runId") if isinstance(body, dict) else None
+    if not isinstance(run_id, str) or not run_id:
+        return {"ok": False, "message": "runId is required."}
+    return await asyncio.to_thread(gpu_job.ack, run_id)
 
 
 @app.get("/api/disk-health")
@@ -7745,7 +7772,18 @@ async def _idle_shutdown():
     await asyncio.sleep(IDLE_SHUTDOWN_SECS)
     # Stay alive while a LAN receive listener is enabled — a peer may push a
     # report even with no browser tab open. Receiver turns it off to release us.
+    # Same while a graphics driver install runs: the browser can crash while
+    # the display driver swaps, and the result should be there when it's back.
     if not _ws_clients and _ever_had_client and not peer.is_receiving():
+        if await asyncio.to_thread(gpu_job.install_live):
+            ps_log("auto-shutdown", 0, "warn", "no clients, but a graphics driver install is running - staying up")
+            while await asyncio.to_thread(gpu_job.install_live):
+                await asyncio.sleep(30)
+            # A tab that came back while we waited cancels this task, so
+            # reaching here means nobody reconnected: give them the usual window.
+            await asyncio.sleep(IDLE_SHUTDOWN_SECS)
+            if _ws_clients or peer.is_receiving():
+                return
         ps_log("auto-shutdown", 0, "ok", f"no clients for {IDLE_SHUTDOWN_SECS}s")
         _self_sigint()
 
@@ -7919,6 +7957,15 @@ async def _lmi_session_watch():
             # stay up. The outer loop re-enters the grace cycle, so Pulse
             # still closes once the listener is released.
             msg = "grace expired but LAN receive listener is on - staying up"
+            ps_log("lmi-watch", 0, "warn", msg)
+            _server_log.warning(msg)
+            continue
+        if await asyncio.to_thread(gpu_job.install_live):
+            _lmi_shutdown_deadline = None
+            # Swapping the display driver can drop the LogMeIn session. Stay
+            # up so the tech who reconnects sees the result; the outer loop
+            # closes Pulse once the install has finished.
+            msg = "grace expired but a graphics driver install is running - staying up"
             ps_log("lmi-watch", 0, "warn", msg)
             _server_log.warning(msg)
             continue
