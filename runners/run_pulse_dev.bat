@@ -2,6 +2,34 @@
 setlocal EnableDelayedExpansion
 title Pulse  -  updating (dev)
 
+:: -- Windows 10 or newer only ---------------------------------------------
+::   Pulse needs Windows 10 or newer (the fleet image is Windows 10 LTSC).
+::   On Windows 8.1 and older the download cannot even be unpacked (that
+::   PowerShell has no Expand-Archive) and the checks need PowerShell 5.1,
+::   so stop here -- before the admin prompt, the Chrome install or any
+::   download -- and say why. `ver` prints "Microsoft Windows [Version
+::   6.3.9600]"; the last word inside the brackets is the version (the
+::   word "Version" is translated on some PCs). If it cannot be read, carry
+::   on rather than block a PC that may be fine.
+set "OS_NUM="
+set "OS_MAJOR="
+set "OS_MINOR="
+for /f "tokens=2 delims=[]" %%V in ('ver') do for %%N in (%%V) do set "OS_NUM=%%N"
+for /f "tokens=1,2 delims=." %%A in ("!OS_NUM!") do (
+    set "OS_MAJOR=%%A"
+    set "OS_MINOR=%%B"
+)
+if not defined OS_MAJOR goto :os_ok
+if !OS_MAJOR! GEQ 10 goto :os_ok
+set "OS_NAME=Windows !OS_NUM!"
+if "!OS_MAJOR!.!OS_MINOR!"=="6.3" set "OS_NAME=Windows 8.1"
+if "!OS_MAJOR!.!OS_MINOR!"=="6.2" set "OS_NAME=Windows 8"
+if "!OS_MAJOR!.!OS_MINOR!"=="6.1" set "OS_NAME=Windows 7"
+set "FAIL_WHY=This PC runs !OS_NAME!, and Pulse needs Windows 10 or newer."
+set "FAIL_DO=Nothing was installed or changed on this PC."
+goto :fatal
+:os_ok
+
 :: -- Run as Administrator -------------------------------------------------
 ::   Pulse's checks read HKLM, query WMI/CIM, and inspect Windows services
 ::   and the Pixellot install -- all most reliable with admin rights.

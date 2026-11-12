@@ -40,6 +40,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions track
 - The wrong-time-source finding no longer shows a command to run; it says to escalate to remote support.
 
 ### Fixed
+- On a PC running Windows 8.1 or older, the Pulse launcher now stops before installing anything and says Pulse needs Windows 10 or newer. Before, it downloaded Pulse and then failed with an "Expand-Archive is not recognized" error.
 - Camera Connectivity: an Intel I210 camera card is now labelled "ADLINK GIE74-series" instead of always "GIE74P". It had been calling GIE74 cards GIE74P, and without ADLINK's AVS software Pulse can't tell the two apart.
 - Camera Connectivity: when the PoE card won't report its power budget, the message no longer blames only the driver. It now says the card's PoE controller may not be responding, and tells you to check the card's Molex power lead first. If cameras still get no power after that, treat it as a card fault.
 - A slow onboard network port is no longer reported as "Network port N is running slow". Only the camera card's ports are checked for gigabit speed.
