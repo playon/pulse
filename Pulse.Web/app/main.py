@@ -7000,6 +7000,7 @@ _SUPERSEDED_PROD_LAUNCHERS = frozenset({
     "61f4faf1ed51c406c3dc4862374c140d3de260f4e95bef2f89ed81b50fcd1df4",  # 2026-07-30 270fc19
     "808df2bb0ed2d766326931a7bffa76103352c80f43d3e61c5bf40fd3fe7e3740",  # web-v1.2.3 - 1.3.3
     "5b4527376c39500e20b8c213d221d3352dd037865d10e269f4532a7485b040aa",  # 2026-10-02 #197 on main
+    "99f69be3e890057f904dbf2fcea801204cbb689a60ff4b945ba0382ed0f50902",  # web-v1.4.0 - 1.5.0
 })
 # Folders under each Windows profile where a downloaded launcher ends up.
 # Top level only: a launcher buried in a project folder is not the tech's icon.
